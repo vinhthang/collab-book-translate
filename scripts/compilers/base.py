@@ -273,6 +273,7 @@ class BaseCompiler(ABC):
                         "accepted",
                         "released-with-warning",
                         "completed",
+                        "done",
                     ):
                         continue
                 if not (ch_dir / "final.txt").is_file():
