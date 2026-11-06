@@ -55,6 +55,14 @@ This repository orchestrates end-to-end book translations from English (`en`) an
 - `scripts/`: Validation, ingestion, evaluation, and compilation tools.
 - `docs/specs/`: Formal specifications and architecture decisions.
 
+## Published Translations
+
+- **[A Scandal in Bohemia (*Vụ Bê Bối Ở Xứ Bohemia*)](https://github.com/vinhthang/collab-book-translate/releases/tag/scandal-in-bohemia-v1.0)** (v1.0):
+  - Author: Arthur Conan Doyle
+  - Deliverables: EPUB 3, PDF, DOCX
+  - Quality scores of record: 4.60 (ch01), 4.63 (ch02), 4.50 (ch03)
+  - Full audit trail: [`runs/scandal-in-bohemia/collab_ledger.json`](runs/scandal-in-bohemia/collab_ledger.json)
+
 ## How to Contribute
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed guidelines on:

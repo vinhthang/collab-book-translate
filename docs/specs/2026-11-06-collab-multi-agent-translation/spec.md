@@ -2,7 +2,7 @@
 
 - **Feature ID**: `2026-11-06-collab-multi-agent-translation`
 - **Type**: `enhancement`
-- **Status**: `In-Progress`
+- **Status**: `In-Testing`
 - **Version**: `1.2.0` (amends v1.1.0 per the Opus round-2 review, 2026-11-06; R2-P1-3 prompt-injection controls deferred to thang, who handles them himself)
 - **Sign-off**: `Approved by thang (Proceed, 2026-11-07)`
 - **Lineage**:

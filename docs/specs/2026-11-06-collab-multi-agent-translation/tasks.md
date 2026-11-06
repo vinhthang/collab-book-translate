@@ -1,7 +1,7 @@
 # Tasks: Collaborative Multi-Agent Book Translation on GitHub (v1.2.0)
 
 - **Feature ID**: `2026-11-06-collab-multi-agent-translation`
-- **Status**: `Planning`
+- **Status**: `In-Testing`
 - **Version**: `1.2.0`
 - **Gate 1**: PASS (re-run 2, see decisions.md)
 - **Gate 2**: See the traceability matrix below; it lives in this file, per the governing rule.
@@ -48,9 +48,9 @@ No task starts before human Proceed. Check a task only when its acceptance crite
 ## Phase 4 — Assembly, publication, docs
 
 - [x] T-401: Implement the completeness check (all chapters Done, segment counts matching) and block publication on failure. RED first: T-108. (REQ-COLLAB-010)
-- [ ] T-402: Run the pilot end to end on a short public-domain English novella (3–5 chapters, en→vi): submission + human licence approval, analyze + ch01 seed, ≥2 accounts translating in parallel, ≥1 competing PR, a non-author review, a REVISE round, select-best and merge, compile and release. The pilot verifies only the genuinely end-to-end ACs (AC-002-1, 003-1, 005-1, 006-1, 009-1, 010-1); every other code-backed AC is verified by its automated test. (REQ-COLLAB-010)
-- [ ] T-403: Update the repo README and `docs/specs/INDEX.md` status for this package when the pilot passes.
-- [ ] T-404: Mutation-guard (≥ 80% kill) on `scripts/collab_*.py` plus an independent code review, before the spec is marked `In-Testing`.
+- [x] T-402: Run the pilot end to end on a short public-domain English novella (3–5 chapters, en→vi): submission + human licence approval, analyze + ch01 seed, ≥2 accounts translating in parallel, ≥1 competing PR, a non-author review, a REVISE round, select-best and merge, compile and release. The pilot verifies only the genuinely end-to-end ACs (AC-002-1, 003-1, 005-1, 006-1, 009-1, 010-1); every other code-backed AC is verified by its automated test. (REQ-COLLAB-010)
+- [x] T-403: Update the repo README and `docs/specs/INDEX.md` status for this package when the pilot passes.
+- [x] T-404: Mutation-guard (≥ 80% kill) on `scripts/collab_*.py` plus an independent code review, before the spec is marked `In-Testing`.
 
 ## Gate 2 Traceability Matrix
 
