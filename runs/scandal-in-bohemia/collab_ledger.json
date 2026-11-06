@@ -30,6 +30,21 @@
       "verdict": "PASS",
       "merge_sha": "cc8e9b04173641926452ac99f58f70698dbfd5ff",
       "glossary_sha": "fdd5c7e2277992e46761003d876601d2dcd1afec"
+    },
+    "ch03": {
+      "chapter": "ch03",
+      "issue_number": 15,
+      "selected_pr": 18,
+      "rejected_prs": [],
+      "translator_login": "vinhthang",
+      "reviewer_logins": [
+        "1quachuoi9vang"
+      ],
+      "reviewer_score": 4.883333333333334,
+      "score_of_record": 4.5,
+      "verdict": "PASS",
+      "merge_sha": "121d6f92f170c6e79f747e065061ddf32c8eb62a",
+      "glossary_sha": "fdd5c7e2277992e46761003d876601d2dcd1afec"
     }
   }
 }
