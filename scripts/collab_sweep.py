@@ -237,6 +237,7 @@ def commit_and_push(root: Path, paths: List[Union[Path, str]], message: str, cli
             for p in paths:
                 subprocess.run(["git", "add", str(p)], cwd=str(root), check=True)
             subprocess.run(["git", "commit", "-m", message], cwd=str(root), check=True)
+            subprocess.run(["git", "pull", "--rebase", "origin", "main"], cwd=str(root), check=False)
             subprocess.run(["git", "push", "origin", "main"], cwd=str(root), check=True)
     except Exception as e:
         logger.warning("commit_and_push failed: %s", e)
@@ -413,7 +414,7 @@ class GitHubCLIClient:
     def merge_pr(self, pr_num: int) -> str:
         self._run_gh(["pr", "merge", str(pr_num), "--merge", "--auto=false"])
         try:
-            subprocess.run(["git", "pull", "--ff-only"], cwd=str(self.root), capture_output=True, check=False)
+            subprocess.run(["git", "pull", "--rebase", "origin", "main"], cwd=str(self.root), capture_output=True, check=False)
         except Exception:
             pass
         merge_sha = ""
