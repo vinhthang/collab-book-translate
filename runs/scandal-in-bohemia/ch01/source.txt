@@ -1,0 +1,23 @@
+<segment id="S-0001" type="heading">
+<original>
+# Chapter I
+</original>
+</segment>
+
+<segment id="S-0002" type="paragraph">
+<original>
+To Sherlock Holmes she is always the woman. I have seldom heard him mention her under any other name. In his eyes she eclipses and predominates the whole of her sex. It was not that he felt any emotion akin to love for Irene Adler. All emotions, and that one particularly, were abhorrent to his cold, precise but admirably balanced mind.
+</original>
+</segment>
+
+<segment id="S-0003" type="paragraph">
+<original>
+One night—it was on the twentieth of March, 1888—I was returning from a journey to a patient (for I had now returned to civil practice), when my way led me through Baker Street. As I passed the well-remembered door, which must always be associated in my mind with my wooing, and with the dark incidents of the Study in Scarlet, I was seized with a keen desire to see Holmes again, and to know how he was employing his extraordinary powers.
+</original>
+</segment>
+
+<segment id="S-0004" type="paragraph">
+<original>
+A slow and heavy step, which had been heard upon the stairs and in the passage, paused immediately outside the door. Then there was a loud and authoritative tap. "Come in!" said Holmes. A man entered who could hardly have been less than six feet six inches in height, with the chest and limbs of a Hercules. Looking from one to the other of us, he said: "You may address me as the Count Von Kramm, a Bohemian nobleman, though I speak to you on behalf of His Majesty the King of Bohemia."
+</original>
+</segment>

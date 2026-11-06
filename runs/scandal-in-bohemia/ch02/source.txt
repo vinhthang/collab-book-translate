@@ -1,0 +1,23 @@
+<segment id="S-0001" type="heading">
+<original>
+# Chapter II
+</original>
+</segment>
+
+<segment id="S-0002" type="paragraph">
+<original>
+"Five years ago," continued our visitor, "during a lengthy visit to Warsaw, I made the acquaintance of the well-known adventuress, Irene Adler. The name is no doubt familiar to you." "Kindly look her up in my index, Doctor," murmured Holmes without opening his eyes. For many years he had adopted a system of docketing all paragraphs concerning men and things, so that it was difficult to name a subject or a person on which he could not at once furnish information.
+</original>
+</segment>
+
+<segment id="S-0003" type="paragraph">
+<original>
+The next afternoon at five o'clock Sherlock Holmes returned to Baker Street dressed as a drunken-looking groom, ill-kempt and side-whiskered, with an inflamed face and disreputable clothes. "You see, Watson," he chuckled as he threw himself into an armchair, "I spent the whole morning around Briony Lodge in Serpentine Avenue. Not only did I learn every habit of the household, but by a stroke of luck I served as the compulsory witness at the sudden marriage of Miss Irene Adler to Mr. Godfrey Norton at the Church of St. Monica."
+</original>
+</segment>
+
+<segment id="S-0004" type="paragraph">
+<original>
+"Tonight at seven," said Holmes briskly, "you will accompany me to Briony Lodge. I shall wear the simple black frock-coat of an amiable Nonconformist clergyman. When I raise my hand and cry 'Fire!', you will throw this ordinary plumber's smoke-rocket through the open window and immediately walk to the corner of the street, where I shall rejoin you in ten minutes."
+</original>
+</segment>

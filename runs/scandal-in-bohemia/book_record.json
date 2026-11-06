@@ -1,0 +1,65 @@
+{
+  "book_slug": "scandal-in-bohemia",
+  "source_lang": "en",
+  "target_lang": "vi",
+  "genre": "literary",
+  "brief": {
+    "title_vi": "Vụ Bê Bối Ở Xứ Bohemia",
+    "author": "Arthur Conan Doyle",
+    "tone": "Văn phong trinh thám cổ điển thời Victoria (cuối thế kỷ 19): lịch lãm, điềm tĩnh, chuẩn mực, giàu sắc thái quan sát qua lời kể ngôi thứ nhất của Bác sĩ Watson.",
+    "pronoun_system": "Ngôi kể thứ nhất của Bác sĩ Watson ('tôi'). Holmes và Watson xưng hô với nhau là 'tôi' - 'anh'. Khách quý hoàng gia (Bá tước Von Kramm / Đức Vua xứ Bohemia) xưng 'ta' hoặc 'tôi' tùy ngữ cảnh trang trọng, gọi Holmes là 'ông' / 'ngài'."
+  },
+  "glossary": {
+    "Sherlock Holmes": "Sherlock Holmes",
+    "Irene Adler": "Irene Adler",
+    "Baker Street": "phố Baker",
+    "221B Baker Street": "số 221B phố Baker",
+    "A Study in Scarlet": "Cuộc Điều Tra Màu Đỏ",
+    "Study in Scarlet": "Cuộc Điều Tra Màu Đỏ",
+    "Count Von Kramm": "Bá tước Von Kramm",
+    "King of Bohemia": "Đức Vua xứ Bohemia",
+    "His Majesty the King": "Đức Vua",
+    "Bohemia": "xứ Bohemia"
+  },
+  "character_pronouns": [
+    {
+      "character_a": "Sherlock Holmes",
+      "character_b": "Dr. Watson",
+      "a_to_b": "tôi / anh",
+      "b_to_a": "tôi / anh"
+    }
+  ],
+  "terms": [
+    {
+      "source": "murder case",
+      "target": "vụ án mạng",
+      "match": "word",
+      "case_sensitive": false
+    },
+    {
+      "source": "investigation",
+      "target": "cuộc điều tra",
+      "match": "word",
+      "case_sensitive": false
+    }
+  ],
+  "book_record": {
+    "terms": [
+      {
+        "source": "murder case",
+        "target": "vụ án mạng",
+        "match": "word",
+        "case_sensitive": false
+      },
+      {
+        "source": "investigation",
+        "target": "cuộc điều tra",
+        "match": "word",
+        "case_sensitive": false
+      }
+    ],
+    "names": []
+  },
+  "names": [],
+  "glossary_sha": "fdd5c7e2277992e46761003d876601d2dcd1afec"
+}

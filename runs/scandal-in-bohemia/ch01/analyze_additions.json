@@ -1,0 +1,20 @@
+{
+  "chapter": "ch01",
+  "book_record_additions": {
+    "names": [],
+    "terms": [
+      {
+        "source": "murder case",
+        "target": "vụ án mạng",
+        "status": "bound"
+      },
+      {
+        "source": "investigation",
+        "target": "cuộc điều tra",
+        "status": "bound"
+      }
+    ],
+    "pronouns": []
+  },
+  "corrections": []
+}

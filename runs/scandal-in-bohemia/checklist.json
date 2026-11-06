@@ -1,0 +1,29 @@
+[
+  {
+    "chapter": "ch01",
+    "chapter_num": 1,
+    "title": "Chapter I",
+    "status": "done",
+    "round": 0,
+    "score": null,
+    "draft_exists": false
+  },
+  {
+    "chapter": "ch02",
+    "chapter_num": 2,
+    "title": "Chapter II",
+    "status": "pending",
+    "round": 0,
+    "score": null,
+    "draft_exists": false
+  },
+  {
+    "chapter": "ch03",
+    "chapter_num": 3,
+    "title": "Chapter III",
+    "status": "pending",
+    "round": 0,
+    "score": null,
+    "draft_exists": false
+  }
+]

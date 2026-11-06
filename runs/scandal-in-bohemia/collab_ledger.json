@@ -1,0 +1,18 @@
+{
+  "book_slug": "scandal-in-bohemia",
+  "chapters": {
+    "ch01": {
+      "chapter": "ch01",
+      "issue_number": 0,
+      "selected_pr": 0,
+      "rejected_prs": [],
+      "translator_login": "1quachuoi9vang",
+      "reviewer_logins": [],
+      "reviewer_score": 4.6,
+      "score_of_record": 4.6,
+      "verdict": "PASS",
+      "merge_sha": "fdd5c7e2277992e46761003d876601d2dcd1afec",
+      "glossary_sha": "fdd5c7e2277992e46761003d876601d2dcd1afec"
+    }
+  }
+}
