@@ -1,0 +1,16 @@
+{
+  "proposals": [
+    {
+      "source": "Briony Lodge",
+      "target": "Biệt thự Briony",
+      "status": "proposed",
+      "chapter": "ch02"
+    },
+    {
+      "source": "Church of St. Monica",
+      "target": "Nhà thờ Thánh Monica",
+      "status": "proposed",
+      "chapter": "ch02"
+    }
+  ]
+}
