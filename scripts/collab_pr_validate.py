@@ -68,7 +68,7 @@ def parse_pr_body(body: str) -> Dict[str, str]:
     if not body:
         return fields
 
-    line_pattern = re.compile(r"^\s*[-*]\s*\*\*([^:]+):\*\*\s*(.*)$")
+    line_pattern = re.compile(r"^\s*[-*]\s*\*\*([^*:]+)(?::\*\*|\*\*:?)\s*(.*)$")
     for line in body.splitlines():
         m = line_pattern.match(line)
         if m:
