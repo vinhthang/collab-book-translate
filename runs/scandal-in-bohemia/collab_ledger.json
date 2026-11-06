@@ -18,7 +18,9 @@
       "chapter": "ch02",
       "issue_number": 14,
       "selected_pr": 17,
-      "rejected_prs": [],
+      "rejected_prs": [
+        16
+      ],
       "translator_login": "1quachuoi9vang",
       "reviewer_logins": [
         "vinhthang"
