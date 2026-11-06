@@ -432,6 +432,8 @@ class GitHubCLIClient:
         return merge_sha
 
     def set_pr_labels(self, pr_num: int, add: List[str], remove: List[str]):
+        if not add and not remove:
+            return
         args = ["pr", "edit", str(pr_num)]
         if add:
             args.extend(["--add-label", ",".join(add)])
@@ -446,6 +448,8 @@ class GitHubCLIClient:
         self._run_gh(["issue", "close", str(issue_num)])
 
     def set_issue_labels(self, issue_num: int, add: List[str], remove: List[str]):
+        if not add and not remove:
+            return
         args = ["issue", "edit", str(issue_num)]
         if add:
             args.extend(["--add-label", ",".join(add)])
