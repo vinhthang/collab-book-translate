@@ -49,6 +49,12 @@ class TestCollabVerdict(unittest.TestCase):
         self.assertEqual(res["outcome"], "CANDIDATE")
         self.assertEqual(res["effective_threshold"], 3.5)
 
+        # Also verify root genre field
+        book_record_root = {"genre": "literary"}
+        res_root = compute_collab_verdict(eval_result, book_record=book_record_root)
+        self.assertEqual(res_root["outcome"], "CANDIDATE")
+        self.assertEqual(res_root["effective_threshold"], 3.5)
+
     def test_verdict_revise_minor_defects(self):
         eval_result = {
             "weighted_total": 3.3,

@@ -649,13 +649,16 @@ def resolve_pass_threshold(
 
     if isinstance(book_record, dict):
         brief = book_record.get("brief", {})
+        genre = ""
         if isinstance(brief, dict):
             genre = str(brief.get("genre", "")).lower()
-            if "non-fiction" in genre or "nonfiction" in genre or "technical" in genre:
-                return 4.0
-            literary_tokens = ("literary", "fiction", "novel", "tiểu thuyết", "văn học", "truyện")
-            if any(tok in genre for tok in literary_tokens):
-                return 3.5
+        if not genre and "genre" in book_record:
+            genre = str(book_record.get("genre", "")).lower()
+        if "non-fiction" in genre or "nonfiction" in genre or "technical" in genre:
+            return 4.0
+        literary_tokens = ("literary", "fiction", "novel", "tiểu thuyết", "văn học", "truyện")
+        if any(tok in genre for tok in literary_tokens):
+            return 3.5
 
     return 4.0
 
