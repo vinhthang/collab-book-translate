@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
+runs/**/*.epub
+runs/**/*.pdf
+runs/**/*.docx
+runs/**/.collab_sweep.lock
+runs/**/.*.lock
