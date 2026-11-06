@@ -1,0 +1,12 @@
+# Code Owners for Collaborative Multi-Agent Book Translation
+
+books/** @vinhthang
+scripts/** @vinhthang
+tests/** @vinhthang
+docs/** @vinhthang
+.github/** @vinhthang
+pyproject.toml @vinhthang
+
+# State and ledger files owned by bot and human approver
+runs/*/book_record.json @1quachuoi9vang @vinhthang
+runs/*/checklist.json @1quachuoi9vang @vinhthang

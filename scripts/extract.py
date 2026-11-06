@@ -190,5 +190,8 @@ def main():
     print(f"Extracted {len(results)} chapters successfully to {output_dir}")
 
 
+extract_book = extract_document
+
+
 if __name__ == "__main__":
     main()
