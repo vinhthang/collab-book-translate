@@ -861,7 +861,7 @@ def run_sweep(
             window_started_at: Optional[float] = None
             for c in issue.get("comments", []):
                 c_auth = _normalize_comment_author(c)
-                if c_auth and c_auth != bot_login:
+                if bot_login and c_auth and c_auth not in (bot_login, human_approver):
                     continue
                 body = c.get("body", "")
                 if "candidate_window_started_at:" in body:
@@ -900,7 +900,7 @@ def run_sweep(
                         if w_tot is None:
                             for c in pr.get("comments", []):
                                 c_auth = _normalize_comment_author(c)
-                                if c_auth and c_auth != bot_login:
+                                if bot_login and c_auth and c_auth not in (bot_login, human_approver):
                                     continue
                                 c_body = c.get("body", "")
                                 m_score = re.search(
