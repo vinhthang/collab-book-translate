@@ -316,7 +316,7 @@ def validate_review(
 
     # 4. Parse 6-Dimension Score Block
     score_pattern = re.compile(
-        r"(?i)\b(fidelity|fluency|terminology|register|structure|completeness)\s*:\*{0,2}\s*([0-9]+(?:\.[0-9]+)?)"
+        r"(?i)(?:\||\b)\s*\*?\*?(fidelity|fluency|terminology|register|structure|completeness)\*?\*?\s*(?::\*{0,2}|\|)\s*([0-9]+(?:\.[0-9]+)?)"
     )
     matches = score_pattern.findall(review_body)
     for dim_name, score_str in matches:
