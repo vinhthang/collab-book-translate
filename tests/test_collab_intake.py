@@ -8,9 +8,7 @@ import tempfile
 import unittest
 
 from scripts.collab_intake import (
-    ALLOWED_LICENSES,
     REQUIRED_MANIFEST_FIELDS,
-    SUPPORTED_PAIRS,
     format_prescreen_comment,
     validate_submission_pr,
 )
@@ -270,6 +268,105 @@ class TestCollabIntake(unittest.TestCase):
         )
         self.assertFalse(result["valid"])
         self.assertTrue(any("allowlist" in d.lower() or "outside" in d.lower() for d in result["defects"]))
+
+    def test_format_prescreen_comment_custom_human_approver(self):
+        result = {"valid": True, "defects": [], "slug": "test-slug"}
+        comment = format_prescreen_comment(result, self.valid_manifest_en, human_approver="custom_user")
+        self.assertIn("@custom_user", comment)
+        self.assertNotIn("@vinhthang", comment)
+
+    def test_validate_submission_pr_custom_licenses_and_pairs(self):
+        custom_manifest = self.valid_manifest_en.copy()
+        custom_manifest["license"] = "custom-license"
+        custom_manifest["source_lang"] = "ja"
+        custom_manifest["target_lang"] = "vi"
+
+        # Should fail with default config
+        res_fail = validate_submission_pr(
+            changed_files=self.valid_files,
+            manifest_data=custom_manifest,
+        )
+        self.assertFalse(res_fail["valid"])
+
+        # Should pass when custom allowed_licenses and supported_pairs are passed
+        res_pass = validate_submission_pr(
+            changed_files=self.valid_files,
+            manifest_data=custom_manifest,
+            allowed_licenses={"custom-license"},
+            supported_pairs={("ja", "vi")},
+            source_text_sample="これはテストです。",
+        )
+        self.assertTrue(res_pass["valid"])
+
+    def test_validate_submission_pr_max_bytes_explicit_not_overwritten(self):
+        with tempfile.NamedTemporaryFile(delete=False) as tf:
+            tf.write(b"a" * 200)
+            tf_path = tf.name
+        try:
+            # Explicit max_bytes=100 should reject 200 byte file
+            res = validate_submission_pr(
+                changed_files=self.valid_files,
+                manifest_data=self.valid_manifest_en,
+                source_file_path=tf_path,
+                max_bytes=100,
+            )
+            self.assertFalse(res["valid"])
+            self.assertTrue(any("exceeds limit (100 bytes" in d for d in res["defects"]))
+        finally:
+            if os.path.exists(tf_path):
+                os.remove(tf_path)
+
+    def test_validate_submission_pr_defaults_use_config_fields(self):
+        # When all 3 are None, defaults come from config
+        with tempfile.NamedTemporaryFile(delete=False) as tf:
+            tf.write(b"hello")
+            tf_path = tf.name
+        try:
+            res = validate_submission_pr(
+                changed_files=self.valid_files,
+                manifest_data=self.valid_manifest_en,
+                source_file_path=tf_path,
+                max_bytes=None,
+                allowed_licenses=None,
+                supported_pairs=None,
+            )
+            self.assertTrue(res["valid"])
+
+            # Test passing max_bytes only: allowed_licenses and supported_pairs still resolve from config
+            res_partial_mb = validate_submission_pr(
+                changed_files=self.valid_files,
+                manifest_data=self.valid_manifest_en,
+                source_file_path=tf_path,
+                max_bytes=1000,
+                allowed_licenses=None,
+                supported_pairs=None,
+            )
+            self.assertTrue(res_partial_mb["valid"])
+
+            # Test passing allowed_licenses only: max_bytes and supported_pairs resolve from config
+            res_partial_lic = validate_submission_pr(
+                changed_files=self.valid_files,
+                manifest_data=self.valid_manifest_en,
+                source_file_path=tf_path,
+                max_bytes=None,
+                allowed_licenses={"public-domain"},
+                supported_pairs=None,
+            )
+            self.assertTrue(res_partial_lic["valid"])
+
+            # Test passing supported_pairs only: max_bytes and allowed_licenses resolve from config
+            res_partial_pairs = validate_submission_pr(
+                changed_files=self.valid_files,
+                manifest_data=self.valid_manifest_en,
+                source_file_path=tf_path,
+                max_bytes=None,
+                allowed_licenses=None,
+                supported_pairs={("en", "vi")},
+            )
+            self.assertTrue(res_partial_pairs["valid"])
+        finally:
+            if os.path.exists(tf_path):
+                os.remove(tf_path)
 
 
 

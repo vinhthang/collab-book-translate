@@ -10,23 +10,11 @@ Implements REQ-COLLAB-001, REQ-COLLAB-002, REQ-COLLAB-007:
 
 import os
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
+from scripts.collab_config import load_collab_config
 from scripts.evaluators.fallback import VI_DIACRITICS
 from scripts.utils.language import detect_source_language
-
-ALLOWED_LICENSES: Tuple[str, ...] = (
-    "public-domain",
-    "CC0-1.0",
-    "CC-BY-4.0",
-    "CC-BY-SA-4.0",
-    "owner-permission",
-)
-
-SUPPORTED_PAIRS: Tuple[Tuple[str, str], ...] = (
-    ("en", "vi"),
-    ("zh", "vi"),
-)
 
 REQUIRED_MANIFEST_FIELDS: Tuple[str, ...] = (
     "slug",
@@ -39,16 +27,16 @@ REQUIRED_MANIFEST_FIELDS: Tuple[str, ...] = (
     "submitter",
 )
 
-DEFAULT_MAX_BYTES: int = 50 * 1024 * 1024  # 50 MB
-
 
 def validate_submission_pr(
     changed_files: List[str],
     manifest_data: Optional[Dict[str, Any]] = None,
     source_file_path: Optional[str] = None,
     source_text_sample: Optional[str] = None,
-    max_bytes: int = DEFAULT_MAX_BYTES,
+    max_bytes: Optional[int] = None,
     is_lfs_pointer: bool = False,
+    allowed_licenses: Optional[Union[Set[str], frozenset[str], Tuple[str, ...], List[str]]] = None,
+    supported_pairs: Optional[Union[Set[Tuple[str, str]], frozenset[Tuple[str, str]], Tuple[Tuple[str, str], ...], List[Tuple[str, str]]]] = None,
 ) -> Dict[str, Any]:
     """Validates a book submission PR according to REQ-COLLAB-001, 002, and 007.
 
@@ -59,6 +47,16 @@ def validate_submission_pr(
             "slug": str | None
         }
     """
+    cfg = None
+    if max_bytes is None:
+        cfg = load_collab_config()
+        max_bytes = cfg.max_source_bytes
+    if allowed_licenses is None:
+        cfg = cfg or load_collab_config()
+        allowed_licenses = cfg.allowed_licenses
+    if supported_pairs is None:
+        cfg = cfg or load_collab_config()
+        supported_pairs = cfg.supported_pairs
     defects: List[str] = []
     slug: Optional[str] = None
 
@@ -116,18 +114,20 @@ def validate_submission_pr(
                 defects.append(f"Missing required manifest field: '{field}'")
 
         license_val = manifest_data.get("license")
-        if license_val not in ALLOWED_LICENSES:
+        if license_val not in allowed_licenses:
             defects.append(
-                f"Disallowed license: '{license_val}'. Allowed: {', '.join(ALLOWED_LICENSES)}"
+                f"Disallowed license: '{license_val}'. Allowed: {', '.join(sorted(allowed_licenses))}"
             )
 
         source_lang = manifest_data.get("source_lang")
         target_lang = manifest_data.get("target_lang")
         pair = (source_lang, target_lang)
-        if pair not in SUPPORTED_PAIRS:
+        # Handle tuple pair format even if supported_pairs contains lists
+        pair_set = {tuple(p) for p in supported_pairs}
+        if pair not in pair_set:
             defects.append(
                 f"unsupported pair: {source_lang}->{target_lang}. Supported: "
-                + ", ".join(f"{s}->{t}" for s, t in SUPPORTED_PAIRS)
+                + ", ".join(f"{s}->{t}" for s, t in sorted(pair_set))
             )
 
     # 3. Source File Size Check
@@ -166,8 +166,15 @@ def validate_submission_pr(
     }
 
 
-def format_prescreen_comment(result: Dict[str, Any], manifest_data: Dict[str, Any]) -> str:
+def format_prescreen_comment(
+    result: Dict[str, Any],
+    manifest_data: Dict[str, Any],
+    human_approver: Optional[str] = None,
+) -> str:
     """Formats the automated pre-screen comment for a book submission PR."""
+    if human_approver is None:
+        human_approver = load_collab_config().human_approver
+
     slug = result.get("slug") or manifest_data.get("slug", "unknown")
     title = manifest_data.get("title", "Untitled")
     author = manifest_data.get("author", "Unknown")
@@ -196,7 +203,7 @@ def format_prescreen_comment(result: Dict[str, Any], manifest_data: Dict[str, An
             "- [x] Supported language pair (`en->vi` or `zh->vi`)",
             "- [x] Source language verified; no already-translated Vietnamese text detected",
             "",
-            "> **Human Approval Gate**: Awaiting explicit review approval from @vinhthang before merge.",
+            f"> **Human Approval Gate**: Awaiting explicit review approval from @{human_approver} before merge.",
         ])
     else:
         lines.extend([

@@ -436,11 +436,6 @@ def extract_verbatim_terms(book_record: Optional[Dict[str, Any]] = None) -> List
     # Deduplicate while preserving case and order
     seen = set()
     result = []
-    # Always include canonical Elvish proper nouns that appear as variants of English terms
-    for special_elvish in ["Echoriath", "Máhanaxar", "Mithlond"]:
-        if special_elvish.lower() not in seen:
-            seen.add(special_elvish.lower())
-            result.append(special_elvish)
     for v in verbatim_list:
         v_clean = v.strip()
         if v_clean and v_clean.lower() not in seen:
@@ -665,7 +660,7 @@ def apply_dynamic_terminology(
     # 2c. Shield blockquote index/glossary headwords: > Headword: or > Headword ‘...’
     text = _mask_span(r"(?m)^>\s*([^:\n‘\"\(]+?)(?=\s*:|\s*[‘\"\(]|\s*,\s*The\b|\s+Xem\b|\s+See\b)", text)
 
-    # 2d. Shield cross-reference target names after 'Xem' or 'See': Xem Echoriath.
+    # 2d. Shield cross-reference target names after 'Xem' or 'See': Xem Target.
     def _mask_cross_ref(match):
         nonlocal mask_counter
         prefix = match.group(1)

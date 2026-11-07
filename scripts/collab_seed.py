@@ -15,8 +15,14 @@ import logging
 import os
 import re
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 from typing import Any, Callable, Dict, List, Optional, Union
 
 from scripts.collab_ledger import append_ledger_entry
@@ -34,10 +40,12 @@ logger = logging.getLogger(__name__)
 
 
 def seed_merged_book(
-    repo_root: Union[Path, str],
-    book_slug: str,
-    repo_full_name: str = "vinhthang/collab-book-translate",
-    gh_user: str = "1quachuoi9vang",
+    repo_root: Optional[Union[Path, str]] = None,
+    book_slug: str = "",
+    repo_full_name: Optional[str] = None,
+    gh_user: Optional[str] = None,
+    bot_git_name: Optional[str] = None,
+    bot_git_email: Optional[str] = None,
     translate_fn: Optional[Callable[[str, Dict[str, Any], Dict[str, Any]], str]] = None,
     evaluate_fn: Optional[Callable[[str, str, Dict[str, Any]], Dict[str, Any]]] = None,
     issue_creator_fn: Optional[Callable[[str, str, List[str]], Any]] = None,
@@ -56,6 +64,15 @@ def seed_merged_book(
             "reason": str (optional on failure)
         }
     """
+    if None in (repo_root, repo_full_name, gh_user, bot_git_name, bot_git_email):
+        from scripts.collab_config import load_collab_config
+        cfg = load_collab_config()
+        repo_root = repo_root or cfg.workspace_dir
+        repo_full_name = repo_full_name or cfg.repo_full_name
+        gh_user = gh_user or cfg.bot_login
+        bot_git_name = bot_git_name or cfg.bot_git_name
+        bot_git_email = bot_git_email or cfg.bot_git_email
+
     repo_root_path = Path(repo_root).resolve()
     books_dir = repo_root_path / "books" / book_slug
     manifest_path = books_dir / "manifest.json"
@@ -254,7 +271,7 @@ def seed_merged_book(
                 )
                 commit_msg = f"seed({book_slug}): initialize ch01 reference and book_record"
                 subprocess.run(
-                    ["git", "-c", "user.name=CollabBot", "-c", "user.email=bot@collab.local", "commit", "-m", commit_msg],
+                    ["git", "-c", f"user.name={bot_git_name}", "-c", f"user.email={bot_git_email}", "commit", "-m", commit_msg],
                     cwd=repo_root_path,
                     capture_output=True,
                     text=True,
@@ -325,9 +342,9 @@ def seed_merged_book(
                     [
                         "git",
                         "-c",
-                        "user.name=CollabBot",
+                        f"user.name={bot_git_name}",
                         "-c",
-                        "user.email=bot@collab.local",
+                        f"user.email={bot_git_email}",
                         "commit",
                         "--amend",
                         "--no-edit",
@@ -394,7 +411,7 @@ def seed_merged_book(
                 raise RuntimeError("Refusing to invoke live 'gh issue create' inside pytest without issue_creator_fn")
             try:
                 cmd = [
-                    "rtk", "gh", "issue", "create",
+                    "gh", "issue", "create",
                     "--repo", repo_full_name,
                     "--title", title,
                     "--body", body,
@@ -440,14 +457,24 @@ def seed_merged_book(
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Seed a newly merged book into the collab translation pipeline.")
-    parser.add_argument("--repo-root", default=".", help="Root of git repository")
+    parser.add_argument("--config", default=None, help="Path to config.json")
+    parser.add_argument("--repo-root", default=None, help="Root of git repository")
     parser.add_argument("--book-slug", required=True, help="Slug of the book to seed")
-    parser.add_argument("--repo", default="vinhthang/collab-book-translate", help="Full repository name")
-    parser.add_argument("--gh-user", default="1quachuoi9vang", help="GitHub user for auth token and attribution")
+    parser.add_argument("--repo", default=None, help="Full repository name")
+    parser.add_argument("--gh-user", default=None, help="GitHub user for auth token and attribution")
     parser.add_argument("--ch01-translation-file", default=None, help="Path to pre-translated ch01 translation XML")
     args = parser.parse_args(argv)
 
-    repo_root = Path(args.repo_root).resolve()
+    from scripts.collab_config import load_collab_config
+    cfg = load_collab_config(args.config)
+
+    repo_root = Path(args.repo_root or cfg.workspace_dir).resolve()
+    repo_full_name = args.repo or cfg.repo_full_name
+    gh_user = args.gh_user or cfg.bot_login
+    bot_git_name = cfg.bot_git_name
+    bot_git_email = cfg.bot_git_email
+    evaluation_engine = cfg.evaluation_engine
+
     trans_fn = None
     eval_fn = None
     if args.ch01_translation_file:
@@ -473,15 +500,17 @@ def main(argv: Optional[List[str]] = None) -> int:
                     book_record_path=str(b_p),
                     output_path=str(o_p),
                     force_mock=False,
-                    engine="workbuddy",
+                    engine=evaluation_engine,
                 )
         eval_fn = default_eval_fn
 
     res = seed_merged_book(
         repo_root=repo_root,
         book_slug=args.book_slug,
-        repo_full_name=args.repo,
-        gh_user=args.gh_user,
+        repo_full_name=repo_full_name,
+        gh_user=gh_user,
+        bot_git_name=bot_git_name,
+        bot_git_email=bot_git_email,
         translate_fn=trans_fn,
         evaluate_fn=eval_fn,
     )

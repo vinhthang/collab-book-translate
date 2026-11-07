@@ -12,9 +12,15 @@ import logging
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from scripts.collab_completeness import verify_book_completeness
@@ -343,9 +349,16 @@ def non_blocking_sweep_lock(lock_path: Union[Path, str]):
 class GitHubCLIClient:
     """Production GitHub client using the official gh CLI."""
 
-    def __init__(self, bot_login: str = "1quachuoi9vang", repo_root: Optional[Union[Path, str]] = None):
+    def __init__(self, bot_login: Optional[str] = None, repo_root: Optional[Union[Path, str]] = None):
+        if bot_login is None or repo_root is None:
+            from scripts.collab_config import load_collab_config
+            cfg = load_collab_config()
+            if bot_login is None:
+                bot_login = cfg.bot_login
+            if repo_root is None:
+                repo_root = cfg.workspace_dir
         self.bot_login = bot_login
-        self.root = Path(repo_root) if repo_root is not None else Path.cwd()
+        self.root = Path(repo_root)
         self._bot_token = None
         self._token_resolved = False
 
@@ -486,23 +499,47 @@ class GitHubCLIClient:
 
 
 def run_sweep(
-    repo_root: Union[Path, str],
+    repo_root: Optional[Union[Path, str]] = None,
     *,
     client: Optional[Any] = None,
     evaluate_fn: Optional[Callable[..., Dict[str, Any]]] = None,
     seed_fn: Optional[Callable[[Path, str], None]] = None,
     compile_fn: Optional[Callable[[Path, str], List[str]]] = None,
     now: Optional[float] = None,
-    window_hours: float = 24.0,
-    fallback_hours: float = 48.0,
-    bot_login: str = "1quachuoi9vang",
-    human_approver: str = "vinhthang",
+    window_hours: Optional[float] = None,
+    fallback_hours: Optional[float] = None,
+    max_revise_rounds: Optional[int] = None,
+    bot_login: Optional[str] = None,
+    human_approver: Optional[str] = None,
     lock_path: Optional[Union[Path, str]] = None,
 ) -> Dict[str, Any]:
     """Execute an idempotent sweep across open book submissions, translation PRs, and chapter issues.
 
     Advances each item until blocked on external input (R2-P2-6).
     """
+    if (
+        repo_root is None
+        or window_hours is None
+        or fallback_hours is None
+        or max_revise_rounds is None
+        or bot_login is None
+        or human_approver is None
+    ):
+        from scripts.collab_config import load_collab_config
+        cfg = load_collab_config()
+        if repo_root is None:
+            repo_root = cfg.workspace_dir
+        if window_hours is None:
+            window_hours = cfg.window_hours
+        if fallback_hours is None:
+            fallback_hours = cfg.fallback_hours
+        if max_revise_rounds is None:
+            max_revise_rounds = cfg.max_revise_rounds
+        if bot_login is None:
+            bot_login = cfg.bot_login
+        if human_approver is None:
+            human_approver = cfg.human_approver
+
     root = Path(repo_root)
     if lock_path is None:
         lock_path = root / ".sweep.lock"
@@ -590,7 +627,7 @@ def run_sweep(
             comments = pr.get("comments", [])
             has_prescreen = any("Pre-screen Summary:" in c.get("body", "") for c in comments)
             if not has_prescreen:
-                comment_body = format_prescreen_comment(val_res, manifest_data or {})
+                comment_body = format_prescreen_comment(val_res, manifest_data or {}, human_approver=human_approver)
                 gh.comment_pr(pr["number"], comment_body)
 
             if val_res.get("valid"):
@@ -669,7 +706,7 @@ def run_sweep(
                     )
                     current_head_oid = (pr.get("head_oid") or pr.get("headRefOid") or "").strip()
                     sha_matches = not current_head_oid or f"revise_sha: {current_head_oid}" in last_body
-                    if is_bot_author and is_bot_revise and sha_matches and revise_count < 3:
+                    if is_bot_author and is_bot_revise and sha_matches and revise_count < max_revise_rounds:
                         continue
 
             ch_id, slug = _extract_ch_id_and_slug(head_ref, raw_chunk)
@@ -731,10 +768,10 @@ def run_sweep(
                     1 for c in comments
                     if "Deterministic checks failed" in c.get("body", "") or "REVISE" in c.get("body", "")
                 )
-                if revise_count >= 3:
+                if revise_count >= max_revise_rounds:
                     recon = reconcile_status_labels(current_labels, "status:reassign")
                     gh.set_pr_labels(pr["number"], recon["to_add"], recon["to_remove"])
-                    gh.close_pr(pr["number"], comment="Revision limit (3 rounds) reached. Closing PR as reassign.")
+                    gh.close_pr(pr["number"], comment=f"Revision limit ({max_revise_rounds} rounds) reached. Closing PR as reassign.")
                 else:
                     head_oid = (pr.get("head_oid") or pr.get("headRefOid") or "").strip()
                     recon = reconcile_status_labels(current_labels, "status:revise")
@@ -1350,9 +1387,11 @@ def run_sweep(
 
 
 def live_evaluate_pr(pr: Dict[str, Any], root: Path) -> Dict[str, Any]:
-    """Production evaluation helper for a translation PR via WorkBuddy."""
+    """Production evaluation helper for a translation PR via configured evaluation engine."""
+    from scripts.collab_config import load_collab_config
     from scripts.evaluate import run_evaluation
 
+    cfg = load_collab_config()
     root_path = Path(root).resolve()
     head_ref = pr.get("head_ref") or pr.get("headRefName", "")
     body = pr.get("body", "")
@@ -1362,7 +1401,7 @@ def live_evaluate_pr(pr: Dict[str, Any], root: Path) -> Dict[str, Any]:
     s_file = root_path / "runs" / slug / ch_id / "source.txt"
     source_xml = s_file.read_text(encoding="utf-8") if s_file.exists() else ""
 
-    gh = GitHubCLIClient(repo_root=root_path)
+    gh = GitHubCLIClient(repo_root=root_path, bot_login=cfg.bot_login)
     trans_xml = read_pr_file(
         gh, pr.get("number", 0), head_ref, f"runs/{slug}/{ch_id}/translation.xml", root_path
     )
@@ -1387,21 +1426,23 @@ def live_evaluate_pr(pr: Dict[str, Any], root: Path) -> Dict[str, Any]:
             book_record_path=str(b_p),
             output_path=str(o_p),
             force_mock=False,
-            engine="workbuddy",
+            engine=cfg.evaluation_engine,
         )
 
 
 def default_compile_book(root: Path, slug: str) -> List[str]:
-    """Compiles all formats for a completed book and returns generated asset paths."""
+    """Compiles configured formats for a completed book and returns generated asset paths."""
+    from scripts.collab_config import load_collab_config
     from scripts.compile_book import compile_book_formats
 
+    cfg = load_collab_config()
     run_dir = Path(root).resolve() / "runs" / slug
     out_dir = run_dir / "release_assets"
     out_dir.mkdir(parents=True, exist_ok=True)
     res = compile_book_formats(
         run_dir=run_dir,
         output_dir=out_dir,
-        formats="epub,pdf,docx",
+        formats=cfg.release_formats,
         allow_incomplete=False,
     )
     return [str(p) for p in res.values()]
@@ -1414,11 +1455,64 @@ def default_seed_book(
     evaluate_fn: Optional[Callable] = None,
 ) -> Dict[str, Any]:
     """Seeds a merged book using the authoritative collab_seed pipeline."""
+    from scripts.collab_config import load_collab_config
     from scripts.collab_seed import seed_merged_book
+
+    cfg = load_collab_config()
+
+    if translate_fn is None:
+        def real_translate_fn(source_xml: str, rec: Dict[str, Any], man: Dict[str, Any]) -> str:
+            from scripts.translate_chapter import translate_chapter
+            with tempfile.TemporaryDirectory() as td:
+                t_dir = Path(td)
+                s_p = t_dir / "source.txt"
+                b_p = t_dir / "book_record.json"
+                out_p = t_dir / "translation.xml"
+                s_p.write_text(source_xml, encoding="utf-8")
+                b_p.write_text(json.dumps(rec, ensure_ascii=False, indent=2), encoding="utf-8")
+                source_lang = man.get("source_lang", "auto")
+                translate_chapter(
+                    run_dir=t_dir,
+                    chapter="ch01",
+                    source=s_p,
+                    output=out_p,
+                    book_record=b_p,
+                    source_lang=source_lang,
+                )
+                if out_p.exists():
+                    return out_p.read_text(encoding="utf-8")
+                return ""
+        translate_fn = real_translate_fn
+
+    if evaluate_fn is None:
+        def real_evaluate_fn(source_xml: str, trans_xml: str, rec: Dict[str, Any]) -> Dict[str, Any]:
+            from scripts.evaluate import run_evaluation
+            with tempfile.TemporaryDirectory() as td:
+                t_dir = Path(td)
+                s_p = t_dir / "source.txt"
+                d_p = t_dir / "translation.xml"
+                b_p = t_dir / "book_record.json"
+                o_p = t_dir / "eval.json"
+                s_p.write_text(source_xml, encoding="utf-8")
+                d_p.write_text(trans_xml, encoding="utf-8")
+                b_p.write_text(json.dumps(rec, ensure_ascii=False, indent=2), encoding="utf-8")
+                return run_evaluation(
+                    source_path=str(s_p),
+                    draft_path=str(d_p),
+                    book_record_path=str(b_p),
+                    output_path=str(o_p),
+                    force_mock=False,
+                    engine=cfg.evaluation_engine,
+                )
+        evaluate_fn = real_evaluate_fn
 
     return seed_merged_book(
         repo_root=Path(root).resolve(),
         book_slug=slug,
+        repo_full_name=cfg.repo_full_name,
+        gh_user=cfg.bot_login,
+        bot_git_name=cfg.bot_git_name,
+        bot_git_email=cfg.bot_git_email,
         translate_fn=translate_fn,
         evaluate_fn=evaluate_fn,
     )
@@ -1427,16 +1521,20 @@ def default_seed_book(
 def main(argv: Optional[List[str]] = None) -> int:
     """CLI entrypoint for running an autonomous collaboration sweep."""
     parser = argparse.ArgumentParser(description="Run autonomous collaboration sweep on GitHub PRs.")
-    parser.add_argument("--repo-root", default=".", help="Root of git repository")
-    parser.add_argument("--window-hours", type=float, default=24.0, help="Candidate collection window in hours")
-    parser.add_argument("--fallback-hours", type=float, default=48.0, help="Fallback window in hours")
-    parser.add_argument("--bot-login", default="1quachuoi9vang", help="Bot GitHub username")
-    parser.add_argument("--human-approver", default="vinhthang", help="Human approver username")
+    parser.add_argument("--config", default=None, help="Path to config.json")
+    parser.add_argument("--repo-root", default=None, help="Root of git repository")
+    parser.add_argument("--window-hours", type=float, default=None, help="Candidate collection window in hours")
+    parser.add_argument("--fallback-hours", type=float, default=None, help="Fallback window in hours")
+    parser.add_argument("--bot-login", default=None, help="Bot GitHub username")
+    parser.add_argument("--human-approver", default=None, help="Human approver username")
     parser.add_argument("--lock-path", default=None, help="Path to lock file")
     parser.add_argument("--offline", action="store_true", help="Run in offline mode without live LLM evaluation")
     args = parser.parse_args(argv)
 
-    repo_root = Path(args.repo_root).resolve()
+    from scripts.collab_config import load_collab_config
+    cfg = load_collab_config(args.config)
+
+    repo_root = Path(args.repo_root or cfg.workspace_dir).resolve()
     eval_fn = None if args.offline else live_evaluate_pr
     lock_path = Path(args.lock_path).resolve() if args.lock_path else None
 
@@ -1445,10 +1543,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         evaluate_fn=eval_fn,
         compile_fn=default_compile_book,
         seed_fn=default_seed_book,
-        window_hours=args.window_hours,
-        fallback_hours=args.fallback_hours,
-        bot_login=args.bot_login,
-        human_approver=args.human_approver,
+        window_hours=args.window_hours or cfg.window_hours,
+        fallback_hours=args.fallback_hours or cfg.fallback_hours,
+        max_revise_rounds=cfg.max_revise_rounds,
+        bot_login=args.bot_login or cfg.bot_login,
+        human_approver=args.human_approver or cfg.human_approver,
         lock_path=lock_path,
     )
     print(json.dumps(result, indent=2, ensure_ascii=False))

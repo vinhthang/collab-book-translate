@@ -33,7 +33,7 @@ No task starts before human Proceed. Check a task only when its acceptance crite
 
 - [x] T-201: Implement the pre-screen comment (manifest schema, format readable, language check reusing `detect_source_language` plus the Vietnamese-diacritic-density check, supported-pair check, licence assessment) for a `book/<slug>` PR. (REQ-COLLAB-002)
 - [x] T-202: Implement ingestion from `books/<slug>/` into `runs/<slug>/` via `scripts/extract.py`, whole-book `analyze`, ch01 seed translation and merge by the bot account on a live `evaluate.py` PASS only (merge comment lists the bound glossary terms; fallback/FAIL → no merge, no issues), glossary freeze with SHA, and tracking-issue creation for ch02..chNN. RED first: T-109. (REQ-COLLAB-003)
-- [x] T-203: Implement the hourly scheduled fetch / manual-run sweep: non-blocking lock acquire, `git fetch`, list open PRs/issues/reviews via `rtk gh … --json`, advance each item until it blocks on external input (review, push, window), write the ledger. No GitHub Actions, no webhook. RED first: T-110. (REQ-COLLAB-015)
+- [x] T-203: Implement the hourly scheduled fetch / manual-run sweep: non-blocking lock acquire, `git fetch`, list open PRs/issues/reviews via `gh … --json`, advance each item until it blocks on external input (review, push, window), write the ledger. No GitHub Actions, no webhook. RED first: T-110. (REQ-COLLAB-015)
 - [x] T-204: Resolve the [PROVISIONAL] chapter-split threshold by measuring the largest existing chapter's segment count, and record the decision. (REQ-COLLAB-004)
 
 ## Phase 3 — Translation, review, selection, merge

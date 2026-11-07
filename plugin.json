@@ -1,0 +1,10 @@
+{
+  "name": "collab-book-translate",
+  "version": "1.2.0",
+  "description": "Collaborative multi-agent book translation plugin and workflow engine",
+  "config": "config.json",
+  "entrypoints": [
+    "scripts/collab_sweep.py",
+    "scripts/collab_seed.py"
+  ]
+}

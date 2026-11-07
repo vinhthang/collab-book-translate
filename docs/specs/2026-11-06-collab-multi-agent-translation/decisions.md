@@ -129,7 +129,7 @@ All three were resolved by the Opus review and thang's grill decisions in v1.1.0
 
 - **Status**: Accepted (v1.1.0)
 - **Governs**: REQ-COLLAB-001, REQ-COLLAB-002, REQ-COLLAB-003, REQ-COLLAB-010, REQ-COLLAB-015
-- **Context**: Opus review P0-1: `books/`, `runs/`, `inputs/`, and `.github/` do not exist in `agent-translator`; the corpus lives in the external workspace `/Users/thanghoang/github/books` (`config.json` `workspace_dir`).
+- **Context**: Opus review P0-1: `books/`, `runs/`, `inputs/`, and `.github/` do not exist in `agent-translator`; the corpus lives in the external workspace `<external_books_dir>` (`config.json` `workspace_dir`).
 - **Options Considered**:
   1. **Separate public repo `collab-book-translate` (chosen)**: Holds `books/<slug>/`, `runs/<slug>/`, `.github/`, `CONTRIBUTING.md`, and the ledger. The main agent's `workspace_dir` points at a local clone of it. `agent-translator` stays private as the tool repo.
   2. **Move the corpus into `agent-translator`**: Add `books/` and `runs/` to the tool repo and make it public.
@@ -302,7 +302,7 @@ The v1.0.0 Gate 1 table above is kept for history. Opus overturned its PASS clai
 
 | Check | Result | Evidence |
 |---|---|---|
-| 1. Codebase Grounding | PASS | spec.md §1.1 now states the verified layout: corpus in external workspace `/Users/thanghoang/github/books` (`config.json` `workspace_dir`), `collab-book-translate` as the collab repo, AGENTS.md en→vi authorship rule and the zh→vi DeepSeek-via-`cbc` path, sequential orchestrator loop + `assert_fiction_pronouns_populated`, `resolve_pass_threshold` precedence (CLI > config > genre 3.5/4.0), provenance engines, critical/quorum/redraft rules; all verified by reading the Mac files this session |
+| 1. Codebase Grounding | PASS | spec.md §1.1 now states the verified layout: corpus in external workspace `<external_books_dir>` (`config.json` `workspace_dir`), `collab-book-translate` as the collab repo, AGENTS.md en→vi authorship rule and the zh→vi DeepSeek-via-`cbc` path, sequential orchestrator loop + `assert_fiction_pronouns_populated`, `resolve_pass_threshold` precedence (CLI > config > genre 3.5/4.0), provenance engines, critical/quorum/redraft rules; all verified by reading the Mac files this session |
 | 2. User Intent & Non-Goals | PASS | 15/15 REQs carry a Source Intent citation (verbatim thang prompts 1–8, grill decisions 9–21, engine correction 22, or explicit derivation labelled Derived); §2 Non-Goals updated (task-hub integration, GitHub Actions/webhooks, own git server, autonomous merge, copyrighted books, target-agnostic pipeline, audio/image/reader) |
 | 3. EARS & Falsifiable ACs | PASS | 13 active REQs in WHEN / THE / SHALL form (REQ-COLLAB-008 and 011 are [DEPRECATED] with explicit non-implementation statements); every active REQ has a Happy-Path and an Error/Boundary AC; AC-COLLAB-001-2 now has a path-allowlist detection rule (P2-1) |
 | 4. Zero Deferral Placeholders | PASS | No TODO / TBD / FIXME in spec.md or decisions.md; one [PROVISIONAL] tag, scoped to the chapter-split open question in REQ-COLLAB-004, one sentence, owner-deferred to the design phase, with the novella-pilot non-exercise noted |

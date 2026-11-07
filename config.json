@@ -1,3 +1,25 @@
 {
-  "workspace_dir": "/Users/thanghoang/github/collab-book-translate"
+  "workspace_dir": "/Users/thanghoang/github/collab-book-translate",
+  "repo_full_name": "vinhthang/collab-book-translate",
+  "bot_login": "1quachuoi9vang",
+  "bot_git_name": "1quachuoi9vang",
+  "bot_git_email": "1quachuoi9vang@users.noreply.github.com",
+  "human_approver": "vinhthang",
+  "window_hours": 24.0,
+  "fallback_hours": 48.0,
+  "max_revise_rounds": 3,
+  "evaluation_engine": "workbuddy",
+  "release_formats": "epub,pdf,docx",
+  "max_source_bytes": 52428800,
+  "allowed_licenses": [
+    "public-domain",
+    "CC0-1.0",
+    "CC-BY-4.0",
+    "CC-BY-SA-4.0",
+    "owner-permission"
+  ],
+  "supported_pairs": [
+    ["en", "vi"],
+    ["zh", "vi"]
+  ]
 }

@@ -66,7 +66,7 @@ Chapter issue: Seeding → Open → Candidates → Done. Candidate PR: NeedsChec
 Label set: `status:open`, `status:candidates`, `status:done`, `status:needs-review`, `status:revise`, `status:reassign`, `status:candidate`, plus informational `agent:<name>`, `lang:<pair>`, `book:<slug>`. Revision cap: 3 REVISE rounds per PR, then close as REASSIGN.
 
 ### 3.6 Sweep runtime (REQ-COLLAB-015)
-- Local main agent, triggered by an hourly scheduled fetch or a manual run. Each run is an idempotent sweep holding a lock (the existing `interprocess_lock`, 30 s default timeout): `git fetch`, list open PRs, issues, and reviews through `rtk gh … --json`, advance each item until it blocks on external input (review, push, window) per §3.5, write the ledger. The lock acquire is non-blocking: if the lock is held, the sweep logs "sweep already running" and exits 0 (a defined, logged outcome, not a swallowed error).
+- Local main agent, triggered by an hourly scheduled fetch or a manual run. Each run is an idempotent sweep holding a lock (the existing `interprocess_lock`, 30 s default timeout): `git fetch`, list open PRs, issues, and reviews through `gh … --json`, advance each item until it blocks on external input (review, push, window) per §3.5, write the ledger. The lock acquire is non-blocking: if the lock is held, the sweep logs "sweep already running" and exits 0 (a defined, logged outcome, not a swallowed error).
 - Deterministic checks inside the sweep, reported as PR comments: path allowlist, one-chapter diff, PR body fields, segment parity, byte-invariance (code blocks, image anchors per AGENTS.md), `book_record.json` untouched.
 - No GitHub Actions, no inbound webhook.
 

@@ -15,7 +15,7 @@ Anyone may propose a book for translation by opening a pull request.
    - `books/<slug>/source/**` (exactly one readable source file: `.epub`, `.pdf`, `.docx`, `.mobi`, or `.md`)
 3. **No translation in submission**: Do not submit translated text in the book submission PR.
 4. **Size limit**: Source file must be $\le 50\text{ MB}$, or managed via Git LFS.
-5. **Human approval**: Book merges require manual approval from `@vinhthang`.
+5. **Human approval**: Book merges require manual approval from the configured human approver (`human_approver` in `config.json`).
 
 ### Allowed Licences
 Only public domain or explicitly permissible creative commons licences are accepted:
@@ -31,7 +31,7 @@ Only public domain or explicitly permissible creative commons licences are accep
 ### Submitting a Book PR
 Use the book submission PR template:
 ```bash
-rtk gh pr create --template book --title "book: add <title> (<slug>)"
+gh pr create --template book --title "book: add <title> (<slug>)"
 ```
 
 ---

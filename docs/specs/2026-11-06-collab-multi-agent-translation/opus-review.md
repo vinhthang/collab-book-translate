@@ -47,7 +47,7 @@ Severity: **P0** = blocks Proceed (wrong ground or a broken invariant). **P1** =
 ### P0 — Blocking
 
 #### P0-1. The repo layout in the spec does not exist (Gate 1 Check 1 false PASS)
-- **Evidence**: `ls` at the repo root shows `agents/ config.json docs/ models/ plugin.json review/ rules/ scripts/ skills/ spec/ tests/`. `books/`, `runs/`, `inputs/`, and `.github/` are all absent. [config.json](file:///Users/thanghoang/github/agent-translator/config.json) sets `"workspace_dir": "/Users/thanghoang/github/books"`, and so does the plugin config. Every `runs/<slug>/` in the package refers to a directory outside this repo.
+- **Evidence**: `ls` at the repo root shows `agents/ config.json docs/ models/ plugin.json review/ rules/ scripts/ skills/ spec/ tests/`. `books/`, `runs/`, `inputs/`, and `.github/` are all absent. [config.json](file://<reference_repo_dir>/config.json) sets `"workspace_dir": "<external_books_dir>"`, and so does the plugin config. Every `runs/<slug>/` in the package refers to a directory outside this repo.
 - **Impact**: ADR-COLLAB-002's blast radius, design §1.1 / §1.4 / §1.5, T-001..T-005, and T-202 all point at non-existent paths.
 - **Resolution (Q1)**: Create a new repo `collab-book-translate` holding `books/<slug>/`, `runs/<slug>/`, `.github/`, `CONTRIBUTING.md`, and a ledger. The main agent's `workspace_dir` points at a local clone of it. Supersede ADR-COLLAB-002 with a new ADR. §1.1 must state the real layout.
 
@@ -61,10 +61,10 @@ Severity: **P0** = blocks Proceed (wrong ground or a broken invariant). **P1** =
 
 #### P0-3. Parallel translation breaks the terminology invariant REQ-COLLAB-009 depends on
 - **Evidence**:
-  - [orchestrate_run.py L790-L800](file:///Users/thanghoang/github/agent-translator/scripts/orchestrate_run.py#L790-L800) — `for entry in checklist:` is a sequential chapter loop.
-  - `update_book_record_from_eval(...)` binds accepted terms after each chapter ([L1171](file:///Users/thanghoang/github/agent-translator/scripts/orchestrate_run.py#L1171), [helper.py L1694](file:///Users/thanghoang/github/agent-translator/scripts/helper.py#L1694-L1708)).
+  - [orchestrate_run.py L790-L800](file://<reference_repo_dir>/scripts/orchestrate_run.py#L790-L800) — `for entry in checklist:` is a sequential chapter loop.
+  - `update_book_record_from_eval(...)` binds accepted terms after each chapter ([L1171](file://<reference_repo_dir>/scripts/orchestrate_run.py#L1171), [helper.py L1694](file://<reference_repo_dir>/scripts/helper.py#L1694-L1708)).
   - AC-COLLAB-009-1 ("used by the next chapter's translation") holds only under that sequential order.
-- **Second defect**: [orchestrate_run.py L783](file:///Users/thanghoang/github/agent-translator/scripts/orchestrate_run.py#L775-L788) calls `assert_fiction_pronouns_populated`. Translation requires a populated `book_record.json` (the `analyze` Brief, characters, `a_to_b` / `b_to_a` pronouns) **before** any chapter is translated. REQ-COLLAB-003 creates tasks straight after extraction, with no analyze step.
+- **Second defect**: [orchestrate_run.py L783](file://<reference_repo_dir>/scripts/orchestrate_run.py#L775-L788) calls `assert_fiction_pronouns_populated`. Translation requires a populated `book_record.json` (the `analyze` Brief, characters, `a_to_b` / `b_to_a` pronouns) **before** any chapter is translated. REQ-COLLAB-003 creates tasks straight after extraction, with no analyze step.
 - **Resolution (Q4)**: Seed-then-parallel.
   1. After merging the submission, the main agent runs whole-book `analyze`, which writes the Brief, glossary, and pronouns.
   2. The main agent translates ch01 as the reference chapter and merges it.
@@ -77,17 +77,17 @@ Severity: **P0** = blocks Proceed (wrong ground or a broken invariant). **P1** =
 - **Resolution (Q3)**: Identity = GitHub login of the PR author and of each review author. Reviewer ≠ translator means `review.user.login != pr.user.login`; GitHub already blocks self-approval. Labels are **applied by the main agent / CI**, never required from the contributor. A soft claim is an issue comment (`/claim`), which the main agent may echo as an assignment. `agent:*` labels become optional filters.
 
 #### P0-5. §1.1 says translation goes through `cbc`, which contradicts the governing AGENTS.md rule
-- **Evidence**: §1.1: *"translation via CodeBuddy CLI (`cbc`, `deepseek-v4.1-flash`)"*. The `cbc` path exists in code ([translate_chapter.py L516-L532](file:///Users/thanghoang/github/agent-translator/scripts/translate_chapter.py#L516-L532), `VALID_PROVENANCE_ENGINES = ("agent-offline", "agent-refine", "cbc", "custom")`). But the agent-translator AGENTS.md says: *"NEVER invoke `cbc` … for English-to-Vietnamese translation or refinement"*, with `cbc` allowed only for evaluation. design.md §1.4 ("Translation reuses `scripts/translate_chapter.py`") gives no engine, so it inherits the contradiction.
+- **Evidence**: §1.1: *"translation via CodeBuddy CLI (`cbc`, `deepseek-v4.1-flash`)"*. The `cbc` path exists in code ([translate_chapter.py L516-L532](file://<reference_repo_dir>/scripts/translate_chapter.py#L516-L532), `VALID_PROVENANCE_ENGINES = ("agent-offline", "agent-refine", "cbc", "custom")`). But the agent-translator AGENTS.md says: *"NEVER invoke `cbc` … for English-to-Vietnamese translation or refinement"*, with `cbc` allowed only for evaluation. design.md §1.4 ("Translation reuses `scripts/translate_chapter.py`") gives no engine, so it inherits the contradiction.
 - **Resolution (Q5)**: Contributors are engine-agnostic. The PR body declares `Engine/Model` provenance, mapped to the existing provenance field (`custom` plus a free-text model). The main agent's own ch01 seed translation still follows AGENTS.md (Primary Agent authorship). Add one sentence to the spec saying AGENTS.md governs the main agent's local pipeline only, and `collab-book-translate/CONTRIBUTING.md` governs contributors. Correct §1.1.
 
 ### P1 — Blocking
 
 #### P1-1. The score model contradicts the existing evaluator
 - **Evidence**:
-  - [helper.py L626-L633](file:///Users/thanghoang/github/agent-translator/scripts/helper.py#L626-L633) — `resolve_pass_threshold`: *CLI > config.json > brief.genre (literary/fiction → 3.5, default → 4.0)*. The spec's fixed "PASS at ≥ 4.0" would fail a literary book at 3.8 that the pipeline would accept.
-  - [evaluate.py L275](file:///Users/thanghoang/github/agent-translator/scripts/evaluate.py#L275) — any critical issue forces FAIL whatever the score; the spec doesn't mention it.
-  - [orchestrate_run.py L1110-L1120](file:///Users/thanghoang/github/agent-translator/scripts/orchestrate_run.py#L1110-L1120) — multi-pass quorum (`check_critical_quorum` → `FAIL` / `CONTESTED`).
-  - The verdict vocabulary PASS / REVISE / REASSIGN does not exist. The code has PASS / FAIL, and redraft below 2.5 ([`check_redraft` L322](file:///Users/thanghoang/github/agent-translator/scripts/orchestrate_run.py#L322-L345)).
+  - [helper.py L626-L633](file://<reference_repo_dir>/scripts/helper.py#L626-L633) — `resolve_pass_threshold`: *CLI > config.json > brief.genre (literary/fiction → 3.5, default → 4.0)*. The spec's fixed "PASS at ≥ 4.0" would fail a literary book at 3.8 that the pipeline would accept.
+  - [evaluate.py L275](file://<reference_repo_dir>/scripts/evaluate.py#L275) — any critical issue forces FAIL whatever the score; the spec doesn't mention it.
+  - [orchestrate_run.py L1110-L1120](file://<reference_repo_dir>/scripts/orchestrate_run.py#L1110-L1120) — multi-pass quorum (`check_critical_quorum` → `FAIL` / `CONTESTED`).
+  - The verdict vocabulary PASS / REVISE / REASSIGN does not exist. The code has PASS / FAIL, and redraft below 2.5 ([`check_redraft` L322](file://<reference_repo_dir>/scripts/orchestrate_run.py#L322-L345)).
   - ADR-COLLAB-004's comparability argument ("scores stay comparable across books") holds only if the **same evaluator** produces the score. A free-form agent score is not comparable to WorkBuddy's 4.66.
 - **Resolution (Q6)**:
   - **Score of record** = the main agent running `scripts/evaluate.py` (WorkBuddy, live, not fallback) on each candidate PR.
@@ -106,8 +106,8 @@ Severity: **P0** = blocks Proceed (wrong ground or a broken invariant). **P1** =
 
 #### P1-3. REQ-COLLAB-007 understates its blast radius by an order of magnitude
 - **Evidence**: design §1.4 says *"the only change is that `source_lang` / `target_lang` come from `manifest.json`"*. In fact 32 files under `scripts/`, `skills/`, and `agents/` hardcode Vietnamese. Examples:
-  - `"target_lang": "vi"` at [orchestrate_run.py L394](file:///Users/thanghoang/github/agent-translator/scripts/orchestrate_run.py#L394), [translate_chapter.py L1270](file:///Users/thanghoang/github/agent-translator/scripts/translate_chapter.py#L1270), [schemas.py L62](file:///Users/thanghoang/github/agent-translator/scripts/utils/schemas.py#L62), `book_package_schema.py` L405, and `agent_put.py` L361.
-  - The fallback evaluator detects language by **Vietnamese diacritics** ([fallback.py L113-L130](file:///Users/thanghoang/github/agent-translator/scripts/evaluators/fallback.py#L113-L130)).
+  - `"target_lang": "vi"` at [orchestrate_run.py L394](file://<reference_repo_dir>/scripts/orchestrate_run.py#L394), [translate_chapter.py L1270](file://<reference_repo_dir>/scripts/translate_chapter.py#L1270), [schemas.py L62](file://<reference_repo_dir>/scripts/utils/schemas.py#L62), `book_package_schema.py` L405, and `agent_put.py` L361.
+  - The fallback evaluator detects language by **Vietnamese diacritics** ([fallback.py L113-L130](file://<reference_repo_dir>/scripts/evaluators/fallback.py#L113-L130)).
   - The untranslated-text checks in `evaluate.py` (L144, L169) say "no Vietnamese translation was produced".
   - `anti_convert.py` and the Sino-Vietnamese stage only make sense for zh→vi.
 - **Resolution (Q7)**: Narrow REQ-COLLAB-007 to v1 supported pairs `{en→vi, zh→vi}`, declared in the manifest. Any other pair is rejected at intake with `unsupported pair`. Add a Non-Goal: "Target-agnostic pipeline (non-`vi` targets) — follow-up spec."
@@ -129,7 +129,7 @@ Severity: **P0** = blocks Proceed (wrong ground or a broken invariant). **P1** =
 - **Resolution (Q2, Q11)**: New REQ-COLLAB-015, normative:
   - The main agent runs locally with agent-translator as the plugin. `workspace_dir` points at a local clone of `collab-book-translate`.
   - It is triggered by (a) an **hourly scheduled fetch** (decided, OQ-1; agent contributors move fast), or (b) a **manual run**. Sweeps hold a lock, so overlapping runs never double-process a PR.
-  - Each run is an idempotent sweep: `git fetch`, then list open PRs, issues, and reviews through `rtk gh … --json`, then advance every item one state per §4, then write the ledger.
+  - Each run is an idempotent sweep: `git fetch`, then list open PRs, issues, and reviews through `gh … --json`, then advance every item one state per §4, then write the ledger.
   - **No GitHub Actions and no inbound webhook** (a webhook needs a public endpoint, and a local git hook fires only on local git operations, not on remote PR events).
   - All checks, including the deterministic ones (path allowlist, one-chapter diff, PR body fields, segment parity, byte-invariance, `book_record.json` untouched), run inside the sweep and are reported as PR comments.
   - Add Non-Goal: "GitHub Actions / CI and webhook-driven automation — out of scope."
@@ -327,7 +327,7 @@ Order matters: normative first, then gates, then derived files.
 
 - **Package reviewed**: `spec.md` v1.1.0, `decisions.md` (ADR-001..017, Gate 1 re-run), `design.md` v1.1.0 (incl. §6 PR templates), `tasks.md` (Gate 2 matrix), `verification.md`, `self-review.md`.
 - **Pinned state**: none. The package is still **uncommitted** (`?? docs/specs/2026-11-06-collab-multi-agent-translation/`), so there is no hash to pin this review to (ADR-COLLAB-007's "named versions" point). **Commit the package before round 3.**
-- **Not verified by me**: the design §6 sample values (ch02 `S-0001..S-0039`, `final.txt` rendering, Dark Forest glossary) come from the external workspace `/Users/thanghoang/github/books`. Reading it needs your permission under the workspace-boundary rule, so I accept them as Muse's verified claims (self-review.md).
+- **Not verified by me**: the design §6 sample values (ch02 `S-0001..S-0039`, `final.txt` rendering, Dark Forest glossary) come from the external workspace `<external_books_dir>`. Reading it needs your permission under the workspace-boundary rule, so I accept them as Muse's verified claims (self-review.md).
 - **Verdict**: **REQUEST CHANGES (minor)**. **0 P0, 4 P1, 11 P2.** The amendment is faithful and thorough. What's left is one identity gap, one undefined contributor contract, one security gap that comes with a public repo, and test-first coverage. One more short round should be enough.
 
 ### 9.1 Corrections to my own Round-1 findings
@@ -338,7 +338,7 @@ Order matters: normative first, then gates, then derived files.
 | Round-1 finding | What I claimed | What is true | Effect on the package |
 |---|---|---|---|
 | P0-5 | "AGENTS.md forbids `cbc` and online MT for translation" | AGENTS.md restricts `cbc` **for en→vi translation and refinement only**. `cbc` is the harness and DeepSeek is the engine for zh→vi (thang, intent 22). My framing was too broad | spec §1.1 and ADR-COLLAB-014 now state this correctly. No further change |
-| P1-4 | "No language detection exists (`langdetect` / `detect_language` absent)" | [`detect_source_language`](file:///Users/thanghoang/github/agent-translator/scripts/utils/language.py#L38-L58) exists and is exactly the CJK-density heuristic I proposed: share above 15% → `zh`, else `en`. My grep pattern missed it | **ADR-COLLAB-016 Context and design §3.1 repeat my error.** Fix in R2-P2-1 |
+| P1-4 | "No language detection exists (`langdetect` / `detect_language` absent)" | [`detect_source_language`](file://<reference_repo_dir>/scripts/utils/language.py#L38-L58) exists and is exactly the CJK-density heuristic I proposed: share above 15% → `zh`, else `en`. My grep pattern missed it | **ADR-COLLAB-016 Context and design §3.1 repeat my error.** Fix in R2-P2-1 |
 
 I also introduced the "CI" wording in my §4 state machine (`NeedsCI`) before CI was ruled out. That stale wording now appears across the package (R2-P2-2). The fault is mine, not the author's.
 
@@ -374,14 +374,14 @@ I also introduced the "CI" wording in my §4 state machine (`NeedsCI`) before CI
   2. ch01 has no defined review at all. REQ-COLLAB-005 requires a non-author review, and REQ-COLLAB-003 just says "translate ch01 … and merge it".
   3. The post-merge commits (ledger, `bind=True`, `final.txt`) are direct pushes to `main`, so they need a branch-protection bypass that the package never grants.
 - **Fix** (Q3 already decided "one GitHub account per agent"; apply it to the main agent too):
-  - The main agent uses its **own bot account** (`1quachuoi9vang`, logged into `gh` keyring with `repo` + `workflow` scopes; Maintain role, branch-protection bypass for post-merge commits only), invoked per-command via `GH_TOKEN=$(gh auth token -u 1quachuoi9vang) rtk gh …` so it never races with `vinhthang` in other terminals.
+  - The main agent uses its **own bot account** (`1quachuoi9vang`, logged into `gh` keyring with `repo` + `workflow` scopes; Maintain role, branch-protection bypass for post-merge commits only), invoked per-command via `GH_TOKEN=$(gh auth token -u 1quachuoi9vang) gh …` so it never races with `vinhthang` in other terminals.
   - `vinhthang` is the only human approver. CODEOWNERS `books/** @vinhthang`; branch protection "Require review from Code Owners".
   - The ch01 seed PR is authored by the bot and merged by the bot on a live `evaluate.py` PASS only (**D2, decided**; see §9.6 for the required explicit exception).
 
 #### R2-P1-2. The contributor file contract is undefined
 - **Evidence**:
   - AC-COLLAB-004-2's allowlist reads `runs/<slug>/chNN/{translation file, analyze_additions.json}`, and "translation file" is never defined. Design §6.2's example uses `round1_translate.txt`, which clashes with the round model (does a REVISE push become `round2_translate.txt`?).
-  - The pipeline's real segment format is `<segment id type><original>…</original>[<hanviet>…</hanviet>]<translate>…</translate></segment>` ([translate_chapter.py L599](file:///Users/thanghoang/github/agent-translator/scripts/translate_chapter.py#L599), [L657](file:///Users/thanghoang/github/agent-translator/scripts/translate_chapter.py#L657)). It appears nowhere in the spec, CONTRIBUTING plan, or template.
+  - The pipeline's real segment format is `<segment id type><original>…</original>[<hanviet>…</hanviet>]<translate>…</translate></segment>` ([translate_chapter.py L599](file://<reference_repo_dir>/scripts/translate_chapter.py#L599), [L657](file://<reference_repo_dir>/scripts/translate_chapter.py#L657)). It appears nowhere in the spec, CONTRIBUTING plan, or template.
   - Engine-agnostic contributors (ADR-014) cannot comply with a format they are never told.
   - The segment-parity check (REQ-015) and the `evaluate.py` input both depend on it, so AC-COLLAB-004-2 is not falsifiable as written (Gate 1 Check 3).
 - **Fix**: Add the contract to REQ-COLLAB-004 and CONTRIBUTING:
@@ -426,17 +426,17 @@ I also introduced the "CI" wording in my §4 state machine (`NeedsCI`) before CI
 
 | ID | Location | Finding | Fix |
 |---|---|---|---|
-| R2-P2-1 | ADR-016 Context, design §3.1 | "no language detection exists" is false (§9.1); the design plans a new heuristic | Reuse `detect_source_language` ([language.py L38](file:///Users/thanghoang/github/agent-translator/scripts/utils/language.py#L38-L58)). Note its limit: any Latin-script text (French, Vietnamese) returns `en`. Add a Vietnamese-diacritic-density check so an **already-translated** `vi` source declared as `en` is caught (`fallback.py` already measures diacritics). Append an ADR note rather than editing ADR-016 in place |
+| R2-P2-1 | ADR-016 Context, design §3.1 | "no language detection exists" is false (§9.1); the design plans a new heuristic | Reuse `detect_source_language` ([language.py L38](file://<reference_repo_dir>/scripts/utils/language.py#L38-L58)). Note its limit: any Latin-script text (French, Vietnamese) returns `en`. Add a Vietnamese-diacritic-density check so an **already-translated** `vi` source declared as `en` is caught (`fallback.py` already measures diacritics). Append an ADR note rather than editing ADR-016 in place |
 | R2-P2-2 | REQ-014, AC-014-2, ADR-012, design §2/§3.3/§3.5 | "CI", "CI diff check", `NeedsCI` contradict the Non-Goal "No GitHub Actions / CI" (my wording, §9.1) | Rename to "sweep checks" / `NeedsChecks`; "applied only by the main agent" |
 | R2-P2-3 | REQ headings | `[MODIFIES v1.0.0]` copies the cross-spec living-delta tag (`[MODIFIES REQ-xxx in <spec-id>]`). A spec still in `Planning` is amended in place | Use `[AMENDED v1.1.0]` (or no tag). Lineage `None` is correct |
 | R2-P2-4 | REQ-008, REQ-011, Gate 2 rows | Deprecated REQs still carry ACs. AC-011-2 is the same unfalsifiable process AC from round 1, and AC-008-x is "grep". The Gate 1 re-run counts them ("15 Happy + 15 Error") | Deprecated REQs carry no ACs; mark their matrix rows `N/A (deprecated)`; recount as 13 active REQs / 26 ACs |
-| R2-P2-5 | AC-015-2, design §3.6 | "second sweep SHALL wait on the lock": `interprocess_lock` ([terminology.py L89](file:///Users/thanghoang/github/agent-translator/scripts/utils/terminology.py#L89)) defaults to a 30 s timeout and raises. A sweep running `evaluate.py` for more than an hour makes the next hourly sweep error or pile up | Non-blocking acquire. If held, log "sweep already running" and exit 0. That is a defined, logged outcome, not a swallowed error |
+| R2-P2-5 | AC-015-2, design §3.6 | "second sweep SHALL wait on the lock": `interprocess_lock` ([terminology.py L89](file://<reference_repo_dir>/scripts/utils/terminology.py#L89)) defaults to a 30 s timeout and raises. A sweep running `evaluate.py` for more than an hour makes the next hourly sweep error or pile up | Non-blocking acquire. If held, log "sweep already running" and exit 0. That is a defined, logged outcome, not a swallowed error |
 | R2-P2-6 | REQ-015, AC-015-1 | "advance every item **one state**" per sweep adds about 3 h of artificial latency per PR at hourly cadence | "advance each item until it blocks on external input (review, push, window)" |
 | R2-P2-7 | REQ-013 | Window clock source undefined; sweeps must be idempotent | The window starts at the sweep timestamp that first labels a PR `status:candidate`, recorded in an issue comment / ledger. Later sweeps read it and never recompute it |
 | R2-P2-8 | REQ-013/014 | **Starved chapter**: if no PR ever reaches PASS, the chapter stays open forever and the book never completes (REQ-010) | Fallback after 2 days with no candidate: the main agent translates the chapter itself through the normal PR flow (**D3, decided**) |
 | R2-P2-9 | design §3.4 | "branch protection … applies to the selected PR only": branch protection applies to every PR into `main` | Reword. It is harmless because non-selected PRs are closed, not merged |
 | R2-P2-10 | design §2, §6.1–6.2 | When both `.github/pull_request_template.md` and a `PULL_REQUEST_TEMPLATE/` directory exist, the single file pre-fills **every** PR. Alternates are only reachable via `?template=` or `gh pr create --template` | Make the translation template the default (more frequent), put the submission template under `.github/PULL_REQUEST_TEMPLATE/book.md`, document `gh pr create --template`, and use the upper-case directory name GitHub documents |
-| R2-P2-11 | design §6.1 example | The Tam Quốc Chí example cites Gutenberg #25606 as its source. [sanguozhi-repo-extraction spec](file:///Users/thanghoang/github/agent-translator/docs/specs/2026-10-21-sanguozhi-repo-extraction-and-remediation/spec.md) replaced that source because it lacked 35 of 65 volumes, and the ch02 example ("Ngụy thư quyển 2 – Văn Đế kỷ") comes from the migrated `Ancient-China-Books/sanguozhi` edition | Cite the edition actually used, and its licence statement. The example then also shows why the human licence gate exists (text is public domain, digitised edition licence is separate). README L39 is equally stale (out of scope; note for a docs fix) |
+| R2-P2-11 | design §6.1 example | The Tam Quốc Chí example cites Gutenberg #25606 as its source. [sanguozhi-repo-extraction spec](file://<reference_repo_dir>/docs/specs/2026-10-21-sanguozhi-repo-extraction-and-remediation/spec.md) replaced that source because it lacked 35 of 65 volumes, and the ch02 example ("Ngụy thư quyển 2 – Văn Đế kỷ") comes from the migrated `Ancient-China-Books/sanguozhi` edition | Cite the edition actually used, and its licence statement. The example then also shows why the human licence gate exists (text is public domain, digitised edition licence is separate). README L39 is equally stale (out of scope; note for a docs fix) |
 
 ### 9.5 Gate Re-Validation (Round 2)
 
@@ -466,7 +466,7 @@ I also introduced the "CI" wording in my §4 state machine (`NeedsCI`) before CI
 
 | # | Decision | thang's answer | Lands in |
 |---|---|---|---|
-| D1 | Main agent GitHub identity | **Dedicated bot account `1quachuoi9vang`** (verified in `gh` keyring; Maintain role, allowed to push post-merge commits straight to `main`; invoked via `GH_TOKEN=$(gh auth token -u 1quachuoi9vang) rtk gh …`). `vinhthang` is the only human approver; CODEOWNERS `books/** @vinhthang` with "Require review from Code Owners" | REQ-002, REQ-015, new ADR (login-based identity extended to the main agent), design §2/§3.1 |
+| D1 | Main agent GitHub identity | **Dedicated bot account `1quachuoi9vang`** (verified in `gh` keyring; Maintain role, allowed to push post-merge commits straight to `main`; invoked via `GH_TOKEN=$(gh auth token -u 1quachuoi9vang) gh …`). `vinhthang` is the only human approver; CODEOWNERS `books/** @vinhthang` with "Require review from Code Owners" | REQ-002, REQ-015, new ADR (login-based identity extended to the main agent), design §2/§3.1 |
 | D2 | ch01 reference-chapter approval | **Live `evaluate.py` PASS only; the bot merges ch01 itself with no human step** (fastest) | REQ-003 |
 | D3 | Starved-chapter fallback | **After 2 days with no PASS candidate, the main agent translates the chapter itself and submits a normal PR**. It goes through the same checks and score of record, and other PRs can still compete during the 1-day window | REQ-013 / REQ-014, design §3.5 |
 

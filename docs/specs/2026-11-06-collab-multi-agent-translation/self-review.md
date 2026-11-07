@@ -40,7 +40,7 @@ repo layout, the sequential terminology model, and the label identity model.
 The author applied the Opus amendment plan (§8) in full:
 
 - spec.md bumped to 1.1.0; §1.1 rewritten with the verified layout
-  (external workspace `/Users/thanghoang/github/books`, `collab-book-translate`,
+  (external workspace `<external_books_dir>`, `collab-book-translate`,
   AGENTS.md `cbc` rule, sequential loop + `assert_fiction_pronouns_populated`,
   `resolve_pass_threshold` precedence, provenance engines); grill decisions
   recorded as verbatim intents 9–21; Non-Goals updated; §7 dispositions applied
@@ -56,7 +56,7 @@ The author applied the Opus amendment plan (§8) in full:
 - INDEX.md row updated to v1.1.0, REQ-COLLAB-001..015, Status Planning.
 
 Key Opus claims re-verified by the author on the Mac before amending:
-`config.json` `workspace_dir` = `/Users/thanghoang/github/books` and that
+`config.json` `workspace_dir` = `<external_books_dir>` and that
 workspace holds `books/`, `inputs/`, `runs/`; `rules/AGENTS.md` NEVER invoke
 `cbc` for en→vi translation, `cbc` required for evaluation; `helper.py`
 `resolve_pass_threshold` (CLI > config > genre 3.5/4.0); `orchestrate_run.py`

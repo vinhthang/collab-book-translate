@@ -18,9 +18,9 @@ def get_workspace_root(override: Optional[Union[str, Path]] = None) -> Path:
     Resolves the books workspace root directory according to precedence:
     1. Explicit override argument.
     2. AGENT_TRANSLATOR_WORKSPACE environment variable.
-    3. 'workspace_dir' in <engine_root>/config.json.
-    4. Path.cwd() if it contains a 'runs' or 'books' directory.
-    5. Fallback to get_engine_root().
+    3. 'workspace_dir' from load_collab_config().
+
+    Zero silent fallback: missing configuration raises ConfigError.
     """
     if override:
         return Path(override).expanduser().resolve()
@@ -29,22 +29,8 @@ def get_workspace_root(override: Optional[Union[str, Path]] = None) -> Path:
     if env_val and env_val.strip():
         return Path(env_val).expanduser().resolve()
 
-    cfg_file = get_engine_root() / "config.json"
-    if cfg_file.is_file():
-        try:
-            with open(cfg_file, "r", encoding="utf-8") as f:
-                cfg = json.load(f)
-            ws = cfg.get("workspace_dir")
-            if ws and str(ws).strip():
-                return Path(ws).expanduser().resolve()
-        except Exception:
-            pass
-
-    cwd = Path.cwd().resolve()
-    if (cwd / "runs").is_dir() or (cwd / "books").is_dir():
-        return cwd
-
-    return get_engine_root()
+    from scripts.collab_config import load_collab_config
+    return load_collab_config().workspace_dir.expanduser().resolve()
 
 
 def get_runs_dir(override: Optional[Union[str, Path]] = None) -> Path:
