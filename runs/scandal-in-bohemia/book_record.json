@@ -34,14 +34,14 @@
   ],
   "terms": [
     {
-      "source": "murder case",
-      "target": "vụ án mạng",
+      "source": "Study in Scarlet",
+      "target": "Cuộc Điều Tra Màu Đỏ",
       "match": "word",
       "case_sensitive": false
     },
     {
-      "source": "investigation",
-      "target": "cuộc điều tra",
+      "source": "Baker Street",
+      "target": "phố Baker",
       "match": "word",
       "case_sensitive": false
     }
@@ -49,14 +49,14 @@
   "book_record": {
     "terms": [
       {
-        "source": "murder case",
-        "target": "vụ án mạng",
+        "source": "Study in Scarlet",
+        "target": "Cuộc Điều Tra Màu Đỏ",
         "match": "word",
         "case_sensitive": false
       },
       {
-        "source": "investigation",
-        "target": "cuộc điều tra",
+        "source": "Baker Street",
+        "target": "phố Baker",
         "match": "word",
         "case_sensitive": false
       }

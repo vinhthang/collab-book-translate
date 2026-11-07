@@ -1,7 +1,7 @@
 # Design: Collaborative Multi-Agent Book Translation on GitHub (v1.2.0)
 
 - **Feature ID**: `2026-11-06-collab-multi-agent-translation`
-- **Status**: `Planning`
+- **Status**: `In-Testing`
 - **Version**: `1.2.0`
 
 Derived from spec.md v1.2.0 and decisions.md after the Gate 1 re-run 2 PASS. This document describes how the feature is built; it does not change the requirements. The v1.1.0 design is superseded in full: the main agent now has its own bot account, the contributor file is `translation.xml`, and "CI" is renamed to sweep checks.
@@ -13,7 +13,7 @@ Derived from spec.md v1.2.0 and decisions.md after the Gate 1 re-run 2 PASS. Thi
 | `vinhthang/agent-translator` | Private | The tool: scripts, skills, agents, rules, specs. Unchanged in layout by this feature. |
 | `vinhthang/collab-book-translate` (new) | Public | `books/<slug>/`, `runs/<slug>/`, `.github/`, `CONTRIBUTING.md`, `collab_ledger.json` per book, `.gitignore`. |
 
-The main agent runs locally on thang's machine with agent-translator as the plugin; `workspace_dir` points at a local clone of `collab-book-translate`. It authenticates to GitHub as its own dedicated bot account (`collab-main-agent`, Maintain role), never as `vinhthang`; `vinhthang` is the only human approver (D1, ADR-COLLAB-018).
+The main agent runs locally on thang's machine with agent-translator as the plugin; `workspace_dir` points at a local clone of `collab-book-translate`. It authenticates to GitHub as its own dedicated bot account (`1quachuoi9vang`, Maintain role), never as `vinhthang`; `vinhthang` is the only human approver (D1, ADR-COLLAB-018).
 
 ## 2. `collab-book-translate` layout
 
@@ -71,7 +71,7 @@ Label set: `status:open`, `status:candidates`, `status:done`, `status:needs-revi
 - No GitHub Actions, no inbound webhook.
 
 ### 3.7 Validator scripts and tests (P1-8, R2-P1-4)
-- New scripts in `agent-translator/scripts/` (test-first, RED before GREEN): `collab_intake.py` (manifest schema, path allowlist, pair support, size cap), `collab_pr_validate.py` (one-chapter diff, body fields, author ≠ reviewer, `book_record.json` untouched), `collab_select.py` (selection rule, tie-breaks, window), `collab_ledger.py` (audit-chain completeness).
+- New scripts in `collab-book-translate/scripts/` (test-first, RED before GREEN): `collab_intake.py` (manifest schema, path allowlist, pair support, size cap), `collab_pr_validate.py` (one-chapter diff, body fields, author ≠ reviewer, `book_record.json` untouched), `collab_select.py` (selection rule, tie-breaks, window), `collab_ledger.py` (audit-chain completeness).
 - Tests: `tests/test_collab_intake.py`, `tests/test_collab_pr_validate.py`, `tests/test_collab_select.py`, `tests/test_collab_ledger.py`, plus the round-2 RED tests `tests/test_collab_verdict.py` (verdict mapping), `tests/test_collab_state.py` (transitions, 4th-round close, label correction), `tests/test_collab_completeness.py` (completeness block), `tests/test_collab_seed.py` (seed success and failure), `tests/test_collab_sweep.py` (recorded `gh … --json` fixtures, no network; lock and PR-comment behaviour). Final step before `In-Testing`: mutation-guard (≥ 80% kill) on `scripts/collab_*.py` plus an independent code review.
 
 ### 3.8 Publication (REQ-COLLAB-010, REQ-COLLAB-012)

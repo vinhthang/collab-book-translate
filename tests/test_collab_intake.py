@@ -97,6 +97,20 @@ class TestCollabIntake(unittest.TestCase):
         self.assertFalse(result["valid"])
         self.assertTrue(any("license" in d.lower() for d in result["defects"]))
 
+    def test_owner_permission_license_passes(self):
+        owner_perm_manifest = self.valid_manifest_en.copy()
+        owner_perm_manifest["license"] = "owner-permission"
+        result = validate_submission_pr(
+            changed_files=self.valid_files,
+            manifest_data=owner_perm_manifest,
+            source_text_sample="This is a valid English source text sample for testing.",
+        )
+        self.assertTrue(result["valid"])
+        self.assertEqual(result["defects"], [])
+        comment = format_prescreen_comment(result, owner_perm_manifest)
+        self.assertIn("owner-permission", comment)
+        self.assertIn("## Pre-screen Summary: PASS", comment)
+
     def test_unsupported_pair_returns_unsupported_pair_defect(self):
         bad_manifest = self.valid_manifest_en.copy()
         bad_manifest["source_lang"] = "fr"

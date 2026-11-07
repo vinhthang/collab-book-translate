@@ -9,9 +9,13 @@ Implements REQ-COLLAB-003, AC-COLLAB-003-1, AC-COLLAB-003-2, and D2:
 - Opens parallel tracking issues for ch02..chNN
 """
 
+import argparse
 import json
+import logging
+import os
 import re
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
 
@@ -25,6 +29,8 @@ from scripts.helper import (
     update_book_record_from_eval,
     validate_segment_parity,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def seed_merged_book(
@@ -106,7 +112,8 @@ def seed_merged_book(
                 failed_chapters.append(ch_d.name)
             else:
                 valid_chapters.append(ch_d)
-        except Exception:
+        except Exception as exc:
+            logger.debug("Failed parsing segments for %s: %s", ch_d.name, exc)
             failed_chapters.append(ch_d.name)
 
     if failed_chapters:
@@ -262,14 +269,16 @@ def seed_merged_book(
                 check=True,
             )
             glossary_sha = res.stdout.strip()
-        except Exception:
+        except Exception as exc:
+            logger.debug("Failed getting git HEAD sha: %s", exc)
             glossary_sha = "0000000000000000000000000000000000000000"
 
     # Persist glossary_sha inside book_record.json
     try:
         with open(book_record_path, "r", encoding="utf-8") as f:
             rec = json.load(f)
-    except Exception:
+    except Exception as exc:
+        logger.debug("Failed reading book_record_path: %s", exc)
         rec = book_record
     rec["glossary_sha"] = glossary_sha
     atomic_write_json(book_record_path, rec)
@@ -342,8 +351,8 @@ def seed_merged_book(
                         text=True,
                         check=False,
                     )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Git commit/push hook failed: %s", exc)
 
     # 7. Create tracking issues for ch02..chNN
     issues_created: List[Dict[str, Any]] = []
@@ -381,6 +390,8 @@ def seed_merged_book(
         if issue_creator_fn is not None:
             iss_info = issue_creator_fn(title, body, labels)
         else:
+            if os.environ.get("PYTEST_CURRENT_TEST"):
+                raise RuntimeError("Refusing to invoke live 'gh issue create' inside pytest without issue_creator_fn")
             try:
                 cmd = [
                     "rtk", "gh", "issue", "create",
@@ -391,11 +402,22 @@ def seed_merged_book(
                     "--label", f"lang:{src_lang}-{tgt_lang}",
                     "--label", f"book:{book_slug}",
                 ]
+                env = os.environ.copy()
+                if "GH_TOKEN" not in os.environ and gh_user:
+                    token_proc = subprocess.run(
+                        ["gh", "auth", "token", "-u", gh_user],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    if token_proc.returncode == 0 and token_proc.stdout.strip():
+                        env["GH_TOKEN"] = token_proc.stdout.strip()
                 proc = subprocess.run(
-                    cmd, cwd=repo_root_path, capture_output=True, text=True, check=True
+                    cmd, env=env, cwd=repo_root_path, capture_output=True, text=True, check=True
                 )
                 iss_info = proc.stdout.strip()
             except Exception as e:
+                logger.warning("Failed creating issue for %s: %s", ch_name, e)
                 iss_info = f"error: {e}"
 
         issues_created.append({
@@ -414,3 +436,58 @@ def seed_merged_book(
         "issues_created": issues_created,
         "failed_chapters": failed_chapters,
     }
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description="Seed a newly merged book into the collab translation pipeline.")
+    parser.add_argument("--repo-root", default=".", help="Root of git repository")
+    parser.add_argument("--book-slug", required=True, help="Slug of the book to seed")
+    parser.add_argument("--repo", default="vinhthang/collab-book-translate", help="Full repository name")
+    parser.add_argument("--gh-user", default="1quachuoi9vang", help="GitHub user for auth token and attribution")
+    parser.add_argument("--ch01-translation-file", default=None, help="Path to pre-translated ch01 translation XML")
+    args = parser.parse_args(argv)
+
+    repo_root = Path(args.repo_root).resolve()
+    trans_fn = None
+    eval_fn = None
+    if args.ch01_translation_file:
+        trans_path = Path(args.ch01_translation_file).resolve()
+        def file_trans_fn(src_xml: str, rec: Dict[str, Any], man: Dict[str, Any]) -> str:
+            return trans_path.read_text(encoding="utf-8")
+        trans_fn = file_trans_fn
+
+        def default_eval_fn(source_xml: str, trans_xml: str, book_record: Dict[str, Any]) -> Dict[str, Any]:
+            from scripts.evaluate import run_evaluation
+            with tempfile.TemporaryDirectory() as td:
+                t_dir = Path(td)
+                s_p = t_dir / "source.txt"
+                d_p = t_dir / "translation.xml"
+                b_p = t_dir / "book_record.json"
+                o_p = t_dir / "eval.json"
+                s_p.write_text(source_xml, encoding="utf-8")
+                d_p.write_text(trans_xml, encoding="utf-8")
+                b_p.write_text(json.dumps(book_record, ensure_ascii=False, indent=2), encoding="utf-8")
+                return run_evaluation(
+                    source_path=str(s_p),
+                    draft_path=str(d_p),
+                    book_record_path=str(b_p),
+                    output_path=str(o_p),
+                    force_mock=False,
+                    engine="workbuddy",
+                )
+        eval_fn = default_eval_fn
+
+    res = seed_merged_book(
+        repo_root=repo_root,
+        book_slug=args.book_slug,
+        repo_full_name=args.repo,
+        gh_user=args.gh_user,
+        translate_fn=trans_fn,
+        evaluate_fn=eval_fn,
+    )
+    print(json.dumps(res, indent=2, ensure_ascii=False))
+    return 0 if res.get("seeded") else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

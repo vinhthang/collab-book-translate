@@ -59,6 +59,7 @@ This repository orchestrates end-to-end book translations from English (`en`) an
 
 - **[A Scandal in Bohemia (*Vụ Bê Bối Ở Xứ Bohemia*)](https://github.com/vinhthang/collab-book-translate/releases/tag/scandal-in-bohemia-v1.0)** (v1.0):
   - Author: Arthur Conan Doyle
+  - Note: 3-chapter, 12-segment public-domain pilot abridgment of Arthur Conan Doyle's *A Scandal in Bohemia* (Project Gutenberg #1661).
   - Deliverables: EPUB 3, PDF, DOCX
   - Quality scores of record: 4.60 (ch01), 4.63 (ch02), 4.50 (ch03)
   - Full audit trail: [`runs/scandal-in-bohemia/collab_ledger.json`](runs/scandal-in-bohemia/collab_ledger.json)

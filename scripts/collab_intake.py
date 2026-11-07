@@ -20,6 +20,7 @@ ALLOWED_LICENSES: Tuple[str, ...] = (
     "CC0-1.0",
     "CC-BY-4.0",
     "CC-BY-SA-4.0",
+    "owner-permission",
 )
 
 SUPPORTED_PAIRS: Tuple[Tuple[str, str], ...] = (
@@ -191,7 +192,7 @@ def format_prescreen_comment(result: Dict[str, Any], manifest_data: Dict[str, An
         lines.extend([
             "- [x] Path allowlist satisfied (`books/<slug>/manifest.json` and `books/<slug>/source/**`)",
             "- [x] Manifest schema complete and valid",
-            "- [x] License is on the approved list (public-domain, CC0-1.0, CC-BY-4.0, CC-BY-SA-4.0)",
+            "- [x] License is on the approved list (public-domain, CC0-1.0, CC-BY-4.0, CC-BY-SA-4.0, owner-permission)",
             "- [x] Supported language pair (`en->vi` or `zh->vi`)",
             "- [x] Source language verified; no already-translated Vietnamese text detected",
             "",

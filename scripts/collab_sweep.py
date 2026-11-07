@@ -3,6 +3,7 @@
 Governing specifications: REQ-COLLAB-015, R2-P2-5, R2-P2-6, R2-P2-7.
 """
 
+import argparse
 import contextlib
 import datetime
 import fcntl
@@ -11,6 +12,7 @@ import logging
 import os
 import re
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
@@ -41,14 +43,14 @@ def _parse_timestamp(val: Any, default: float) -> float:
         val_str = val.strip()
         try:
             return float(val_str)
-        except ValueError:
-            pass
+        except ValueError as exc:
+            logger.debug("Failed parsing float: %s", exc)
         try:
             iso_str = val_str.replace("Z", "+00:00")
             dt = datetime.datetime.fromisoformat(iso_str)
             return dt.timestamp()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Failed parsing timestamp: %s", exc)
     return default
 
 
@@ -83,15 +85,15 @@ def read_pr_file(
                 content = client.get_pr_file(pr_num, rel_str)
                 if content is not None:
                     return content
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Failed reading PR file via client.get_pr_file: %s", exc)
         elif hasattr(client, "read_pr_file"):
             try:
                 content = client.read_pr_file(pr_num, head_ref, rel_str, root)
                 if content is not None:
                     return content
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Failed reading PR file via client.read_pr_file: %s", exc)
 
     fetched = False
     if pr_num:
@@ -103,8 +105,8 @@ def read_pr_file(
                 check=True,
             )
             fetched = True
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Failed git fetch origin pull: %s", exc)
 
     if not fetched and head_ref:
         try:
@@ -115,8 +117,8 @@ def read_pr_file(
                 check=True,
             )
             fetched = True
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Failed git fetch origin head_ref: %s", exc)
 
     if fetched:
         try:
@@ -128,8 +130,8 @@ def read_pr_file(
                 check=True,
             )
             return res.stdout
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Failed git show head_ref: %s", exc)
 
     local_p = root / rel_str
     if local_p.is_file():
@@ -152,22 +154,22 @@ def read_pr_file_bytes(
                 content = client.get_pr_file_bytes(pr_num, rel_str)
                 if content is not None:
                     return content if isinstance(content, bytes) else str(content).encode("utf-8")
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Failed reading PR bytes via client.get_pr_file_bytes: %s", exc)
         elif hasattr(client, "get_pr_file"):
             try:
                 content = client.get_pr_file(pr_num, rel_str)
                 if content is not None:
                     return content if isinstance(content, bytes) else str(content).encode("utf-8")
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Failed reading PR bytes via client.get_pr_file: %s", exc)
         elif hasattr(client, "read_pr_file"):
             try:
                 content = client.read_pr_file(pr_num, head_ref, rel_str, root)
                 if content is not None:
                     return content if isinstance(content, bytes) else str(content).encode("utf-8")
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Failed reading PR bytes via client.read_pr_file: %s", exc)
 
     fetched = False
     if pr_num:
@@ -179,8 +181,8 @@ def read_pr_file_bytes(
                 check=True,
             )
             fetched = True
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Failed git fetch origin pull bytes: %s", exc)
 
     if not fetched and head_ref:
         try:
@@ -191,8 +193,8 @@ def read_pr_file_bytes(
                 check=True,
             )
             fetched = True
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Failed git fetch origin head_ref bytes: %s", exc)
 
     if fetched:
         try:
@@ -203,8 +205,8 @@ def read_pr_file_bytes(
                 check=True,
             )
             return res.stdout if isinstance(res.stdout, bytes) else res.stdout.encode("utf-8")
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Failed git show head_ref bytes: %s", exc)
 
     local_p = root / rel_str
     if local_p.is_file():
@@ -224,8 +226,8 @@ def commit_and_push(root: Path, paths: List[Union[Path, str]], message: str, cli
         try:
             client.commit_and_push(paths, message)
             return
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Failed commit_and_push on client: %s", exc)
     try:
         res = subprocess.run(
             ["git", "rev-parse", "--is-inside-work-tree"],
@@ -330,12 +332,12 @@ def non_blocking_sweep_lock(lock_path: Union[Path, str]):
         if locked:
             try:
                 fcntl.flock(fd, fcntl.LOCK_UN)
-            except OSError:
-                pass
+            except OSError as exc:
+                logger.debug("Failed flock unlock: %s", exc)
         try:
             os.close(fd)
-        except OSError:
-            pass
+        except OSError as exc:
+            logger.debug("Failed close fd: %s", exc)
 
 
 class GitHubCLIClient:
@@ -344,10 +346,25 @@ class GitHubCLIClient:
     def __init__(self, bot_login: str = "1quachuoi9vang", repo_root: Optional[Union[Path, str]] = None):
         self.bot_login = bot_login
         self.root = Path(repo_root) if repo_root is not None else Path.cwd()
+        self._bot_token = None
+        self._token_resolved = False
 
     def _run_gh(self, args: List[str]) -> str:
         cmd = ["gh"] + args
         env = os.environ.copy()
+        if "GH_TOKEN" not in os.environ and self.bot_login:
+            if not self._token_resolved:
+                token_proc = subprocess.run(
+                    ["gh", "auth", "token", "-u", self.bot_login],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if token_proc.returncode == 0 and token_proc.stdout.strip():
+                    self._bot_token = token_proc.stdout.strip()
+                self._token_resolved = True
+            if self._bot_token:
+                env["GH_TOKEN"] = self._bot_token
         res = subprocess.run(cmd, env=env, cwd=str(self.root), capture_output=True, text=True, check=True)
         return res.stdout
 
@@ -381,8 +398,8 @@ class GitHubCLIClient:
                                 pull_comments = json.loads(comments_out)
                                 rev_user = r["author_login"]
                                 line_count = sum(1 for c in pull_comments if (c.get("user") or {}).get("login") == rev_user)
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            logger.debug("Failed counting line comments: %s", exc)
                     if line_count == 0:
                         body = r.get("body", "")
                         for marker in ["<!-- segment:", "<!-- line:", "segment_id", "line_comment", "diff:"]:
@@ -411,25 +428,28 @@ class GitHubCLIClient:
             self.comment_pr(pr_num, comment)
         self._run_gh(["pr", "close", str(pr_num)])
 
-    def merge_pr(self, pr_num: int) -> str:
-        self._run_gh(["pr", "merge", str(pr_num), "--merge", "--auto=false"])
+    def merge_pr(self, pr_num: int, head_oid: Optional[str] = None) -> str:
+        args = ["pr", "merge", str(pr_num), "--merge", "--auto=false"]
+        if head_oid:
+            args.extend(["--match-head-commit", str(head_oid).strip()])
+        self._run_gh(args)
         try:
             subprocess.run(["git", "pull", "--rebase", "origin", "main"], cwd=str(self.root), capture_output=True, check=False)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Failed pull rebase: %s", exc)
         merge_sha = ""
         try:
             out = self._run_gh(["pr", "view", str(pr_num), "--json", "mergeCommit"])
             data = json.loads(out)
             merge_sha = (data.get("mergeCommit") or {}).get("oid", "")
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Failed getting mergeCommit: %s", exc)
         if not merge_sha:
             try:
                 res = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(self.root), capture_output=True, text=True, check=True)
                 merge_sha = res.stdout.strip()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Failed git rev-parse HEAD: %s", exc)
         return merge_sha
 
     def set_pr_labels(self, pr_num: int, add: List[str], remove: List[str]):
@@ -530,15 +550,14 @@ def run_sweep(
                     if manifest_raw:
                         try:
                             manifest_data = json.loads(manifest_raw)
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            logger.debug("Failed parsing manifest json: %s", exc)
                 elif "source" in f:
                     source_bytes = read_pr_file_bytes(gh, pr["number"], head_ref, f, root)
                     local_f = root / f
                     if local_f.is_file():
                         source_file_path = str(local_f)
                     elif source_bytes:
-                        import tempfile
                         tmp = tempfile.NamedTemporaryFile("wb", delete=False)
                         tmp.write(source_bytes)
                         tmp.flush()
@@ -564,8 +583,8 @@ def run_sweep(
                 for tmp_p in temp_files_to_cleanup:
                     try:
                         tmp_p.unlink(missing_ok=True)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.debug("Failed unlinking tmp file: %s", exc)
 
             # Post pre-screen comment if not already posted
             comments = pr.get("comments", [])
@@ -582,7 +601,11 @@ def run_sweep(
                     for r in reviews
                 )
                 if is_approved:
-                    gh.merge_pr(pr["number"])
+                    head_oid = (pr.get("head_oid") or pr.get("headRefOid") or "").strip()
+                    try:
+                        gh.merge_pr(pr["number"], head_oid=head_oid if head_oid else None)
+                    except TypeError:
+                        gh.merge_pr(pr["number"])
                     slug = val_res.get("slug") or (manifest_data.get("slug") if manifest_data else "")
                     if slug and seed_fn:
                         seed_fn(root, slug)
@@ -611,7 +634,7 @@ def run_sweep(
             if "status:candidate" in current_labels:
                 rec_sha = None
                 current_head_oid = (pr.get("head_oid") or pr.get("headRefOid") or "").strip()
-                for c in pr.get("comments", []):
+                for c in reversed(pr.get("comments", [])):
                     c_auth = _normalize_comment_author(c)
                     if c_auth and c_auth != bot_login:
                         continue
@@ -677,8 +700,18 @@ def run_sweep(
                     try:
                         book_record = json.loads(br_file.read_text(encoding="utf-8"))
                         expected_glossary_sha = book_record.get("glossary_sha") or book_record.get("expected_glossary_sha")
+                    except Exception as exc:
+                        logger.debug("Failed reading book_record.json: %s", exc)
+
+            additions_data = None
+            if any(f.endswith("/analyze_additions.json") for f in changed_files) and slug and ch_id:
+                add_rel = f"runs/{slug}/{ch_id}/analyze_additions.json"
+                add_raw = read_pr_file(gh, pr["number"], head_ref, add_rel, root)
+                if add_raw:
+                    try:
+                        additions_data = json.loads(add_raw)
                     except Exception:
-                        pass
+                        additions_data = "INVALID_JSON"
 
             val_pr = validate_translation_pr(
                 head_ref=head_ref,
@@ -688,6 +721,7 @@ def run_sweep(
                 source_xml_text=source_text,
                 translation_xml_text=trans_text,
                 expected_glossary_sha=expected_glossary_sha,
+                additions_data=additions_data,
             )
 
             # If deterministic checks fail -> report as PR comment and label status:revise/reassign without LLM eval
@@ -869,8 +903,8 @@ def run_sweep(
                         part = body.split("candidate_window_started_at:")[1].split("-->")[0].strip()
                         window_started_at = _parse_timestamp(part.split()[0], cur_now)
                         break
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.debug("Failed parsing window_started_at timestamp: %s", exc)
 
             if window_started_at is None:
                 window_started_at = _parse_timestamp(issue.get("created_at"), cur_now)
@@ -898,7 +932,7 @@ def run_sweep(
                         maj_cnt = pr.get("major_count")
                         current_head_oid = (pr.get("head_oid") or pr.get("headRefOid") or "").strip()
                         if w_tot is None:
-                            for c in pr.get("comments", []):
+                            for c in reversed(pr.get("comments", [])):
                                 c_auth = _normalize_comment_author(c)
                                 if bot_login and c_auth and c_auth not in (bot_login, human_approver):
                                     continue
@@ -1101,8 +1135,8 @@ def run_sweep(
                                         bind=True,
                                         chapter_id=ch_id,
                                     )
-                                except Exception:
-                                    pass
+                                except Exception as exc:
+                                    logger.debug("Failed updating book record from eval: %s", exc)
                         except Exception as e:
                             logger.exception("Error checking/binding analyze_additions")
 
@@ -1116,7 +1150,11 @@ def run_sweep(
                         continue
 
                     # Merge winning PR
-                    merge_ret = gh.merge_pr(winner["pr_number"])
+                    winner_head_oid = (winner_pr.get("head_oid") or winner_pr.get("headRefOid") or "").strip()
+                    try:
+                        merge_ret = gh.merge_pr(winner["pr_number"], head_oid=winner_head_oid if winner_head_oid else None)
+                    except TypeError:
+                        merge_ret = gh.merge_pr(winner["pr_number"])
                     merge_sha: Optional[str] = None
                     if isinstance(merge_ret, str) and len(merge_ret) in (40, 64):
                         merge_sha = merge_ret
@@ -1127,7 +1165,8 @@ def run_sweep(
                             merge_sha = subprocess.check_output(
                                 ["git", "rev-parse", "HEAD"], cwd=str(root), text=True
                             ).strip()
-                        except Exception:
+                        except Exception as exc:
+                            logger.debug("Failed rev-parse HEAD in winner merge: %s", exc)
                             merge_sha = f"merge-commit-{winner['pr_number']}"
 
                     # Close non-selected PRs
@@ -1173,8 +1212,8 @@ def run_sweep(
                                     else:
                                         cl_data[ch_id] = {"status": "done"}
                                 atomic_write_json(cl_file, cl_data)
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            logger.debug("Failed updating checklist done status: %s", exc)
 
                     # Append audit ledger entry
                     ledger_file = run_dir / "collab_ledger.json"
@@ -1191,8 +1230,8 @@ def run_sweep(
                         try:
                             br_dict = json.loads(br_file.read_text(encoding="utf-8"))
                             real_glossary_sha = br_dict.get("glossary_sha") or br_dict.get("expected_glossary_sha")
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            logger.debug("Failed reading real glossary sha: %s", exc)
                     if not real_glossary_sha:
                         try:
                             real_glossary_sha = subprocess.check_output(
@@ -1286,7 +1325,8 @@ def run_sweep(
                     if ledger_file.is_file():
                         try:
                             ledger_data = json.loads(ledger_file.read_text(encoding="utf-8"))
-                        except Exception:
+                        except Exception as exc:
+                            logger.debug("Failed reading ledger file: %s", exc)
                             ledger_data = {}
 
                     if ledger_data.get("released_tag") == tag:
@@ -1307,3 +1347,113 @@ def run_sweep(
                     sweep_result["releases_created"].append({"slug": slug_name, "tag": tag})
 
         return sweep_result
+
+
+def live_evaluate_pr(pr: Dict[str, Any], root: Path) -> Dict[str, Any]:
+    """Production evaluation helper for a translation PR via WorkBuddy."""
+    from scripts.evaluate import run_evaluation
+
+    root_path = Path(root).resolve()
+    head_ref = pr.get("head_ref") or pr.get("headRefName", "")
+    body = pr.get("body", "")
+    raw_chunk = parse_pr_body(body).get("chunk_id")
+    ch_id, slug = _extract_ch_id_and_slug(head_ref, raw_chunk)
+
+    s_file = root_path / "runs" / slug / ch_id / "source.txt"
+    source_xml = s_file.read_text(encoding="utf-8") if s_file.exists() else ""
+
+    gh = GitHubCLIClient(repo_root=root_path)
+    trans_xml = read_pr_file(
+        gh, pr.get("number", 0), head_ref, f"runs/{slug}/{ch_id}/translation.xml", root_path
+    )
+
+    rec_path = root_path / "runs" / slug / "book_record.json"
+    book_record = json.loads(rec_path.read_text(encoding="utf-8")) if rec_path.exists() else {}
+
+    with tempfile.TemporaryDirectory() as td:
+        t_dir = Path(td)
+        s_p = t_dir / "source.txt"
+        d_p = t_dir / "translation.xml"
+        b_p = t_dir / "book_record.json"
+        o_p = t_dir / "eval.json"
+
+        s_p.write_text(source_xml, encoding="utf-8")
+        d_p.write_text(trans_xml, encoding="utf-8")
+        b_p.write_text(json.dumps(book_record, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        return run_evaluation(
+            source_path=str(s_p),
+            draft_path=str(d_p),
+            book_record_path=str(b_p),
+            output_path=str(o_p),
+            force_mock=False,
+            engine="workbuddy",
+        )
+
+
+def default_compile_book(root: Path, slug: str) -> List[str]:
+    """Compiles all formats for a completed book and returns generated asset paths."""
+    from scripts.compile_book import compile_book_formats
+
+    run_dir = Path(root).resolve() / "runs" / slug
+    out_dir = run_dir / "release_assets"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    res = compile_book_formats(
+        run_dir=run_dir,
+        output_dir=out_dir,
+        formats="epub,pdf,docx",
+        allow_incomplete=False,
+    )
+    return [str(p) for p in res.values()]
+
+
+def default_seed_book(
+    root: Path,
+    slug: str,
+    translate_fn: Optional[Callable] = None,
+    evaluate_fn: Optional[Callable] = None,
+) -> Dict[str, Any]:
+    """Seeds a merged book using the authoritative collab_seed pipeline."""
+    from scripts.collab_seed import seed_merged_book
+
+    return seed_merged_book(
+        repo_root=Path(root).resolve(),
+        book_slug=slug,
+        translate_fn=translate_fn,
+        evaluate_fn=evaluate_fn,
+    )
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    """CLI entrypoint for running an autonomous collaboration sweep."""
+    parser = argparse.ArgumentParser(description="Run autonomous collaboration sweep on GitHub PRs.")
+    parser.add_argument("--repo-root", default=".", help="Root of git repository")
+    parser.add_argument("--window-hours", type=float, default=24.0, help="Candidate collection window in hours")
+    parser.add_argument("--fallback-hours", type=float, default=48.0, help="Fallback window in hours")
+    parser.add_argument("--bot-login", default="1quachuoi9vang", help="Bot GitHub username")
+    parser.add_argument("--human-approver", default="vinhthang", help="Human approver username")
+    parser.add_argument("--lock-path", default=None, help="Path to lock file")
+    parser.add_argument("--offline", action="store_true", help="Run in offline mode without live LLM evaluation")
+    args = parser.parse_args(argv)
+
+    repo_root = Path(args.repo_root).resolve()
+    eval_fn = None if args.offline else live_evaluate_pr
+    lock_path = Path(args.lock_path).resolve() if args.lock_path else None
+
+    result = run_sweep(
+        repo_root=repo_root,
+        evaluate_fn=eval_fn,
+        compile_fn=default_compile_book,
+        seed_fn=default_seed_book,
+        window_hours=args.window_hours,
+        fallback_hours=args.fallback_hours,
+        bot_login=args.bot_login,
+        human_approver=args.human_approver,
+        lock_path=lock_path,
+    )
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

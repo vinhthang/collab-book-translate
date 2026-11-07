@@ -8,3 +8,7 @@ runs/**/*.pdf
 runs/**/*.docx
 runs/**/.collab_sweep.lock
 runs/**/.*.lock
+/.sweep.lock
+*.lock
+runs/**/_agent/
+runs/**/release_assets/

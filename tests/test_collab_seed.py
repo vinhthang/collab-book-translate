@@ -6,16 +6,33 @@ Tests REQ-COLLAB-003, AC-COLLAB-003-1, AC-COLLAB-003-2, and D2.
 import json
 import os
 import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from scripts.collab_seed import seed_merged_book
+from scripts.collab_seed import seed_merged_book, main as collab_seed_main
 
 
 class TestCollabSeed(unittest.TestCase):
 
     def setUp(self):
+        real_subprocess_run = subprocess.run
+
+        def safe_subprocess_run(cmd, *args, **kwargs):
+            if isinstance(cmd, (list, tuple)):
+                if any(arg == "gh" or (isinstance(arg, str) and "gh" in arg and "github" not in arg) for arg in cmd) or any(isinstance(arg, str) and "issue" in arg for arg in cmd):
+                    raise RuntimeError("Live gh CLI calls are forbidden in unit tests")
+            elif isinstance(cmd, str):
+                if "gh " in cmd or "issue" in cmd:
+                    raise RuntimeError("Live gh CLI calls are forbidden in unit tests")
+            return real_subprocess_run(cmd, *args, **kwargs)
+
+        sp_patcher = patch("scripts.collab_seed.subprocess.run", side_effect=safe_subprocess_run)
+        sp_patcher.start()
+        self.addCleanup(sp_patcher.stop)
+
         self.test_dir = tempfile.mkdtemp()
         self.repo_root = Path(self.test_dir)
         self.book_slug = "test-novella"
@@ -460,6 +477,48 @@ class TestCollabSeed(unittest.TestCase):
         ).stdout.strip()
         self.assertEqual(remote_head, local_head)
 
+    def test_seed_merged_book_blocks_live_gh_when_issue_creator_none(self):
+        os.environ["PYTEST_CURRENT_TEST"] = "test_collab_seed_guard"
+
+        def mock_eval(s, t, b):
+            return {"verdict": "PASS", "weighted_total": 4.9, "issues": []}
+
+        with self.assertRaises(RuntimeError) as ctx:
+            seed_merged_book(
+                repo_root=self.repo_root,
+                book_slug=self.book_slug,
+                translate_fn=self.mock_translate,
+                evaluate_fn=mock_eval,
+                issue_creator_fn=None,
+            )
+        self.assertIn("Refusing to invoke live 'gh issue create'", str(ctx.exception))
+
+    def test_collab_seed_main_cli_happy_path(self):
+        trans_file = self.repo_root / "ch01_trans.xml"
+        trans_file.write_text(self.mock_translate(self.ch01_source, {}, {}), encoding="utf-8")
+
+        with patch("scripts.collab_seed.seed_merged_book") as mock_seed:
+            mock_seed.return_value = {"seeded": True, "book_slug": self.book_slug}
+            exit_code = collab_seed_main([
+                "--repo-root", str(self.repo_root),
+                "--book-slug", self.book_slug,
+                "--ch01-translation-file", str(trans_file),
+            ])
+            self.assertEqual(exit_code, 0)
+            mock_seed.assert_called_once()
+            _, kwargs = mock_seed.call_args
+            self.assertEqual(kwargs["book_slug"], self.book_slug)
+            self.assertIsNotNone(kwargs["translate_fn"])
+            self.assertIsNotNone(kwargs["evaluate_fn"])
+
+    def test_collab_seed_main_cli_failure_exit_code(self):
+        with patch("scripts.collab_seed.seed_merged_book") as mock_seed:
+            mock_seed.return_value = {"seeded": False, "reason": "failed"}
+            exit_code = collab_seed_main([
+                "--repo-root", str(self.repo_root),
+                "--book-slug", self.book_slug,
+            ])
+            self.assertEqual(exit_code, 1)
 
 
 if __name__ == "__main__":

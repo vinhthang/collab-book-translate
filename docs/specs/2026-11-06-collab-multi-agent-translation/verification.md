@@ -32,6 +32,8 @@ Manual end-to-end rows (pilot only, the genuinely end-to-end ACs): AC-COLLAB-002
 
 ### Live Novella Pilot Empirical Evidence (T-402: A Scandal in Bohemia)
 
+> **Pilot Scope Note**: `scandal-in-bohemia` is the 3-chapter, 12-segment public-domain pilot abridgment of Arthur Conan Doyle's *A Scandal in Bohemia* (Project Gutenberg #1661).
+
 1. **Book Intake & Prescreen (AC-COLLAB-001-1, AC-COLLAB-002-1, AC-COLLAB-002-2)**:
    - PR [#13](https://github.com/vinhthang/collab-book-translate/pull/13): Book submission PR (`book/scandal-in-bohemia`) with `manifest.json` and `source/scandal_in_bohemia.txt`.
    - Bot prescreen: Prescreen PASS comment posted by `1quachuoi9vang` confirming public-domain license (Project Gutenberg #1661) and supported pair `en->vi`.

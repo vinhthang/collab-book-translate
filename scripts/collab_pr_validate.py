@@ -8,6 +8,7 @@ Implements REQ-COLLAB-004, REQ-COLLAB-005, REQ-COLLAB-009:
 - Validate independent reviews (author != reviewer, line comments, 6-dimension rubric)
 """
 
+import json
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -167,21 +168,19 @@ def validate_translation_pr(
 
     # 4. PR Body Fields Validation
     parsed_body = parse_pr_body(body)
-    body_agent = parsed_body.get("agent")
-    if not body_agent:
-        defects.append("Missing required PR body field: 'Agent'")
-    elif body_agent != author_login:
-        defects.append(
-            f"PR body Agent '{body_agent}' does not match PR author '{author_login}'"
-        )
-
     for req_field in REQUIRED_BODY_FIELDS:
         val = parsed_body.get(req_field)
         if not val:
             defects.append(f"Missing or empty required PR body field: '{req_field}'")
 
+    body_agent = parsed_body.get("agent")
+    if body_agent and body_agent != author_login:
+        defects.append(
+            f"PR body Agent '{body_agent}' does not match PR author '{author_login}'"
+        )
+
     body_sha = parsed_body.get("glossary_sha")
-    if expected_glossary_sha and body_sha != expected_glossary_sha:
+    if expected_glossary_sha and body_sha and body_sha != expected_glossary_sha:
         defects.append(
             f"Glossary SHA mismatch: PR has '{body_sha}', expected '{expected_glossary_sha}'"
         )
@@ -263,7 +262,29 @@ def validate_translation_pr(
 
     # 6. Proposed Additions Validation
     if additions_data is not None:
-        proposals = additions_data if isinstance(additions_data, list) else additions_data.get("proposals", [])
+        try:
+            raw_add_str = json.dumps(additions_data, ensure_ascii=False)
+        except Exception:
+            raw_add_str = str(additions_data)
+        add_inj = detect_prompt_injection(raw_add_str)
+        if add_inj:
+            injection_flags.extend(add_inj)
+            defects.extend([f"analyze_additions.json: {inj}" for inj in add_inj])
+
+        if isinstance(additions_data, list):
+            proposals = additions_data
+        elif isinstance(additions_data, dict):
+            if "proposals" in additions_data:
+                proposals = additions_data.get("proposals", [])
+            elif "book_record_additions" in additions_data and isinstance(additions_data["book_record_additions"], dict):
+                proposals = additions_data["book_record_additions"].get("terms", [])
+            else:
+                proposals = []
+                defects.append("Invalid analyze_additions.json schema: expected list, 'proposals', or 'book_record_additions.terms'")
+        else:
+            proposals = []
+            defects.append("Invalid analyze_additions.json top-level type")
+
         for item in proposals:
             if isinstance(item, dict):
                 st = item.get("status")
@@ -271,6 +292,8 @@ def validate_translation_pr(
                     defects.append(
                         f"Analyze addition proposal status must be 'proposed', got '{st}'"
                     )
+            else:
+                defects.append(f"Invalid proposal entry in analyze_additions.json: expected dict, got {type(item).__name__}")
 
     return {
         "valid": len(defects) == 0,

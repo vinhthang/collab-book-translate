@@ -4,13 +4,13 @@
     "names": [],
     "terms": [
       {
-        "source": "murder case",
-        "target": "vụ án mạng",
+        "source": "Study in Scarlet",
+        "target": "Cuộc Điều Tra Màu Đỏ",
         "status": "bound"
       },
       {
-        "source": "investigation",
-        "target": "cuộc điều tra",
+        "source": "Baker Street",
+        "target": "phố Baker",
         "status": "bound"
       }
     ],
