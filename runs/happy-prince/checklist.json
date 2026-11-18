@@ -1,13 +1,13 @@
 {
   "book_slug": "happy-prince",
-  "seed_status": "seeding",
+  "seed_status": "seeded",
   "seed_error": null,
   "chapters": [
     {
       "chapter": "ch01",
       "chapter_num": 1,
       "title": "Chapter 1: The Happy Prince",
-      "status": "pending"
+      "status": "done"
     },
     {
       "chapter": "ch02",

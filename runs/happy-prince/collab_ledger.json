@@ -1,0 +1,19 @@
+{
+  "book_slug": "happy-prince",
+  "chapters": {
+    "ch01": {
+      "chapter": "ch01",
+      "issue_number": 0,
+      "selected_pr": 20,
+      "rejected_prs": [],
+      "translator_login": "1quachuoi9vang",
+      "reviewer_logins": [],
+      "reviewer_score": 3.5,
+      "score_of_record": 3.5,
+      "verdict": "PASS",
+      "merge_sha": "cb01af538f2990c56e55a889e79f40739641fcae",
+      "glossary_sha": "fe564bcf3d45e16a3d9d1a0c834dbb9b89ad2cc923ce3fd7477740d68d8cd00e"
+    }
+  },
+  "released_tag": null
+}
