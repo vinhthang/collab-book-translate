@@ -4,19 +4,12 @@
   "target_lang": "vi",
   "title": "The Happy Prince and Other Tales",
   "brief": {
-    "genre": "fiction",
+    "genre": "literary",
     "author": "Oscar Wilde",
     "summary": "Tuyển tập năm truyện cổ tích trữ tình của Oscar Wilde về lòng trắc ẩn, sự hy sinh, tình yêu, lòng vị tha và thói phù phiếm của con người.",
     "source_lang": "en",
     "target_lang": "vi",
-    "title": "Hoàng Tử Hạnh Phúc và Những Truyện Khác",
-    "register": "Văn xuôi cổ tích trữ tình, giàu chất thơ, tinh tế và châm biếm nhẹ nhàng đặc trưng của Oscar Wilde.",
-    "audience": "Độc giả yêu văn học cổ điển và truyện cổ tích văn chương.",
-    "style_rules": [
-      "Giữ nhịp văn giàu nhạc tính, trong sáng, giàu hình ảnh của truyện cổ tích Oscar Wilde.",
-      "Tránh dịch máy móc câu bị động bằng 'được/bị' khi tiếng Việt tự nhiên dùng câu chủ động.",
-      "Xưng hô nhất quán giữa các nhân vật theo bảng đại từ đã quy định."
-    ]
+    "title": "The Happy Prince and Other Tales"
   },
   "book_record": {
     "terms": [
