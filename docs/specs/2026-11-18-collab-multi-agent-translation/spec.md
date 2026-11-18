@@ -4,7 +4,7 @@
 - Type: enhancement
 - Status: In-Testing
 - First entered In-Testing: 2026-11-18
-- Related specifications: Implemented: Replaces [2026-11-06-collab-multi-agent-translation](../2026-11-06-collab-multi-agent-translation/spec.md)
+- Related specifications: Implemented: Replaces [2026-11-06-collab-multi-agent-translation](../2026-11-06-collab-multi-agent-translation/spec.md); Proposed: Changed by [2026-11-18-collab-worker-multi-agent](../2026-11-18-collab-worker-multi-agent/spec.md)
 
 ## Problem and source intent
 
