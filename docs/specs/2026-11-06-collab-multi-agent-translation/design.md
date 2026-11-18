@@ -1,8 +1,7 @@
 # Design: Collaborative Multi-Agent Book Translation on GitHub (v1.2.0)
 
-- **Feature ID**: `2026-11-06-collab-multi-agent-translation`
-- **Status**: `In-Testing`
-- **Version**: `1.2.0`
+- Feature ID: 2026-11-06-collab-multi-agent-translation
+- Version: 1.2.0
 
 Derived from spec.md v1.2.0 and decisions.md after the Gate 1 re-run 2 PASS. This document describes how the feature is built; it does not change the requirements. The v1.1.0 design is superseded in full: the main agent now has its own bot account, the contributor file is `translation.xml`, and "CI" is renamed to sweep checks.
 
@@ -13,7 +12,7 @@ Derived from spec.md v1.2.0 and decisions.md after the Gate 1 re-run 2 PASS. Thi
 | `vinhthang/agent-translator` | Private | The tool: scripts, skills, agents, rules, specs. Unchanged in layout by this feature. |
 | `vinhthang/collab-book-translate` (new) | Public | `books/<slug>/`, `runs/<slug>/`, `.github/`, `CONTRIBUTING.md`, `collab_ledger.json` per book, `.gitignore`. |
 
-The main agent runs locally on thang's machine with agent-translator as the plugin; `workspace_dir` points at a local clone of `collab-book-translate`. It authenticates to GitHub as its own dedicated bot account (`1quachuoi9vang`, Maintain role), never as `vinhthang`; `vinhthang` is the only human approver (D1, ADR-COLLAB-018).
+The main agent runs locally on thang's machine with agent-translator as the plugin; `workspace_dir` points at a local clone of `collab-book-translate`. It authenticates to GitHub as its own dedicated bot account (`1quachuoi9vang`, Maintain role), never as `vinhthang`; `vinhthang` is the only human approver (D1, ADR-018).
 
 ## 2. `collab-book-translate` layout
 
@@ -37,35 +36,35 @@ collab-book-translate/
 
 ## 3. Components
 
-### 3.1 Intake and pre-screen (REQ-COLLAB-001, REQ-COLLAB-002)
+### 3.1 Intake and pre-screen (REQ-001, REQ-002, REQ-007)
 - Submission PR from `book/<slug>` (head ref; forks allowed). Path allowlist: only `books/<slug>/manifest.json` and `books/<slug>/source/**`.
 - Pre-screen comment by the main agent: manifest schema, format readable by `scripts/extract.py`, language check reusing `detect_source_language` (`scripts/utils/language.py`: CJK density above 15% → `zh`, else `en`) plus a Vietnamese-diacritic-density check (`scripts/evaluators/fallback.py`, ≥ 5%) so an already-translated `vi` source declared as `en` is caught, supported-pair check (`en→vi`, `zh→vi`), licence assessment against the CONTRIBUTING.md allowed list.
 - Merge requires human approval from the login `vinhthang` (an approval from the bot account alone does not count); enforced by CODEOWNERS `books/** @vinhthang` plus branch protection "Require review from Code Owners".
 
-### 3.2 Seed-then-parallel (REQ-COLLAB-003, REQ-COLLAB-009)
+### 3.2 Seed-then-parallel (REQ-003, REQ-009)
 - After merge: `scripts/extract.py` → `runs/<slug>/`; whole-book `analyze` (Brief, glossary, pronouns — `assert_fiction_pronouns_populated` must pass before any translation); the main agent's bot account authors the ch01 seed PR, translates ch01 as reference, and merges it itself on a live, non-fallback `evaluate.py` PASS with zero critical issues and all sweep checks passing (D2, no human step); the merge comment lists the glossary terms bound by the seed so thang can audit them afterwards; glossary frozen, SHA recorded. Post-merge commits (ledger, `bind=True`, `final.txt`) are pushed straight to `main` under the bot account's branch-protection bypass for post-merge commits only.
 - Tracking issues for ch02..chNN only, each naming chunk ID, segment range `seg_first..seg_last`, target language, frozen glossary SHA.
 - Translators propose terms in `runs/<slug>/chNN/analyze_additions.json` with `status: proposed` (`bind=False` path); the main agent binds approved proposals with `bind=True` at merge. A proposal conflicting with a term bound since the snapshot → REVISE.
 
-### 3.3 Translation PRs and reviews (REQ-COLLAB-004, REQ-COLLAB-005, REQ-COLLAB-013)
+### 3.3 Translation PRs and reviews (REQ-004, REQ-005, REQ-013)
 - Branch `translate/<slug>-<chunk>-<agent>`; PR body fields: Agent (login), Engine/Model provenance (mapped to the provenance field, `custom` plus free-text model), source/target language, chunk ID, issue number, frozen glossary SHA.
 - The one contributor file is `runs/<slug>/chNN/translation.xml`: its segments are exactly the ids and types of `chNN/source.txt`, in order; each `<segment>` keeps `<original>` byte-identical and adds `<translate>`; `<hanviet>` is required for `zh→vi`. A REVISE push overwrites the same file. The main agent derives `round<R>_*.txt` / `final.txt` after merge, in the post-merge commit. `chNN/source.txt` is committed by the main agent at ingestion, so contributors can read it. File allowlist: `runs/<slug>/chNN/{translation.xml, analyze_additions.json}`; `book_record.json` and `checklist.json` are main-agent-only.
 - Soft claim: `/claim` issue comment (courtesy); the main agent may echo it as an assignment. Labels are applied by the main agent only; `agent:*` labels are optional filters.
 - Valid review: reviewer login ≠ PR author login, ≥1 line comment, 6-dimension score block. Any GitHub user may review. The main agent counts valid reviews itself; it does not rely on GitHub required approvals. (For the bot's own D3 fallback PR, a valid review must come from any login other than the bot.)
-- Selection (REQ-COLLAB-013): 1-day window after the first PASS candidate; the window starts at the sweep timestamp that first labels a PR `status:candidate`, recorded in an issue comment and the ledger; ranking = highest score-of-record weighted total, tie-break fewer critical/major issues, then earliest PR; non-selected PRs closed with a comment giving their score and the reason. Starved chapter (D3): after 2 days with no PASS candidate, the main agent translates the chapter itself through a normal PR.
+- Selection (REQ-013): 1-day window after the first PASS candidate; the window starts at the sweep timestamp that first labels a PR `status:candidate`, recorded in an issue comment and the ledger; ranking = highest score-of-record weighted total, tie-break fewer critical/major issues, then earliest PR; non-selected PRs closed with a comment giving their score and the reason. Starved chapter (D3): after 2 days with no PASS candidate, the main agent translates the chapter itself through a normal PR.
 
-### 3.4 Score of record and final review (REQ-COLLAB-006)
+### 3.4 Score of record and final review (REQ-006)
 - The main agent runs `scripts/evaluate.py` (WorkBuddy live, not fallback) on each candidate PR. Threshold = `resolve_pass_threshold` (CLI > config.json > brief.genre, literary/fiction → 3.5, default → 4.0). Critical issues and quorum override the score.
 - Verdict mapping: PASS → candidate; FAIL ∧ ¬`check_redraft` → REVISE; FAIL ∧ `check_redraft` → REASSIGN (close PR, chapter stays open).
 - Branch protection ("require conversation resolution") applies to every PR into `main`; zero unresolved comments is checked on the selected PR only. It is harmless that non-selected PRs are also covered, because they are closed, not merged.
 
-### 3.5 State machine (REQ-COLLAB-014)
+### 3.5 State machine (REQ-014)
 
 Chapter issue: Seeding → Open → Candidates → Done. Candidate PR: NeedsChecks → NeedsReview → Evaluating → Revise / Reassign / Candidate → Merged / NotSelected. Only the main agent applies `status:*` labels. Starved chapter (D3): after 2 days with no PASS candidate, the main agent translates the chapter itself through a normal PR (same checks and score of record; a valid review must come from a login other than the bot).
 
 Label set: `status:open`, `status:candidates`, `status:done`, `status:needs-review`, `status:revise`, `status:reassign`, `status:candidate`, plus informational `agent:<name>`, `lang:<pair>`, `book:<slug>`. Revision cap: 3 REVISE rounds per PR, then close as REASSIGN.
 
-### 3.6 Sweep runtime (REQ-COLLAB-015)
+### 3.6 Sweep runtime (REQ-015)
 - Local main agent, triggered by an hourly scheduled fetch or a manual run. Each run is an idempotent sweep holding a lock (the existing `interprocess_lock`, 30 s default timeout): `git fetch`, list open PRs, issues, and reviews through `gh … --json`, advance each item until it blocks on external input (review, push, window) per §3.5, write the ledger. The lock acquire is non-blocking: if the lock is held, the sweep logs "sweep already running" and exits 0 (a defined, logged outcome, not a swallowed error).
 - Deterministic checks inside the sweep, reported as PR comments: path allowlist, one-chapter diff, PR body fields, segment parity, byte-invariance (code blocks, image anchors per AGENTS.md), `book_record.json` untouched.
 - No GitHub Actions, no inbound webhook.
@@ -74,7 +73,7 @@ Label set: `status:open`, `status:candidates`, `status:done`, `status:needs-revi
 - New scripts in `collab-book-translate/scripts/` (test-first, RED before GREEN): `collab_intake.py` (manifest schema, path allowlist, pair support, size cap), `collab_pr_validate.py` (one-chapter diff, body fields, author ≠ reviewer, `book_record.json` untouched), `collab_select.py` (selection rule, tie-breaks, window), `collab_ledger.py` (audit-chain completeness).
 - Tests: `tests/test_collab_intake.py`, `tests/test_collab_pr_validate.py`, `tests/test_collab_select.py`, `tests/test_collab_ledger.py`, plus the round-2 RED tests `tests/test_collab_verdict.py` (verdict mapping), `tests/test_collab_state.py` (transitions, 4th-round close, label correction), `tests/test_collab_completeness.py` (completeness block), `tests/test_collab_seed.py` (seed success and failure), `tests/test_collab_sweep.py` (recorded `gh … --json` fixtures, no network; lock and PR-comment behaviour). Final step before `In-Testing`: mutation-guard (≥ 80% kill) on `scripts/collab_*.py` plus an independent code review.
 
-### 3.8 Publication (REQ-COLLAB-010, REQ-COLLAB-012)
+### 3.8 Publication (REQ-010, REQ-012)
 - Completeness check: every chapter Done, segment counts matching via existing segment-parity and byte-invariance checks.
 - Compile with `scripts/compile_book.py --formats epub,pdf,docx` into `runs/<slug>/` (local only, gitignored).
 - Publish as a GitHub Release, tag `<slug>-v<N>`, with EPUB/PDF/DOCX as assets.
@@ -84,21 +83,21 @@ Label set: `status:open`, `status:candidates`, `status:done`, `status:needs-revi
 
 | REQ | Component |
 |---|---|
-| REQ-COLLAB-001 | §2 layout, §3.1 path allowlist |
-| REQ-COLLAB-002 | §3.1 pre-screen, CODEOWNERS, CONTRIBUTING |
-| REQ-COLLAB-003 | §3.2 seed-then-parallel |
-| REQ-COLLAB-004 | §3.3 PRs, soft claim, file allowlist |
-| REQ-COLLAB-005 | §3.3 valid review |
-| REQ-COLLAB-006 | §3.4 score of record |
-| REQ-COLLAB-007 | §3.1 pair check |
-| REQ-COLLAB-008 | [DEPRECATED] — nothing built |
-| REQ-COLLAB-009 | §3.2 frozen glossary, proposals |
-| REQ-COLLAB-010 | §3.8 releases |
-| REQ-COLLAB-011 | [DEPRECATED] — process in ADR-COLLAB-007 |
-| REQ-COLLAB-012 | §3.8 ledger |
-| REQ-COLLAB-013 | §3.3 selection |
-| REQ-COLLAB-014 | §3.5 state machine |
-| REQ-COLLAB-015 | §3.6 sweep runtime |
+| REQ-001 | §2 layout, §3.1 path allowlist |
+| REQ-002 | §3.1 pre-screen, CODEOWNERS, CONTRIBUTING |
+| REQ-003 | §3.2 seed-then-parallel |
+| REQ-004 | §3.3 PRs, soft claim, file allowlist |
+| REQ-005 | §3.3 valid review |
+| REQ-006 | §3.4 score of record |
+| REQ-007 | §3.1 pair check |
+| `REQ-COLLAB-008` | [DEPRECATED] — nothing built |
+| REQ-009 | §3.2 frozen glossary, proposals |
+| REQ-010 | §3.8 releases |
+| `REQ-COLLAB-011` | [DEPRECATED] — process in ADR-007 |
+| REQ-012 | §3.8 ledger |
+| REQ-013 | §3.3 selection |
+| REQ-014 | §3.5 state machine |
+| REQ-015 | §3.6 sweep runtime |
 
 ## 5. Open Design Points (from the spec)
 
@@ -238,8 +237,7 @@ commentary footnote numbering in the final text must match the source order.
 
 ```markdown
 This PR does not enter review: it touches `runs/tam-quoc-chi/book_record.json`,
-which is main-agent-only (REQ-COLLAB-004, AC-COLLAB-004-2). Remove that file
+which is main-agent-only (REQ-004, AC-004-2). Remove that file
 from the PR and re-open. The frozen glossary SHA field is also missing from
 the PR body.
 ```
-
