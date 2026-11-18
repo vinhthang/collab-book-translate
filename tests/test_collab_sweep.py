@@ -1184,3 +1184,164 @@ def test_confinement_commit_and_push_git_and_read_pr_file_fallbacks(tmp_path: Pa
     assert read_pr_file(fc, 1, "h", "runs/b1/ch01/final.txt", repo, head_oid=local_sha, allow_local_fallback=False) == "chapter 1\n"
     assert read_pr_file_bytes(fc, 1, "h", "nonexistent.txt", repo, allow_local_fallback=False) == b""
 
+
+def test_single_sweep_uppercase_github_states_and_cli_client_merges_competing_prs_without_window_start(
+    tmp_path: Path, monkeypatch
+):
+    from types import SimpleNamespace
+
+    _setup_seeded_book(tmp_path, slug="test-book")
+    clean_xml = (
+        '<segment id="S-0001" type="paragraph">\n'
+        '<original>\nHello world\n</original>\n'
+        '<translate>\nXin chào thế giới\n</translate>\n'
+        '</segment>\n'
+    )
+
+    monkeypatch.setattr(
+        "scripts.collab_config.load_collab_config",
+        lambda *a, **kw: SimpleNamespace(
+            workspace_dir=tmp_path,
+            repo_full_name="vinhthang/collab-book-translate",
+            bot_login="1quachuoi9vang",
+            bot_git_name="1quachuoi9vang",
+            bot_git_email="1quachuoi9vang@users.noreply.github.com",
+            human_approver="vinhthang",
+            fallback_hours=48.0,
+            max_revise_rounds=3,
+            release_formats="epub,pdf,docx",
+            max_source_bytes=52428800,
+            allowed_licenses=frozenset({"public-domain"}),
+            supported_pairs=frozenset({("en", "vi"), ("zh", "vi")}),
+        ),
+    )
+
+    blobs = {
+        (26, SHA_1, "runs/test-book/ch02/translation.xml"): clean_xml.encode("utf-8"),
+        (27, SHA_2, "runs/test-book/ch02/translation.xml"): clean_xml.encode("utf-8"),
+    }
+    monkeypatch.setattr(
+        "scripts.collab_sweep.read_pr_file_bytes",
+        lambda client, pr_num, head_ref, rel_path, root, head_oid="", allow_local_fallback=True: blobs.get(
+            (pr_num, head_oid, rel_path), b""
+        ),
+    )
+
+    raw_issues = [
+        {
+            "number": 22,
+            "title": "Translate [ch02] test-book-ch02: S-0001..S-0001",
+            "body": "- **Book:** test-book\n- **Chunk ID:** test-book-ch02\n",
+            "state": "OPEN",
+            "labels": [{"name": "status:open"}, {"name": "book:test-book"}],
+            "comments": [],
+            "createdAt": "2026-11-18T12:00:00Z",
+        }
+    ]
+    raw_prs = [
+        {
+            "number": 26,
+            "title": "translate(test-book): ch02 by @vinhthang",
+            "body": _valid_pr_body(agent="vinhthang", slug="test-book", ch="ch02", issue="#22"),
+            "state": "OPEN",
+            "headRefName": "translate/test-book-ch02-vinhthang",
+            "headRefOid": SHA_1,
+            "author": {"login": "vinhthang"},
+            "labels": [{"name": "lang:en-vi"}, {"name": "book:test-book"}],
+            "files": [{"path": "runs/test-book/ch02/translation.xml"}],
+            "reviews": [
+                {
+                    "author": {"login": "1quachuoi9vang"},
+                    "state": "COMMENTED",
+                    "commit": {"oid": SHA_1},
+                    "body": (
+                        "Checked S-0001 carefully.\n"
+                        "- **Fidelity:** 4.9\n"
+                        "- **Fluency:** 4.9\n"
+                        "- **Terminology:** 4.9\n"
+                        "- **Register:** 4.9\n"
+                        "- **Structure:** 4.9\n"
+                        "- **Completeness:** 4.9\n"
+                    ),
+                }
+            ],
+            "comments": [],
+        },
+        {
+            "number": 27,
+            "title": "translate(test-book): ch02 by @1quachuoi9vang",
+            "body": _valid_pr_body(agent="1quachuoi9vang", slug="test-book", ch="ch02", issue="#22"),
+            "state": "OPEN",
+            "headRefName": "translate/test-book-ch02-1quachuoi9vang",
+            "headRefOid": SHA_2,
+            "author": {"login": "1quachuoi9vang"},
+            "labels": [{"name": "lang:en-vi"}, {"name": "book:test-book"}],
+            "files": [{"path": "runs/test-book/ch02/translation.xml"}],
+            "reviews": [
+                {
+                    "author": {"login": "vinhthang"},
+                    "state": "COMMENTED",
+                    "commit": {"oid": SHA_2},
+                    "body": (
+                        "Checked S-0001 carefully.\n"
+                        "- **Fidelity:** 4.8\n"
+                        "- **Fluency:** 4.8\n"
+                        "- **Terminology:** 4.8\n"
+                        "- **Register:** 4.8\n"
+                        "- **Structure:** 4.8\n"
+                        "- **Completeness:** 4.8\n"
+                    ),
+                }
+            ],
+            "comments": [],
+        },
+    ]
+
+    gh_calls: List[List[str]] = []
+
+    cli = GitHubCLIClient(
+        bot_login="1quachuoi9vang",
+        repo_root=tmp_path,
+        bot_git_name="1quachuoi9vang",
+        bot_git_email="1quachuoi9vang@users.noreply.github.com",
+    )
+
+    def fake_run_gh(args: List[str], *, check: bool = True) -> str:
+        gh_calls.append(list(args))
+        if args[:2] == ["pr", "list"]:
+            return json.dumps(raw_prs)
+        if args[:2] == ["issue", "list"]:
+            return json.dumps(raw_issues)
+        if args[:2] == ["repo", "view"]:
+            return json.dumps({"nameWithOwner": "vinhthang/collab-book-translate"})
+        if args[0] == "api":
+            return "[]"
+        if args[:2] == ["pr", "view"]:
+            if "files" in args:
+                return json.dumps({"files": [{"path": "runs/test-book/ch02/translation.xml"}]})
+            return json.dumps({"mergeCommit": {"oid": SHA_3}})
+        return ""
+
+    monkeypatch.setattr(cli, "_run_gh", fake_run_gh)
+
+    res = run_sweep(tmp_path, client=cli, evaluate_fn=live_evaluate_pr, compile_fn=lambda r, s: [])
+
+    assert len(res["processed_translations"]) == 2
+    assert res["selected_winners"] == [{"chapter": "ch02", "winner_pr": 26, "slug": "test-book"}]
+
+    issue_comments = [c for c in gh_calls if c[:2] == ["issue", "comment"]]
+    assert not any("[collab-window-start" in str(c) for c in issue_comments)
+
+    assert any(c[:3] == ["pr", "merge", "26"] for c in gh_calls)
+    assert any(
+        c[:3] == ["pr", "edit", "27"] and "status:not-selected" in " ".join(c)
+        for c in gh_calls
+    )
+    assert any(c[:3] == ["pr", "close", "27"] for c in gh_calls)
+    assert any(
+        c[:3] == ["issue", "edit", "22"] and "status:done" in " ".join(c)
+        for c in gh_calls
+    )
+    assert any(c[:3] == ["issue", "close", "22"] for c in gh_calls)
+
+

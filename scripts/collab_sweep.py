@@ -294,6 +294,17 @@ def _assert_runs_confinement(
     return validated
 
 
+def _apply_label_diff(current: Sequence[Any], add: Sequence[str], remove: Sequence[str]) -> List[str]:
+    """Return updated label list with removed labels stripped and added labels appended."""
+    rem_set = {str(r) for r in remove}
+    updated = [str(l) for l in current if str(l) not in rem_set]
+    for a in add:
+        a_str = str(a)
+        if a_str not in updated:
+            updated.append(a_str)
+    return updated
+
+
 def commit_and_push(
     root: Path,
     paths: List[Union[Path, str]],
@@ -308,7 +319,10 @@ def commit_and_push(
     root_res = Path(root).resolve()
     abs_paths = _assert_runs_confinement(root_res, paths, book_slug=book_slug)
 
-    if client is not None and not isinstance(client, GitHubCLIClient) and hasattr(client, "commit_and_push"):
+    if isinstance(client, GitHubCLIClient):
+        bot_git_name = bot_git_name or client.bot_git_name
+        bot_git_email = bot_git_email or client.bot_git_email
+    elif client is not None and hasattr(client, "commit_and_push"):
         client.commit_and_push([str(p) for p in abs_paths], message)
         return
 
@@ -354,7 +368,13 @@ def commit_and_push(
         check=False,
     )
     if rem_res.returncode == 0 and "origin" in rem_res.stdout.split():
-        subprocess.run(["git", "push", "origin", "main"], cwd=str(root_res), check=True, capture_output=True)
+        if isinstance(client, GitHubCLIClient) and client.bot_login and not os.environ.get("PYTEST_CURRENT_TEST"):
+            from scripts.collab_worker import GitHubAccountContext
+
+            with GitHubAccountContext(client.bot_login) as ctx:
+                ctx.run_git(["push", "origin", "main"], cwd=str(root_res), check=True)
+        else:
+            subprocess.run(["git", "push", "origin", "main"], cwd=str(root_res), check=True, capture_output=True)
 
 
 def read_pr_file_bytes(
@@ -719,6 +739,14 @@ class GitHubCLIClient:
         self.bot_git_email = bot_git_email
         self._bot_token: Optional[str] = None
         self._token_resolved = False
+        self._open_prs_cache: List[Dict[str, Any]] = []
+        self._open_issues_cache: List[Dict[str, Any]] = []
+
+    def _find_cached(self, cache: List[Dict[str, Any]], number: int) -> Optional[Dict[str, Any]]:
+        for item in cache:
+            if item.get("number") == number:
+                return item
+        return None
 
     def ensure_labels(self, labels: Sequence[str]) -> None:
         """Idempotently ensure labels exist in the GitHub repository (REQ-034)."""
@@ -781,6 +809,7 @@ class GitHubCLIClient:
     def _normalize_prs(self, prs: List[Dict[str, Any]], *, count_inline: bool = True) -> List[Dict[str, Any]]:
         repo_name: Optional[str] = None
         for pr in prs:
+            pr["state"] = str(pr.get("state") or "open").strip().lower()
             pr["head_ref"] = pr.get("headRefName", "") or pr.get("head_ref", "")
             pr["head_oid"] = pr.get("head_oid") or pr.get("headRefOid", "")
             pr["author_login"] = pr.get("author_login") or (pr.get("author") or {}).get("login", "")
@@ -820,9 +849,10 @@ class GitHubCLIClient:
         return prs
 
     def list_open_prs(self) -> List[Dict[str, Any]]:
-        fields = "number,title,body,headRefName,headRefOid,author,labels,files,reviews,comments"
+        fields = "number,title,body,state,headRefName,headRefOid,author,labels,files,reviews,comments"
         out = self._run_gh(["pr", "list", "--state", "open", "--json", fields])
-        return self._normalize_prs(json.loads(out) if out.strip() else [], count_inline=True)
+        self._open_prs_cache = self._normalize_prs(json.loads(out) if out.strip() else [], count_inline=True)
+        return self._open_prs_cache
 
     def list_closed_prs(self) -> List[Dict[str, Any]]:
         fields = "number,title,body,headRefName,headRefOid,author,labels,closedAt,state"
@@ -834,33 +864,66 @@ class GitHubCLIClient:
         out = self._run_gh(["issue", "list", "--state", "open", "--limit", "500", "--json", fields])
         issues = json.loads(out) if out.strip() else []
         for issue in issues:
+            issue["state"] = str(issue.get("state") or "open").strip().lower()
             issue["labels"] = [l.get("name", "") if isinstance(l, dict) else str(l) for l in issue.get("labels", [])]
             issue["created_at"] = _parse_timestamp(issue.get("createdAt"), time.time())
             for c in issue.get("comments", []):
                 _normalize_comment_author(c)
-        return issues
+        self._open_issues_cache = issues
+        return self._open_issues_cache
 
     def list_all_issues(self) -> List[Dict[str, Any]]:
         fields = "number,title,body,labels,state"
         out = self._run_gh(["issue", "list", "--state", "all", "--limit", "500", "--json", fields], check=False)
         issues = json.loads(out) if out.strip() else []
         for issue in issues:
+            issue["state"] = str(issue.get("state") or "open").strip().lower()
             issue["labels"] = [l.get("name", "") if isinstance(l, dict) else str(l) for l in issue.get("labels", [])]
         return issues
 
     def comment_pr(self, pr_num: int, body: str) -> None:
         self._run_gh(["pr", "comment", str(pr_num), "--body", body])
+        cached = self._find_cached(self._open_prs_cache, pr_num)
+        if cached is not None:
+            cached.setdefault("comments", []).append({"body": body, "author_login": self.bot_login})
 
     def close_pr(self, pr_num: int, comment: Optional[str] = None) -> None:
         if comment:
             self.comment_pr(pr_num, comment)
         self._run_gh(["pr", "close", str(pr_num)])
+        cached = self._find_cached(self._open_prs_cache, pr_num)
+        if cached is not None:
+            cached["state"] = "closed"
 
     def merge_pr(self, pr_num: int, head_oid: Optional[str] = None) -> str:
         args = ["pr", "merge", str(pr_num), "--merge", "--auto=false"]
         if head_oid:
             args.extend(["--match-head-commit", str(head_oid).strip()])
         self._run_gh(args)
+        cached = self._find_cached(self._open_prs_cache, pr_num)
+        if cached is not None:
+            cached["state"] = "merged"
+
+        # Unlink any local untracked files brought in by the PR so --ff-only cleanly succeeds
+        try:
+            view_files = self._run_gh(["pr", "view", str(pr_num), "--json", "files"], check=False)
+            for f_info in (json.loads(view_files).get("files") or []) if view_files.strip() else []:
+                rel_f = f_info.get("path", "") if isinstance(f_info, dict) else ""
+                if not rel_f:
+                    continue
+                p = self.root / rel_f
+                if p.is_file():
+                    tracked = subprocess.run(
+                        ["git", "ls-files", "--error-unmatch", rel_f],
+                        cwd=str(self.root),
+                        capture_output=True,
+                        check=False,
+                    )
+                    if tracked.returncode != 0:
+                        p.unlink(missing_ok=True)
+        except Exception as exc:
+            logger.debug("Skipping untracked cleanup before pull for PR #%s: %s", pr_num, exc)
+
         pull_res = subprocess.run(
             ["git", "pull", "--ff-only", "origin", "main"],
             cwd=str(self.root),
@@ -869,6 +932,22 @@ class GitHubCLIClient:
             check=False,
         )
         if pull_res.returncode != 0:
+            is_git = subprocess.run(
+                ["git", "rev-parse", "--is-inside-work-tree"],
+                cwd=str(self.root),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            rem_res = subprocess.run(
+                ["git", "remote"],
+                cwd=str(self.root),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if is_git.returncode == 0 and is_git.stdout.strip() == "true" and "origin" in rem_res.stdout.split():
+                raise RuntimeError(f"git pull --ff-only origin main failed: {pull_res.stderr.strip()}")
             logger.debug("git pull --ff-only origin main returned %s", pull_res.returncode)
 
         merge_sha = ""
@@ -903,12 +982,21 @@ class GitHubCLIClient:
         if remove:
             args.extend(["--remove-label", ",".join(remove)])
         self._run_gh(args)
+        cached = self._find_cached(self._open_prs_cache, pr_num)
+        if cached is not None:
+            cached["labels"] = _apply_label_diff(cached.get("labels", []), add, remove)
 
     def comment_issue(self, issue_num: int, body: str) -> None:
         self._run_gh(["issue", "comment", str(issue_num), "--body", body])
+        cached = self._find_cached(self._open_issues_cache, issue_num)
+        if cached is not None:
+            cached.setdefault("comments", []).append({"body": body, "author_login": self.bot_login})
 
     def close_issue(self, issue_num: int) -> None:
         self._run_gh(["issue", "close", str(issue_num)])
+        cached = self._find_cached(self._open_issues_cache, issue_num)
+        if cached is not None:
+            cached["state"] = "closed"
 
     def set_issue_labels(self, issue_num: int, add: List[str], remove: List[str]) -> None:
         if not add and not remove:
@@ -921,6 +1009,9 @@ class GitHubCLIClient:
         if remove:
             args.extend(["--remove-label", ",".join(remove)])
         self._run_gh(args)
+        cached = self._find_cached(self._open_issues_cache, issue_num)
+        if cached is not None:
+            cached["labels"] = _apply_label_diff(cached.get("labels", []), add, remove)
 
     def create_issue(self, title: str, body: str, labels: List[str]) -> Dict[str, Any]:
         self.ensure_labels(labels)
@@ -1406,7 +1497,7 @@ def run_sweep(
         # (b) Process open translation PRs (head_ref starts with 'translate/')
         # ------------------------------------------------------------------
         for pr in prs:
-            if pr.get("state", "open") != "open":
+            if str(pr.get("state") or "open").strip().lower() != "open":
                 continue
             head_ref = str(pr.get("head_ref") or pr.get("headRefName") or "")
             if not head_ref.startswith("translate/"):
@@ -1667,6 +1758,12 @@ def run_sweep(
                 flag_cleared=flag_cleared,
             )
             outcome = verdict_res.get("outcome")
+            sweep_result["processed_translations"].append({
+                "pr": pr["number"],
+                "outcome": outcome,
+                "chapter": ch_id,
+                "slug": slug,
+            })
 
             if outcome == "EVALUATING":
                 has_hold_msg = any(
@@ -1709,7 +1806,7 @@ def run_sweep(
                     f"PR accepted as candidate with score {w_tot:.2f}.",
                 )
 
-                if target_issue is not None:
+                if target_issue is not None and float(window_hours or 0.0) > 0.0:
                     was_candidates = "status:candidates" in target_issue.get("labels", [])
                     recon_iss = reconcile_status_labels(target_issue.get("labels", []), "status:candidates")
                     if recon_iss["to_add"] or recon_iss["to_remove"]:
@@ -1739,20 +1836,20 @@ def run_sweep(
                 )
 
         # ------------------------------------------------------------------
-        # (c) Process chapter issues in status:candidates (REQ-025, REQ-026, REQ-027)
+        # (c) Process chapter issues in status:open or status:candidates (REQ-033, REQ-025)
         # ------------------------------------------------------------------
         for issue in issues:
-            if issue.get("state", "open") != "open":
+            if str(issue.get("state") or "open").strip().lower() != "open":
                 continue
             labels = list(issue.get("labels", []))
-            if "status:candidates" not in labels:
+            if "status:candidates" not in labels and "status:open" not in labels:
                 continue
 
             ch_id, slug = _extract_issue_metadata(issue)
 
             chapter_candidates: List[Dict[str, Any]] = []
             for pr in prs:
-                if pr.get("state", "open") != "open":
+                if str(pr.get("state") or "open").strip().lower() != "open":
                     continue
                 if "status:candidate" not in pr.get("labels", []):
                     continue
@@ -1803,9 +1900,10 @@ def run_sweep(
 
             # Cohort reversion: if 0 open Candidate PRs remain, revert issue to status:open (REQ-027 / AC-026-2)
             if not chapter_candidates:
-                recon_open = reconcile_status_labels(labels, "status:open")
-                if recon_open["to_add"] or recon_open["to_remove"]:
-                    gh.set_issue_labels(issue["number"], recon_open["to_add"], recon_open["to_remove"])
+                if "status:candidates" in labels:
+                    recon_open = reconcile_status_labels(labels, "status:open")
+                    if recon_open["to_add"] or recon_open["to_remove"]:
+                        gh.set_issue_labels(issue["number"], recon_open["to_add"], recon_open["to_remove"])
                 continue
 
             # REQ-033: Immediate windowless selection without candidate window gate
@@ -2027,7 +2125,7 @@ def run_sweep(
         # ------------------------------------------------------------------
         closed_prs_cache: Optional[List[Dict[str, Any]]] = None
         for issue in issues:
-            if issue.get("state", "open") != "open":
+            if str(issue.get("state") or "open").strip().lower() != "open":
                 continue
             labels = list(issue.get("labels", []))
             if "status:open" not in labels:
@@ -2042,7 +2140,7 @@ def run_sweep(
             # Count ALL open PRs of ANY state targeting <slug>-<chNN>
             open_matching_prs = []
             for pr in prs:
-                if pr.get("state", "open") != "open":
+                if str(pr.get("state") or "open").strip().lower() != "open":
                     continue
                 p_head = str(pr.get("head_ref") or pr.get("headRefName") or "")
                 p_body = parse_pr_body(pr.get("body", ""))
