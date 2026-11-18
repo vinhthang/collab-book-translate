@@ -617,19 +617,26 @@ class GitHubSeedPRClient:
                 abs_p.write_text(translation_xml, encoding="utf-8")
                 subprocess.run(["git", "add", rel_path], cwd=str(wt_dir), check=True, capture_output=True)
 
-            subprocess.run(
-                [
-                    "git",
-                    "-c", f"user.name={self.bot_git_name}",
-                    "-c", f"user.email={self.bot_git_email}",
-                    "commit",
-                    "-m", title,
-                ],
+            diff_cached = subprocess.run(
+                ["git", "diff", "--cached", "--quiet"],
                 cwd=str(wt_dir),
                 capture_output=True,
-                text=True,
-                check=True,
+                check=False,
             )
+            if diff_cached.returncode != 0:
+                subprocess.run(
+                    [
+                        "git",
+                        "-c", f"user.name={self.bot_git_name}",
+                        "-c", f"user.email={self.bot_git_email}",
+                        "commit",
+                        "-m", title,
+                    ],
+                    cwd=str(wt_dir),
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
             head_oid = subprocess.run(
                 ["git", "rev-parse", "HEAD"],
                 cwd=str(wt_dir),
@@ -844,6 +851,13 @@ def _git_commit_runs_if_repo(
         text=True,
         check=True,
     )
+    if "extract chapters" in message:
+        subprocess.run(
+            ["git", "reset", "--", f"runs/{book_slug}/*/translation.xml"],
+            cwd=str(repo_root),
+            capture_output=True,
+            check=False,
+        )
     diff_cached = subprocess.run(
         ["git", "diff", "--cached", "--quiet"],
         cwd=str(repo_root),
