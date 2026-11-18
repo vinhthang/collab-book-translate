@@ -19,6 +19,10 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 from scripts.collab_config import CollabConfig, load_collab_config
 from scripts.collab_intake import validate_submission_pr
 from scripts.collab_pr_validate import validate_review, validate_translation_pr
