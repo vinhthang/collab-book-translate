@@ -1,0 +1,58 @@
+{
+  "issues": [
+    {
+      "severity": "P1",
+      "description": "REQ-018/AC-018-2 make a `bot_login` pre-screen `PASS` for `<head_oid>` an absolute merge precondition, while REQ-023 lets `human_approver` clear a prompt-injection hold on a `book/<slug>` PR with `/approve-intake <head_oid>`. A pre-screen that detects injection is `FAIL`, and the spec provides no way to re-post or override that pre-screen after the clear, so the documented human override can never unblock the PR. Define whether injection flags are part of the pre-screen status or a separate hold, and how a cleared `<head_oid>` obtains an authoritative `PASS`."
+    },
+    {
+      "severity": "P1",
+      "description": "REQ-020 step 4 sets `seed_status: \"seeded\"` and commits `runs/<slug>/**` before creating the `ch02..chNN` tracking issues. A crash between the commit and issue creation leaves a seeded book with no chapter issues, and later sweeps skip seeding because `seed_status == \"seeded\"`; AC-030-1 only promises no duplicate comments/evaluations/releases/PRs, not issue reconciliation. Conversely, a crash after merging the ch01 PR but before step 4 leaves `seed_status: \"seeding\"`; step 3 only reuses an already-open ch01 PR, so the retry opens a second ch01 seed PR for an already-merged chapter. Add create-if-missing issue reconciliation and already-merged ch01 detection (ledger/`selected_pr`)."
+    },
+    {
+      "severity": "P1",
+      "description": "REQ-020/AC-020-2 set `seed_status: \"blocked_failed\"` on any extraction, pronoun, deterministic, or live-evaluation failure and state that subsequent sweeps skip seeding while it remains, but no reset command, expiry, or human recovery path is defined. A transient evaluator timeout or a fixable extraction issue permanently strands the book, contradicting REQ-030's 'advance until blocked on external input' and the autonomous workflow intent. Define a documented retry/reset (e.g., `/retry-seed <slug>` or clearing `seed_status`) and its preconditions."
+    },
+    {
+      "severity": "P1",
+      "description": "REQ-024 sets an effective pass threshold of 3.5 (fiction/literary) or 4.0 (otherwise) but also requires `verdict == \"PASS\"` for Candidate without requiring the evaluator's `verdict` to be computed with that same threshold. If the configured `evaluation_engine` uses its own threshold, a literary PR at 3.8 is `FAIL` and is routed to Revise even though it meets the spec's threshold. AC-024-2 also defines no route for `verdict == \"PASS\"` with `score_of_record < effective_threshold` or for `PASS` with critical issues. Define verdict normalization and the routing for those cases."
+    },
+    {
+      "severity": "P2",
+      "description": "REQ-020 defines `glossary_sha` as SHA-256 of canonical UTF-8 JSON with `sort_keys=True, separators=(\",\", \":\")`, but does not pin `ensure_ascii` or Unicode normalization and does not define ordering for the `names`/`pronouns` lists. Because the digest is the cross-component `Glossary SHA` contract in REQ-021 and the ledger integrity key in REQ-028, two conforming implementations can produce different digests for the same glossary, causing valid `ch02..chNN` PRs to be rejected or the ledger to fail. Specify the exact serializer (including `ensure_ascii` and list ordering) or a language-neutral canonical form."
+    },
+    {
+      "severity": "P2",
+      "description": "The authorized intent (Problem item 4b) says `collab_seed.py` runs whole-book analysis, but REQ-020 step 2 builds `book_record.json` from only the opening `min(3, N)` chapters. This silent scope narrowing is not reflected in the intent or labeled as a deviation, so an engineer cannot tell whether the whole book must be analyzed and what the glossary/pronoun coverage is. Either update the intent to 'opening-sample analysis' or state the bounded-analysis rationale and its effect."
+    },
+    {
+      "severity": "P2",
+      "description": "REQ-028 describes fields 'for each merged chapter' but never defines the top-level `collab_ledger.json` shape. The published pilot uses `{\"book_slug\", \"chapters\": {<ch>: {...}}, \"released_tag\"}`; an engineer could implement `chapters` as a list and still satisfy the prose. Since `verify_ledger_integrity` and the v1.0 grandfather rule depend on the pilot shape, pin the schema (top-level keys, `chapters` map keyed by chapter, `released_tag`)."
+    },
+    {
+      "severity": "P2",
+      "description": "REQ-025 requires synchronizing `book_record[\"book_record\"][\"terms\"]`, but REQ-020's canonical `book_record.json` schema lists only top-level `glossary`, `terms`, `names`, and `pronouns` and never defines a nested `book_record` object. This is an internal compatibility detail presented as a requirement; an engineer following REQ-020 will not create it, and the sync step is unimplementable. Either document the nested view in the schema or move it to design as an implementation detail."
+    },
+    {
+      "severity": "P2",
+      "description": "REQ-027 enumerates nine PR states but only defines transitions into `Revise`, `Reassign`, `Candidate`, `Merged`, and `NotSelected`. It never states the guards for `NeedsChecks -> NeedsReview` (deterministic checks pass) or `NeedsReview -> Evaluating` (at least one valid REQ-022 review), leaving the label state machine incomplete; REQ-022 only says an invalid review must not advance to `Evaluating`. Add explicit transition conditions for the first three states."
+    },
+    {
+      "severity": "P2",
+      "description": "REQ-026's starved-chapter fallback has three unresolved conditions: (a) it triggers when there are zero `Candidate` PRs and no open `translate/<slug>-<chNN>-<bot_login>` PR, even if a human contributor PR is open in `NeedsReview`/`Revise`, so a bot PR can duplicate active work; (b) the 48 h clock uses `issue_created_at_utc`, so a chapter that had Candidates for days and then loses them becomes eligible immediately rather than after 48 h of starvation; and (c) after `[collab-starved-escalated]` the spec says no further fallback PRs 'until human action' but never defines what human action resets the state or how the sweep detects it. Define the starved condition, clock start, and escalation reset."
+    },
+    {
+      "severity": "P2",
+      "description": "REQ-029 says that if GitHub Release `<slug>-v1.0` already exists, the sweep backfills `released_tag` without re-creating the tag. It never verifies that the existing release has non-empty assets for every configured `release_formats`, so an incomplete or empty pre-existing release is recorded as a successful publication, bypassing the completeness gate. Require asset verification before backfill, or state that the existing release is authoritative and how its assets are checked."
+    },
+    {
+      "severity": "P2",
+      "description": "REQ-023 requires pre-LLM prompt-injection detection but never defines the patterns, thresholds, or the criteria for `FlaggedForHuman`; it only references `detect_prompt_injection` in the source intent. AC-023-1's 'clean inputs pass' is not falsifiable without a normative pattern set, and a weak implementation could pass. Specify the detection contract (pattern classes, case handling, which fields) or reference a versioned rule table."
+    },
+    {
+      "severity": "P2",
+      "description": "REQ-018's pre-screen includes `license in allowed_licenses` and AC-018-2 makes a `FAIL` pre-screen unmergeable. That makes the agent's allowlist the final decision; `human_approver` cannot approve an otherwise acceptable book whose license is not pre-listed, contrary to the authorizing intent 'The agent pre-screens, a human decides'. Clarify whether the human may override the license check (and how), or state that the allowlist is the owner's policy and only config changes can extend it."
+    }
+  ],
+  "session_id": "workbuddy:01a1ec5b-9e72-7ae7-85f9-db3263ed109a",
+  "engine": "workbuddy"
+}
