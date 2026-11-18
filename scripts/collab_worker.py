@@ -542,6 +542,11 @@ def submit_translation(
             ctx.run_git(["push", "-u", "origin", branch, "--force"], cwd=str(worktree_dir))
 
             labels = [f"book:{book_slug}", f"lang:{src_lang}-{tgt_lang}", f"agent:{gh_user}"]
+            for lbl in labels:
+                try:
+                    ctx.run_gh(["label", "create", lbl, "--color", "c2e0c6", "--force", "-R", cfg.repo_full_name], check=False)
+                except Exception:
+                    pass
             pr_cmd = [
                 "pr",
                 "create",
