@@ -1343,5 +1343,3 @@ def test_single_sweep_uppercase_github_states_and_cli_client_merges_competing_pr
         for c in gh_calls
     )
     assert any(c[:3] == ["issue", "close", "22"] for c in gh_calls)
-
-

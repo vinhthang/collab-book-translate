@@ -9,6 +9,7 @@ Provides 2-account or multi-worker role execution without mutating global `gh au
 
 import argparse
 import json
+import logging
 import os
 import re
 import shutil
@@ -23,9 +24,23 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.collab_config import CollabConfig, load_collab_config
+from scripts.collab_config import CollabConfig, ConfigError, load_collab_config
 from scripts.collab_intake import validate_submission_pr
 from scripts.collab_pr_validate import validate_review, validate_translation_pr
+
+logger = logging.getLogger(__name__)
+
+
+def _load_optional_config(config_path: Optional[str] = None) -> Optional[CollabConfig]:
+    """Load CollabConfig if explicitly requested or available at default location."""
+    has_default = bool(os.environ.get("COLLAB_CONFIG_PATH")) or (REPO_ROOT / "config.json").is_file()
+    if not config_path and not has_default:
+        return None
+    try:
+        return load_collab_config(config_path)
+    except ConfigError as exc:
+        logger.debug("Optional collab config unavailable: %s", exc)
+        return None
 
 
 def _get_gh_token(gh_user: str) -> str:
@@ -183,13 +198,7 @@ def list_role_tasks(
     config_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """List open tasks for a user filtered by role and sharding (REQ-035)."""
-    cfg = None
-    if config_path or os.path.exists("config.json"):
-        try:
-            cfg = load_collab_config(config_path)
-        except Exception:
-            pass
-
+    cfg = _load_optional_config(config_path)
     repo = cfg.repo_full_name if cfg else None
 
     with GitHubAccountContext(gh_user) as ctx:
@@ -304,7 +313,7 @@ def submit_book(
         }
 
     branch = f"book/{slug}"
-    repo_root = Path(__file__).resolve().parent.parent
+    repo_root = Path(cfg.workspace_dir) if config_path else REPO_ROOT
     worktree_dir = repo_root / ".worktrees" / f"submit_{slug}_{gh_user}"
 
     with GitHubAccountContext(gh_user) as ctx:
@@ -394,7 +403,7 @@ def approve_intake(
         )
         for comment in meta.get("comments", []):
             author = (comment.get("author") or {}).get("login", "")
-            if author == cfg.bot_login or True:  # accept prescreen from coordinator
+            if author == cfg.bot_login:
                 body = comment.get("body", "")
                 if prescreen_re.search(body):
                     has_prescreen_pass = True
@@ -437,7 +446,7 @@ def submit_translation(
     branch = f"translate/{book_slug}-{chapter}-{gh_user}"
     agent_tag = agent_name or gh_user
 
-    repo_root = Path(__file__).resolve().parent.parent
+    repo_root = Path(cfg.workspace_dir) if config_path else REPO_ROOT
     ch_dir = repo_root / "runs" / book_slug / chapter
     source_file = ch_dir / "source.txt"
     manifest_file = repo_root / "books" / book_slug / "manifest.json"
@@ -451,8 +460,8 @@ def submit_translation(
     if br_file.is_file():
         try:
             glossary_sha = json.loads(br_file.read_text(encoding="utf-8")).get("glossary_sha", "")
-        except Exception:
-            pass
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.debug("Failed reading glossary_sha from %s: %s", br_file, exc)
 
     segs = parse_segments(tx_text)
     seg_first = segs[0]["id"] if segs else "S-0001"
@@ -470,14 +479,14 @@ def submit_translation(
                 if chapter in iss.get("title", ""):
                     issue_num = iss.get("number")
                     break
-        except Exception:
-            pass
+        except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
+            logger.debug("Issue lookup skipped for %s/%s: %s", book_slug, chapter, exc)
 
         if claim and issue_num:
             try:
                 ctx.run_gh(["issue", "comment", str(issue_num), "--repo", cfg.repo_full_name, "--body", "/claim"])
-            except Exception:
-                pass
+            except subprocess.CalledProcessError as exc:
+                logger.debug("Issue claim comment skipped for #%s: %s", issue_num, exc)
 
         issue_ref = f"#{issue_num}" if issue_num else "#0"
 
@@ -541,12 +550,12 @@ def submit_translation(
             )
             ctx.run_git(["push", "-u", "origin", branch, "--force"], cwd=str(worktree_dir))
 
-            labels = [f"book:{book_slug}", f"lang:{src_lang}-{tgt_lang}", f"agent:{gh_user}"]
+            labels = [f"book:{book_slug}", f"lang:{src_lang}-{tgt_lang}", f"agent:{agent_tag}"]
             for lbl in labels:
                 try:
                     ctx.run_gh(["label", "create", lbl, "--color", "c2e0c6", "--force", "-R", cfg.repo_full_name], check=False)
-                except Exception:
-                    pass
+                except subprocess.CalledProcessError as exc:
+                    logger.debug("Label ensure ignored for '%s': %s", lbl, exc)
             pr_cmd = [
                 "pr",
                 "create",
@@ -581,12 +590,7 @@ def submit_review(
     config_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Validate review rubric and post peer review as gh_user (REQ-035)."""
-    cfg = None
-    if config_path or os.path.exists("config.json"):
-        try:
-            cfg = load_collab_config(config_path)
-        except Exception:
-            pass
+    cfg = _load_optional_config(config_path)
     repo = cfg.repo_full_name if cfg else None
 
     with GitHubAccountContext(gh_user) as ctx:
