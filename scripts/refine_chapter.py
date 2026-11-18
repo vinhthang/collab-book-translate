@@ -5,7 +5,7 @@ Implements the 'fix' path of the translation pipeline adhering to agents/refine.
 - Loads previous round evaluation report (round<R-1>_evaluate.txt)
 - Filters for critical and major issues (or minor if none)
 - Maps issues to segment IDs in the bilingual draft (round<R-1>_translate.txt)
-- Patches segments via WorkBuddy cbc (deepseek-v4.1-flash) or offline rules
+- Patches segments via configured CLI runner or offline rules
 - Enforces NFR-6 byte-invariance via helper.diff_and_splice
 - Validates segment parity and strips to final clean markdown
 - Writes output to round<R>_translate.txt and final.txt
@@ -407,7 +407,7 @@ def patch_segment_cbc(
     book_record: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
-    Calls WorkBuddy cbc with configured model (default: hy3) to revise a specific segment
+    Calls configured CLI runner with configured model (default: hy3) to revise a specific segment
     adhering strictly to agents/refine.md rules.
     """
     has_raw_cjk = any(0x4e00 <= ord(c) <= 0x9fff for c in seg_translate)

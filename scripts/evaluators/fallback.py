@@ -332,7 +332,7 @@ def evaluate_fallback(
         "dimensions": dim_scores,
         "weighted_total": weighted,
         "verdict": verdict,
-        "notes": "Evaluation generated via WorkBuddy fallback evaluator.",
+        "notes": "Evaluation generated via deterministic fallback evaluator.",
         "fallback_unverified": True,
         "suppressed_verbatim_count": suppressed_cnt,
     }

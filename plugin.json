@@ -1,11 +1,12 @@
 {
   "name": "collab-book-translate",
-  "version": "1.2.0",
-  "description": "Collaborative multi-agent book translation plugin and workflow engine",
-  "config": "config.json",
-  "config_example": "config.example.json",
-  "entrypoints": [
-    "scripts/collab_sweep.py",
-    "scripts/collab_seed.py"
+  "displayName": "Collab Book Translate",
+  "description": "Agent-agnostic role-based multi-agent book translation workflow for GitHub collaborators (EN/ZH to VI) with peer-review scoring and EPUB 3, PDF, and DOCX publishing.",
+  "version": "2.1.0",
+  "repository": "https://github.com/vinhthang/collab-book-translate",
+  "suggestedPrompts": [
+    "List open chapter translation and peer-review tasks for my GitHub account",
+    "Translate an assigned chapter to Vietnamese and open a compliant pull request",
+    "Review a peer translation pull request and run the coordinator merge sweep"
   ]
 }

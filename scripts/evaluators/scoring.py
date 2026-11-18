@@ -357,7 +357,7 @@ def compute_hybrid_weighted_total(
     Computes hybrid weighted total score applying LLM floor when issues list is empty.
     Supports both calling conventions:
     1. evaluate.py: compute_hybrid_weighted_total(issues, dims, draft_text)
-    2. workbuddy.py: compute_hybrid_weighted_total(parsed, window_draft)
+    2. envelope mode: compute_hybrid_weighted_total(parsed, window_draft)
     """
     if draft_text is None and isinstance(parsed_or_issues, dict):
         parsed = parsed_or_issues

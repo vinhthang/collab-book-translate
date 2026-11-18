@@ -299,7 +299,7 @@ def validate_round_evaluation(
     data: Dict[str, Any],
     chapter: str = "ch01",
     round_num: int = 1,
-    evaluator_id: str = "workbuddy",
+    evaluator_id: str = "peer-review",
 ) -> Dict[str, Any]:
     """
     Validates evaluation outputs (round<R>_evaluate.txt) against canonical schema (AC-ARCH-1.4).

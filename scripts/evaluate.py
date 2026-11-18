@@ -1,7 +1,7 @@
 """
 scripts/evaluate.py — Unified Modular Translation Evaluator
-Primary entrypoint and sliding-window orchestrator for evaluating English-to-Vietnamese
-chapter translations across multiple engines (WorkBuddy CBC, Argon Web, Fallback).
+Primary entrypoint and sliding-window orchestrator for evaluating chapter
+translations using deterministic rule-based evaluation and aggregation.
 """
 
 import argparse
@@ -191,7 +191,7 @@ def run_evaluation(
     force_mock: bool = False,
     timeout: int = 300,
     window_size: int = 250,
-    engine: str = "workbuddy",
+    engine: str = "fallback",
     source_lang: str = "auto",
     pass_threshold: Optional[float] = None,
 ) -> Dict[str, Any]:
@@ -206,7 +206,7 @@ def run_evaluation(
         force_mock: If True, forces deterministic fallback evaluation
         timeout: Evaluation timeout in seconds
         window_size: Maximum segments per evaluation window
-        engine: 'workbuddy' or 'fallback'
+        engine: 'fallback'
         source_lang: 'auto', 'en', or 'zh'
 
     Returns:
@@ -426,7 +426,7 @@ def evaluate_file(*args, **kwargs) -> Dict[str, Any]:
     return run_evaluation(*args, **kwargs)
 
 
-def parse_args():
+def parse_args(argv: Optional[List[str]] = None):
     parser = argparse.ArgumentParser(description="Unified Modular Translation Evaluation Runner.")
     parser.add_argument("--draft", required=True, help="Path to draft translation")
     parser.add_argument("--source", required=True, help="Path to source chapter")
@@ -437,9 +437,9 @@ def parse_args():
     parser.add_argument("--window-size", type=int, default=250, help="Maximum segments per evaluation window")
     parser.add_argument(
         "--engine",
-        choices=["workbuddy", "fallback"],
-        default="workbuddy",
-        help="Evaluation engine to use (default: workbuddy)",
+        choices=["fallback"],
+        default="fallback",
+        help="Evaluation engine to use (default: fallback)",
     )
     parser.add_argument(
         "--source-lang",
@@ -453,7 +453,7 @@ def parse_args():
         default=None,
         help="Pass threshold for verdict calculation (defaults to resolve_pass_threshold)",
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def main():

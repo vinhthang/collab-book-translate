@@ -14,7 +14,7 @@ def maybe_install_fallback_collab_config(
     repo_root: Path,
     temp_dir: Path,
 ) -> bool:
-    """Set COLLAB_CONFIG_PATH to a temporary valid 14-key config file ONLY when
+    """Set COLLAB_CONFIG_PATH to a temporary valid 12-key config file ONLY when
     COLLAB_CONFIG_PATH is unset and <repo_root>/config.json does not exist on disk.
     """
     env_cfg = environ.get("COLLAB_CONFIG_PATH", "").strip()
@@ -31,10 +31,8 @@ def maybe_install_fallback_collab_config(
         "bot_git_name": "1quachuoi9vang",
         "bot_git_email": "1quachuoi9vang@users.noreply.github.com",
         "human_approver": "vinhthang",
-        "window_hours": 24.0,
         "fallback_hours": 48.0,
         "max_revise_rounds": 3,
-        "evaluation_engine": "workbuddy",
         "release_formats": "epub,pdf,docx",
         "max_source_bytes": 52428800,
         "allowed_licenses": [

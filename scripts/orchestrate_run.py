@@ -27,7 +27,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.translate_chapter import translate_chapter, normalize_chapter_id, TranslationCacheManager
-from scripts.evaluate_workbuddy import run_workbuddy_evaluation, evaluate_workbuddy
+from scripts.evaluate import evaluate_file, run_evaluation
 from scripts.helper import (
     bind_staged_proposals,
     parse_segments,
@@ -675,7 +675,7 @@ def orchestrate_run(
     fail_fast: bool = False,
     dry_run: bool = False,
     offline: bool = False,
-    engine: str = "workbuddy",
+    engine: str = "fallback",
     source_lang: str = "auto",
     threshold: Optional[float] = None,
     passes: int = 1,
@@ -760,7 +760,7 @@ def orchestrate_run(
         print("  1. Ingestion: extract.py (--xml-segments)")
         print(f"  2. Book Analysis: {workspace_dir / 'book_record.json'}")
         print(f"  3. Chapter Loop: translate_chapter (batch_size={batch_size}, concurrency={concurrency})")
-        print(f"     -> evaluate_workbuddy (window_size={window_size}, passes={passes}) -> Quorum -> Splicer")
+        print(f"     -> run_evaluation (window_size={window_size}, passes={passes}) -> Quorum -> Splicer")
         print(f"  4. Compilation: formats={formats}")
         print(f"  5. Summary: summarize_book.py")
         print("=" * 60)
@@ -1073,7 +1073,7 @@ def orchestrate_run(
                 if not is_valid:
                     print(f"  [PARITY WARNING] Chapter {ch_id} parity discrepancies: {parity_errors}")
 
-            # 3C. Evaluate via WorkBuddy
+            # 3C. Evaluate chapter draft
             print(f"  [EVALUATE] Chapter {ch_id} (Round {round_num}, window_size={window_size}, passes={passes})")
             eval_output = workspace_dir / ch_id / f"round{round_num}_evaluate.txt"
 
@@ -1082,7 +1082,7 @@ def orchestrate_run(
                     p_output = workspace_dir / ch_id / f"round{round_num}_evaluate_p{p_idx}.txt"
                     for attempt in range(2):
                         try:
-                            return run_workbuddy_evaluation(
+                            return run_evaluation(
                                 source_path=str(source_file) if source_file.exists() else str(draft_file),
                                 draft_path=str(draft_file),
                                 book_record_path=str(workspace_dir / "book_record.json"),
@@ -1128,7 +1128,7 @@ def orchestrate_run(
                 with open(eval_output, "w", encoding="utf-8") as f:
                     json.dump(eval_res, f, ensure_ascii=False, indent=2)
             else:
-                eval_res = run_workbuddy_evaluation(
+                eval_res = run_evaluation(
                     source_path=str(source_file) if source_file.exists() else str(draft_file),
                     draft_path=str(draft_file),
                     book_record_path=str(workspace_dir / "book_record.json"),
@@ -1374,9 +1374,9 @@ def parse_args(argv=None):
     parser.add_argument("--offline", action="store_true", help="Run translation and evaluation offline in mock mode")
     parser.add_argument(
         "--engine",
-        choices=["workbuddy", "fallback"],
-        default="workbuddy",
-        help="Evaluation engine to use (default: workbuddy)",
+        choices=["fallback"],
+        default="fallback",
+        help="Evaluation engine to use (default: fallback)",
     )
     parser.add_argument(
         "--source-lang",

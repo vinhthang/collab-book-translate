@@ -1,7 +1,7 @@
 """collab_config.py - Plugin configuration loader for collab-book-translate.
 
-Zero-fallback configuration module. Validates all required keys and ensures
-types and constraints are strictly met.
+Zero-fallback configuration module. Validates all 12 required keys and ensures
+types and constraints are strictly met while ignoring extra unknown keys.
 """
 
 from __future__ import annotations
@@ -27,10 +27,8 @@ class CollabConfig:
     bot_git_name: str
     bot_git_email: str
     human_approver: str
-    window_hours: float
     fallback_hours: float
     max_revise_rounds: int
-    evaluation_engine: str
     release_formats: str
     max_source_bytes: int
     allowed_licenses: frozenset[str]
@@ -44,10 +42,8 @@ REQUIRED_KEYS = (
     "bot_git_name",
     "bot_git_email",
     "human_approver",
-    "window_hours",
     "fallback_hours",
     "max_revise_rounds",
-    "evaluation_engine",
     "release_formats",
     "max_source_bytes",
     "allowed_licenses",
@@ -55,7 +51,6 @@ REQUIRED_KEYS = (
 )
 
 REPO_FULL_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
-VALID_EVALUATION_ENGINES = frozenset({"workbuddy", "cbc"})
 VALID_RELEASE_FORMATS = frozenset({"epub", "pdf", "docx"})
 
 
@@ -101,7 +96,6 @@ def load_collab_config(config_path: Optional[Union[str, Path]] = None) -> Collab
         "bot_git_name",
         "bot_git_email",
         "human_approver",
-        "evaluation_engine",
         "release_formats",
     )
     for f in str_fields:
@@ -123,27 +117,19 @@ def load_collab_config(config_path: Optional[Union[str, Path]] = None) -> Collab
             "Invalid config: human_approver must not equal bot_login"
         )
 
-    for f in ("window_hours", "fallback_hours"):
-        val = data[f]
-        if (
-            isinstance(val, bool)
-            or not isinstance(val, (int, float))
-            or not math.isfinite(val)
-            or val <= 0
-        ):
-            raise ConfigError(f"Missing or invalid required config key: {f}")
+    fallback_val = data["fallback_hours"]
+    if (
+        isinstance(fallback_val, bool)
+        or not isinstance(fallback_val, (int, float))
+        or not math.isfinite(fallback_val)
+        or fallback_val <= 0
+    ):
+        raise ConfigError("Missing or invalid required config key: fallback_hours")
 
     for f in ("max_revise_rounds", "max_source_bytes"):
         val = data[f]
         if isinstance(val, bool) or not isinstance(val, int) or val <= 0:
             raise ConfigError(f"Missing or invalid required config key: {f}")
-
-    evaluation_engine = data["evaluation_engine"].strip()
-    if evaluation_engine not in VALID_EVALUATION_ENGINES:
-        raise ConfigError(
-            f"Invalid required config key evaluation_engine: {evaluation_engine!r} "
-            f"(must be one of {sorted(VALID_EVALUATION_ENGINES)})"
-        )
 
     raw_format_tokens = [tok.strip() for tok in data["release_formats"].split(",")]
     if not raw_format_tokens or any(not tok for tok in raw_format_tokens):
@@ -189,10 +175,8 @@ def load_collab_config(config_path: Optional[Union[str, Path]] = None) -> Collab
         bot_git_name=data["bot_git_name"].strip(),
         bot_git_email=data["bot_git_email"].strip(),
         human_approver=human_approver,
-        window_hours=float(data["window_hours"]),
-        fallback_hours=float(data["fallback_hours"]),
+        fallback_hours=float(fallback_val),
         max_revise_rounds=int(data["max_revise_rounds"]),
-        evaluation_engine=evaluation_engine,
         release_formats=clean_release_formats,
         max_source_bytes=int(data["max_source_bytes"]),
         allowed_licenses=frozenset(clean_licenses),
