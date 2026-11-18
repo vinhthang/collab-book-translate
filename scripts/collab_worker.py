@@ -81,14 +81,18 @@ class GitHubAccountContext:
         self,
         args: List[str],
         cwd: Optional[str] = None,
+        repo: Optional[str] = None,
         check: bool = True,
         text: bool = True,
         capture_output: bool = True,
     ) -> subprocess.CompletedProcess:
         env = dict(os.environ)
         env["GH_TOKEN"] = self.token
+        full_args = list(args)
+        if repo and "--repo" not in full_args and "-R" not in full_args:
+            full_args.extend(["--repo", repo])
         return subprocess.run(
-            ["gh"] + args,
+            ["gh"] + full_args,
             cwd=cwd,
             env=env,
             check=check,
