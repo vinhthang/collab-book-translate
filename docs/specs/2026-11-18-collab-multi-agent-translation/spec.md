@@ -2,9 +2,9 @@
 
 - Feature ID: 2026-11-18-collab-multi-agent-translation
 - Type: enhancement
-- Status: In-Progress
-- First entered In-Testing: Never
-- Related specifications: Proposed: Replaces [2026-11-06-collab-multi-agent-translation](../2026-11-06-collab-multi-agent-translation/spec.md)
+- Status: In-Testing
+- First entered In-Testing: 2026-11-18
+- Related specifications: Implemented: Replaces [2026-11-06-collab-multi-agent-translation](../2026-11-06-collab-multi-agent-translation/spec.md)
 
 ## Problem and source intent
 
@@ -176,3 +176,4 @@ Inspected against standalone repository `collab-book-translate` at commit `423b9
 
 - `2026-11-18` — `None -> Planning`: Scope and replacement revision route approved by repository owner (`"go with your option 1 for these decisions"`, 2026-11-18) following the 2026-11-18 re-review of `2026-11-06-collab-multi-agent-translation`. Per `spec-driven` lifecycle rules (`lifecycle.md`), `2026-11-06-collab-multi-agent-translation` remains `In-Testing` while this replacement is in `Planning`/`In-Progress` and transitions to `Superseded` in both its `spec.md` and `docs/specs/INDEX.md` upon completion of `Task 7` (`In-Testing`).
 - `2026-11-18` — `Planning -> In-Progress`: Execution of `Task 1`–`Task 7` authorized by repository owner (`"proceed"`, 2026-11-18).
+- `2026-11-18` — `In-Progress -> In-Testing`: Completed `Task 1`–`Task 7`; verified `284 passed in 7.96s` across the repository `pytest` suite, `99.5%` (`185/186`) `mutation-guard` kill rate across all 10 collaborative modules (`>= 95.0%` per module), live hygiene/CLI/pilot compatibility checks, and single-agent `code-review` (`0` unresolved P0/P1 findings). Transitioned superseded parent package `2026-11-06-collab-multi-agent-translation` to `Superseded`.

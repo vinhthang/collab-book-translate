@@ -1073,7 +1073,7 @@ def test_release_asset_verified_backfill_uploads_missing_formats_before_recordin
         tmp_path,
         client=client,
         compile_fn=mock_compile,
-        release_formats=("epub", "pdf", "docx"),
+        release_formats="epub,pdf,docx",
     )
     assert res["status"] == "completed"
     # Should NOT call create_release (already exists), SHOULD upload missing .docx and backfill released_tag!

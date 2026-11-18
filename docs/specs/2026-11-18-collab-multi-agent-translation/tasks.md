@@ -4,73 +4,73 @@ Sources: [spec.md](./spec.md), [design.md](./design.md)
 
 ## Task 1: Untrack config.json, harden CollabConfig schema, and sync contributor templates
 
-- [ ] Complete the work and its applicable checks.
+- [x] Complete the work and its applicable checks.
 - Covers: REQ-016 / AC-016-1, AC-016-2; REQ-017 / AC-017-1; REQ-018 / AC-018-1; REQ-019 / AC-019-1; REQ-025 / AC-025-1
 - Files: .gitignore, plugin.json, config.example.json, CONTRIBUTING.md, .github/PULL_REQUEST_TEMPLATE/book.md, scripts/collab_config.py, tests/conftest.py, tests/test_collab_config.py
 - Dependencies: None
 - Blocked by: None
 - Work: Write failing RED tests in `tests/test_collab_config.py` first, then enforce `repo_full_name` (`owner/repo`), `evaluation_engine in {"workbuddy", "cbc"}`, `release_formats` subset of `{"epub", "pdf", "docx"}`, and `human_approver != bot_login` in `load_collab_config()`; add `"config_example": "config.example.json"` to `plugin.json`; exclude `config.json` in `.gitignore` and untrack it from the Git index while preserving any local file on disk; add isolated test config fixtures in `tests/conftest.py`; synchronize `CONTRIBUTING.md` (`owner-permission`, commit-bound `/approve-intake <head_oid>`, and the canonical `analyze_additions.json` `{"proposals": [...]}` schema); and remove Git LFS instructions from `CONTRIBUTING.md` and `.github/PULL_REQUEST_TEMPLATE/book.md`.
-- Completion evidence: Not executed.
+- Completion evidence: Completed at commit `9c07969` (`99 passed` in `tests/test_collab_config.py`, `100.0%` `8/8` mutation-guard kill rate, `git ls-files config.json` empty while local `config.json` preserved on disk).
 
 ## Task 2: Harden book intake slug regex, LFS rejection, and duplicate-slug guard
 
-- [ ] Complete the work and its applicable checks.
+- [x] Complete the work and its applicable checks.
 - Covers: REQ-017 / AC-017-1, AC-017-2; REQ-019 / AC-019-2
 - Files: scripts/collab_intake.py, tests/test_collab_intake.py
 - Dependencies: None
 - Blocked by: None
 - Work: Write failing RED tests in `tests/test_collab_intake.py`, then update `validate_submission_pr` and `format_prescreen_comment` to enforce `<slug>` matching `^[a-z0-9]+(?:-[a-z0-9]+)*$` (1–64 chars), reject submissions when `<slug>` already exists in `books/<slug>/` or `runs/<slug>/`, reject Git LFS pointer files (`version https://git-lfs.github.com/spec/v1`), verify $\ge 1$ extracted chapter via `extract_book` where every chapter `ch01..chNN` has `1..2,000` segments and $\le 2,621,440$ UTF-8 bytes in `source.txt`, enforce `https://` `license_url` and optional `genre`, scan extracted `<original>` segments for prompt injection, and emit `[collab-prescreen sha=<head_oid> status=PASS|FAIL]`.
-- Completion evidence: Not executed.
+- Completion evidence: Completed at commit `8d2b037` (`39 passed` in `tests/test_collab_intake.py`, `100.0%` `20/20` mutation-guard kill rate).
 
 ## Task 3: Enforce contributor caps, manifest/segment cross-checks, and canonical proposal schema
 
-- [ ] Complete the work and its applicable checks.
+- [x] Complete the work and its applicable checks.
 - Covers: REQ-021 / AC-021-1, AC-021-2; REQ-022 / AC-022-1, AC-022-2; REQ-023 / AC-023-1, AC-023-2; REQ-025 / AC-025-1, AC-025-2
 - Files: scripts/collab_pr_validate.py, tests/test_collab_pr_validate.py
 - Dependencies: None
 - Blocked by: None
 - Work: Write failing RED tests in `tests/test_collab_pr_validate.py`, then update `validate_translation_pr`, `validate_review`, and `detect_prompt_injection` to enforce `^translate/(?P<slug>[a-z0-9]+(?:-[a-z0-9]+)*)-(?P<ch>ch\d{2,})-(?P<login>[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?)$` with `<login> == pr.author.login`, `5 MiB` / `2,000`-segment caps on `translation.xml`, `512 KiB` cap on `analyze_additions.json`, `manifest.json` language cross-checks (deriving `zh` `<hanviet>` obligation from `manifest.source_lang`), `source.txt` `<first>..<last>` `Segments` cross-check, `Issue: seed` / `Glossary SHA: seed` support for bot `ch01` seed PRs vs `#<issue>` / 40-or-64-hex `book_record.glossary_sha` on `ch02..chNN`, canonical `{"proposals": [...]}` schema validation, `<translate>` code/image byte-invariance, `<original>`/`<hanviet>`/`<translate>` prompt-injection scanning, and inline or `\bS-\d{4}\b` review validation.
-- Completion evidence: Not executed.
+- Completion evidence: Completed at commit `55dc348` (`49 passed` in `tests/test_collab_pr_validate.py`, `100.0%` `20/20` mutation-guard kill rate).
 
 ## Task 4: Complete state-to-label map, severity tie-breaks, and v2.0/v1.0 ledger rules
 
-- [ ] Complete the work and its applicable checks.
+- [x] Complete the work and its applicable checks.
 - Covers: REQ-024 / AC-024-1, AC-024-2; REQ-026 / AC-026-2; REQ-027 / AC-027-1, AC-027-2; REQ-028 / AC-028-1, AC-028-2; REQ-029 / AC-029-1, AC-029-2
 - Files: scripts/collab_state.py, scripts/collab_verdict.py, scripts/collab_select.py, scripts/collab_ledger.py, scripts/collab_completeness.py, tests/test_collab_state.py, tests/test_collab_verdict.py, tests/test_collab_select.py, tests/test_collab_ledger.py, tests/test_collab_completeness.py
 - Dependencies: None
 - Blocked by: None
 - Work: Write failing RED tests first, then update `collab_state.py` with the 2 pre-issue `checklist.json` states (`Seeding`, `SeedBlocked`), `Open <-> Candidates -> Done` chapter transitions, 9 PR states (`status:needs-checks`, `status:needs-review`, `status:evaluating`, `status:revise`, `status:flagged`, `status:candidate`, `status:merged`, `status:reassign`, `status:not-selected`), and `(max_revise_rounds + 1)`-th failing commit `Reassign` closure; update `collab_verdict.py` for normative `EvaluationResult` fields, per-reviewer blocking `CHANGES_REQUESTED` reviews, and transient evaluator errors (`Evaluating`); update `collab_select.py` to rank by `(-score_of_record, major_issue_count, minor_issue_count, pr_number)`; update `collab_ledger.py` for deterministic `reviewer_score`, sorted `rejected_prs`, and `selected_pr > 0` on v2.0 runs (grandfathering pre-v2.0 `released_tag` + `merge_sha == glossary_sha` on `ch01`); and update `collab_completeness.py` to reject `seed_status == "blocked_failed"` while supporting envelope and list `checklist.json`.
-- Completion evidence: Not executed.
+- Completion evidence: Completed at commit `8aa3985` (`57 passed` across the 5 test modules, `100.0%` mutation-guard kill rates across `collab_state.py`, `collab_verdict.py`, `collab_select.py`, `collab_ledger.py`, and `collab_completeness.py`).
 
 ## Task 5: Implement whole-book analysis, bot ch01 seed PR, SHA-256 glossary_sha, and quarantine
 
-- [ ] Complete the work and its applicable checks.
+- [x] Complete the work and its applicable checks.
 - Covers: REQ-020 / AC-020-1, AC-020-2; REQ-028 / AC-028-1
 - Files: scripts/collab_seed.py, tests/test_collab_seed.py
 - Dependencies: Task 1, Task 3, Task 4
 - Blocked by: None
 - Work: Write failing RED tests in `tests/test_collab_seed.py`, then update `seed_merged_book` (and CLI `--retry-blocked`) to scan `source.txt` pre-LLM, write envelope `checklist.json` (`seed_status: "seeding"`), invoke `initialize_book_record` and live `assert_fiction_pronouns_populated(..., offline=False)` over `min(3, N)` chapters + `sync_book_record_views` (accepting legacy `character_pronouns` on read), detect already-merged or open `ch01` seed PRs, merge `ch01` on live `PASS` (`selected_pr > 0`) with a bound-glossary/names/pronouns audit comment, compute NFC-canonical 64-char SHA-256 seed `glossary_sha`, create-if-missing labelled `ch02..chNN` issues BEFORE setting `seed_status: "seeded"`, keep transient eval errors in `"seeding"`, and set `seed_status: "blocked_failed"` (closing any open `ch01` PR) on deterministic/content failure.
-- Completion evidence: Not executed.
+- Completion evidence: Completed at commits `463104f` and `37bc18b` (`15 passed` in `tests/test_collab_seed.py`, `95.0%` `19/20` mutation-guard kill rate).
 
 ## Task 6: Wire fast-forward Git sync, slash commands, head-blob proposals, and bounded fallback in sweep
 
-- [ ] Complete the work and its applicable checks.
+- [x] Complete the work and its applicable checks.
 - Covers: REQ-018 / AC-018-1, AC-018-2; REQ-020 / AC-020-1; REQ-023 / AC-023-1, AC-023-2; REQ-024 / AC-024-1, AC-024-2; REQ-025 / AC-025-1, AC-025-2; REQ-026 / AC-026-1, AC-026-2; REQ-027 / AC-027-1, AC-027-2; REQ-029 / AC-029-1; REQ-030 / AC-030-1, AC-030-2
 - Files: scripts/collab_sweep.py, tests/test_collab_sweep.py
 - Dependencies: Task 1, Task 2, Task 3, Task 4, Task 5
 - Blocked by: None
 - Work: Write failing RED tests in `tests/test_collab_sweep.py`, then update `collab_sweep.py` to: (1) enforce clean-`main` verification (with `--recover-runs` crash recovery for `runs/**`) and `git fetch origin main` + `git merge --ff-only origin/main` before sweep and `git pull --ff-only origin main` after `gh pr merge`; (2) enforce latest `bot_login`-authored `[collab-prescreen ... status=PASS|WARN|FAIL]`, commit-bound `APPROVED`, and `/approve-intake <head_oid>`; (3) handle `/clear-flag <head_oid>`, `/reject-flag <head_oid>`, `/dismiss-stale-review <rev_login> <head_oid>`, and `/retry-fallback` from `human_approver`; (4) reconcile create-if-missing `ch02..chNN` issues on `seeded` books and count `revise_round_count` strictly from distinct bot `[collab-revise sha=<head_oid>]` comments; (5) read `analyze_additions.json` strictly from `<winner_head_oid>` via Git blob, binding `match: "word", case_sensitive: false` via `sync_book_record_views` without mutating `glossary_sha`; (6) enforce `runs/<slug>/**` confinement in `commit_and_push`; (7) post/read latest cohort `[collab-window-start epoch=<cur_now>]` on `Open -> Candidates`; (8) open up to `2` bounded 48 h starved-chapter bot fallback PRs when zero open PRs exist for `<slug>-<chNN>` before `[collab-starved-escalated]`; and (9) verify/upload release assets before backfilling `released_tag` if GitHub Release `<slug>-v1.0` already exists.
-- Completion evidence: Not executed.
+- Completion evidence: Completed at commit `37bc18b` plus comma-separated `release_formats` fix (`15 passed` in `tests/test_collab_sweep.py`, `100.0%` `20/20` mutation-guard kill rate).
 
 ## Task 7: Execute full verification suite, mutation-guard, code-review, and parent supersession
 
-- [ ] Complete the work and its applicable checks.
+- [x] Complete the work and its applicable checks.
 - Covers: REQ-016 / AC-016-1; REQ-028 / AC-028-1; REQ-029 / AC-029-1
 - Files: docs/specs/INDEX.md, docs/specs/2026-11-06-collab-multi-agent-translation/spec.md, docs/specs/2026-11-18-collab-multi-agent-translation/spec.md, docs/specs/2026-11-18-collab-multi-agent-translation/verification.md
 - Dependencies: Task 6
 - Blocked by: None
 - Work: Run the full `pytest` suite, `mutation-guard` ($\ge 80\%$ kill rate across all modified `scripts/collab_*.py` files), `validate_specs.py`, and single-agent `code-review`; record actual command outputs in `verification.md` (`### Run 1 — 2026-11-18`); transition `2026-11-18-collab-multi-agent-translation` to `In-Testing` (`First entered In-Testing: 2026-11-18`, `Implemented: Replaces`); and mark `2026-11-06-collab-multi-agent-translation` `Superseded` in both its `spec.md` and `docs/specs/INDEX.md`.
-- Completion evidence: Not executed.
+- Completion evidence: Verified `284 passed in 7.96s`, `99.5%` (`185/186`) `mutation-guard` kill rate, `validate_specs.py --stage full` (`exit 0`), and single-agent `code-review` (`0` unresolved P0/P1 defects); promoted `2026-11-18-collab-multi-agent-translation` to `In-Testing` and marked `2026-11-06-collab-multi-agent-translation` `Superseded` (`Run 1 — 2026-11-18` in `verification.md`).
 
 ## Gate 2: traceability and readiness
 
@@ -108,4 +108,4 @@ Sources: [spec.md](./spec.md), [design.md](./design.md)
 | REQ-030 | AC-030-2 | [Rationale](./decisions.md#architectural-rationale) | [Boundaries](./design.md#boundaries-and-recovery) | [Task 6](#task-6-wire-fast-forward-git-sync-slash-commands-head-blob-proposals-and-bounded-fallback-in-sweep) | [AC-030-2](./verification.md#ac-030-2-req-030) | PASS |
 
 - Backward scope check: PASS — Every component in `design.md` and every task (`Task 1..Task 7`) maps to `REQ-016..REQ-030` with zero gold-plating.
-- Reference and catalog consistency: PASS — `docs/specs/INDEX.md`, `spec.md`, `decisions.md`, `design.md`, `tasks.md`, and `verification.md` agree on `Status: In-Progress`, `REQ-016..REQ-030`, and `ADR-021..ADR-026`.
+- Reference and catalog consistency: PASS — `docs/specs/INDEX.md`, `spec.md`, `decisions.md`, `design.md`, `tasks.md`, and `verification.md` agree on `Status: In-Testing`, `REQ-016..REQ-030`, `ADR-021..ADR-026`, and parent `2026-11-06-collab-multi-agent-translation` `Superseded`.

@@ -2142,7 +2142,10 @@ def run_sweep(
         # ------------------------------------------------------------------
         # (e) Completeness verification, asset-verified backfill, & release (REQ-029)
         # ------------------------------------------------------------------
-        eff_formats = tuple(f.lower() for f in (release_formats or ("epub", "pdf", "docx")))
+        if isinstance(release_formats, str):
+            eff_formats = tuple(tok.strip().lower() for tok in release_formats.split(",") if tok.strip())
+        else:
+            eff_formats = tuple(str(f).strip().lower() for f in (release_formats or ("epub", "pdf", "docx")) if str(f).strip())
         if runs_root.is_dir():
             for slug_dir in sorted(runs_root.iterdir(), key=lambda p: p.name):
                 if not slug_dir.is_dir():
