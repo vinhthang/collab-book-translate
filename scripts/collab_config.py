@@ -8,14 +8,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import math
 import os
 from pathlib import Path
+import re
 from typing import Optional, Union
 
 
 class ConfigError(ValueError):
     """Raised when configuration file is missing, malformed, or missing required keys."""
-    pass
 
 
 @dataclass(frozen=True)
@@ -52,6 +53,10 @@ REQUIRED_KEYS = (
     "allowed_licenses",
     "supported_pairs",
 )
+
+REPO_FULL_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
+VALID_EVALUATION_ENGINES = frozenset({"workbuddy", "cbc"})
+VALID_RELEASE_FORMATS = frozenset({"epub", "pdf", "docx"})
 
 
 def load_collab_config(config_path: Optional[Union[str, Path]] = None) -> CollabConfig:
@@ -104,15 +109,57 @@ def load_collab_config(config_path: Optional[Union[str, Path]] = None) -> Collab
         if not isinstance(val, str) or not val.strip():
             raise ConfigError(f"Missing or invalid required config key: {f}")
 
+    raw_repo_full_name = data["repo_full_name"]
+    if not REPO_FULL_NAME_RE.match(raw_repo_full_name):
+        raise ConfigError(
+            "Invalid required config key repo_full_name: must match 'owner/repo' "
+            "(^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$)"
+        )
+
+    bot_login = data["bot_login"].strip()
+    human_approver = data["human_approver"].strip()
+    if human_approver == bot_login:
+        raise ConfigError(
+            "Invalid config: human_approver must not equal bot_login"
+        )
+
     for f in ("window_hours", "fallback_hours"):
         val = data[f]
-        if isinstance(val, bool) or not isinstance(val, (int, float)) or val <= 0:
+        if (
+            isinstance(val, bool)
+            or not isinstance(val, (int, float))
+            or not math.isfinite(val)
+            or val <= 0
+        ):
             raise ConfigError(f"Missing or invalid required config key: {f}")
 
     for f in ("max_revise_rounds", "max_source_bytes"):
         val = data[f]
         if isinstance(val, bool) or not isinstance(val, int) or val <= 0:
             raise ConfigError(f"Missing or invalid required config key: {f}")
+
+    evaluation_engine = data["evaluation_engine"].strip()
+    if evaluation_engine not in VALID_EVALUATION_ENGINES:
+        raise ConfigError(
+            f"Invalid required config key evaluation_engine: {evaluation_engine!r} "
+            f"(must be one of {sorted(VALID_EVALUATION_ENGINES)})"
+        )
+
+    raw_format_tokens = [tok.strip() for tok in data["release_formats"].split(",")]
+    if not raw_format_tokens or any(not tok for tok in raw_format_tokens):
+        raise ConfigError(
+            "Invalid required config key release_formats: empty format token is not allowed"
+        )
+    unknown_formats = [tok for tok in raw_format_tokens if tok not in VALID_RELEASE_FORMATS]
+    if unknown_formats:
+        raise ConfigError(
+            f"Invalid required config key release_formats: unsupported format(s) {unknown_formats}"
+        )
+    if len(set(raw_format_tokens)) != len(raw_format_tokens):
+        raise ConfigError(
+            "Invalid required config key release_formats: duplicate format tokens are not allowed"
+        )
+    clean_release_formats = ",".join(raw_format_tokens)
 
     raw_licenses = data["allowed_licenses"]
     if not isinstance(raw_licenses, (list, tuple, set, frozenset)) or len(raw_licenses) == 0:
@@ -137,16 +184,16 @@ def load_collab_config(config_path: Optional[Union[str, Path]] = None) -> Collab
 
     return CollabConfig(
         workspace_dir=Path(data["workspace_dir"].strip()),
-        repo_full_name=data["repo_full_name"].strip(),
-        bot_login=data["bot_login"].strip(),
+        repo_full_name=raw_repo_full_name,
+        bot_login=bot_login,
         bot_git_name=data["bot_git_name"].strip(),
         bot_git_email=data["bot_git_email"].strip(),
-        human_approver=data["human_approver"].strip(),
+        human_approver=human_approver,
         window_hours=float(data["window_hours"]),
         fallback_hours=float(data["fallback_hours"]),
         max_revise_rounds=int(data["max_revise_rounds"]),
-        evaluation_engine=data["evaluation_engine"].strip(),
-        release_formats=data["release_formats"].strip(),
+        evaluation_engine=evaluation_engine,
+        release_formats=clean_release_formats,
         max_source_bytes=int(data["max_source_bytes"]),
         allowed_licenses=frozenset(clean_licenses),
         supported_pairs=frozenset(clean_pairs),
