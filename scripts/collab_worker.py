@@ -425,6 +425,9 @@ def submit_translation(
     config_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Validate and submit a chapter translation PR (REQ-035)."""
+    from scripts.collab_seed import build_translation_pr_body
+    from scripts.helper import parse_segments
+
     cfg = load_collab_config(config_path)
     tx_path = Path(translation_file).resolve()
     if not tx_path.exists():
@@ -434,31 +437,89 @@ def submit_translation(
     branch = f"translate/{book_slug}-{chapter}-{gh_user}"
     agent_tag = agent_name or gh_user
 
-    # Preflight validation against local runs/<book_slug>/chNN/source.txt if available
     repo_root = Path(__file__).resolve().parent.parent
     ch_dir = repo_root / "runs" / book_slug / chapter
     source_file = ch_dir / "source.txt"
     manifest_file = repo_root / "books" / book_slug / "manifest.json"
+    manifest_data = json.loads(manifest_file.read_text(encoding="utf-8")) if manifest_file.exists() else {}
 
-    val_res = validate_translation_pr(
-        pr_branch=branch,
-        pr_body=f"## Translation for {chapter}\n- **Engine/Model**: {engine_model}\n- **Agent**: {agent_tag}\n",
-        changed_files=[f"runs/{book_slug}/{chapter}/translation.xml"],
-        file_contents={f"runs/{book_slug}/{chapter}/translation.xml": tx_text.encode("utf-8")},
-        source_text=source_file.read_text(encoding="utf-8") if source_file.exists() else None,
-        manifest_data=json.loads(manifest_file.read_text(encoding="utf-8")) if manifest_file.exists() else None,
-    )
+    src_lang = str(manifest_data.get("source_lang", "en"))
+    tgt_lang = str(manifest_data.get("target_lang", "vi"))
 
-    if not val_res.get("valid", False):
-        return {
-            "success": False,
-            "error": "Translation pre-flight validation failed",
-            "defects": val_res.get("defects", []),
-        }
+    br_file = repo_root / "runs" / book_slug / "book_record.json"
+    glossary_sha = "seed"
+    if br_file.is_file():
+        try:
+            glossary_sha = json.loads(br_file.read_text(encoding="utf-8")).get("glossary_sha", "")
+        except Exception:
+            pass
 
-    worktree_dir = repo_root / ".worktrees" / f"trans_{book_slug}_{chapter}_{gh_user}"
+    segs = parse_segments(tx_text)
+    seg_first = segs[0]["id"] if segs else "S-0001"
+    seg_last = segs[-1]["id"] if segs else "S-0001"
 
     with GitHubAccountContext(gh_user) as ctx:
+        # Find issue number
+        issue_num = None
+        try:
+            proc = ctx.run_gh(
+                ["issue", "list", "--repo", cfg.repo_full_name, "--label", f"book:{book_slug}", "--search", chapter, "--json", "number,title"]
+            )
+            issues = json.loads(proc.stdout)
+            for iss in issues:
+                if chapter in iss.get("title", ""):
+                    issue_num = iss.get("number")
+                    break
+        except Exception:
+            pass
+
+        if claim and issue_num:
+            try:
+                ctx.run_gh(["issue", "comment", str(issue_num), "--repo", cfg.repo_full_name, "--body", "/claim"])
+            except Exception:
+                pass
+
+        issue_ref = f"#{issue_num}" if issue_num else "#0"
+
+        pr_body = build_translation_pr_body(
+            agent_login=gh_user,
+            engine_model=engine_model,
+            source_lang=src_lang,
+            target_lang=tgt_lang,
+            book_slug=book_slug,
+            ch_name=chapter,
+            seg_first=seg_first,
+            seg_last=seg_last,
+            issue_ref=issue_ref,
+            glossary_sha=glossary_sha,
+        )
+
+        changed_files = [f"runs/{book_slug}/{chapter}/translation.xml"]
+        if additions_file and Path(additions_file).exists():
+            changed_files.append(f"runs/{book_slug}/{chapter}/analyze_additions.json")
+
+        val_res = validate_translation_pr(
+            head_ref=branch,
+            author_login=gh_user,
+            body=pr_body,
+            changed_files=changed_files,
+            source_xml_text=source_file.read_text(encoding="utf-8") if source_file.exists() else tx_text,
+            translation_xml_text=tx_text,
+            bot_login=cfg.bot_login,
+            is_seed_pr=False,
+            manifest=manifest_data,
+            existing_slugs={book_slug},
+        )
+
+        if not val_res.get("valid", False):
+            return {
+                "success": False,
+                "error": "Translation pre-flight validation failed",
+                "defects": val_res.get("defects", []),
+            }
+
+        worktree_dir = repo_root / ".worktrees" / f"trans_{book_slug}_{chapter}_{gh_user}"
+
         try:
             if worktree_dir.exists():
                 shutil.rmtree(worktree_dir, ignore_errors=True)
@@ -480,12 +541,7 @@ def submit_translation(
             )
             ctx.run_git(["push", "-u", "origin", branch, "--force"], cwd=str(worktree_dir))
 
-            pr_body = (
-                f"## Translation: {book_slug} {chapter}\n\n"
-                f"- **Engine/Model**: `{engine_model}`\n"
-                f"- **Agent**: `{agent_tag}`\n"
-                f"- **Author**: @{gh_user}\n"
-            )
+            labels = [f"book:{book_slug}", f"lang:{src_lang}-{tgt_lang}", f"agent:{gh_user}"]
             pr_cmd = [
                 "pr",
                 "create",
@@ -498,6 +554,8 @@ def submit_translation(
                 "--base",
                 "main",
             ]
+            for lbl in labels:
+                pr_cmd.extend(["--label", lbl])
             if cfg.repo_full_name:
                 pr_cmd.extend(["-R", cfg.repo_full_name])
 
