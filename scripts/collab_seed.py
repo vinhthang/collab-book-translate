@@ -637,13 +637,14 @@ class GitHubSeedPRClient:
                 text=True,
                 check=True,
             ).stdout.strip()
-            subprocess.run(
-                ["git", "push", "--force-with-lease", "origin", head_ref],
-                cwd=str(wt_dir),
-                capture_output=True,
-                text=True,
-                check=True,
-            )
+            from scripts.collab_worker import GitHubAccountContext
+
+            with GitHubAccountContext(self.gh_user) as ctx:
+                ctx.run_git(
+                    ["push", "--force-with-lease", "origin", head_ref],
+                    cwd=str(wt_dir),
+                    check=True,
+                )
         finally:
             subprocess.run(["git", "worktree", "remove", "--force", str(wt_dir)], cwd=str(self.root), capture_output=True, check=False)
             if wt_dir.exists():
@@ -824,6 +825,7 @@ def _git_commit_runs_if_repo(
     bot_git_email: str,
     message: str,
     push_origin: bool = False,
+    gh_user: Optional[str] = None,
 ) -> Optional[str]:
     is_git = subprocess.run(
         ["git", "rev-parse", "--is-inside-work-tree"],
@@ -871,13 +873,19 @@ def _git_commit_runs_if_repo(
             check=False,
         )
         if rem.returncode == 0 and "origin" in rem.stdout.split():
-            subprocess.run(
-                ["git", "push", "origin", "HEAD"],
-                cwd=str(repo_root),
-                capture_output=True,
-                text=True,
-                check=True,
-            )
+            if gh_user:
+                from scripts.collab_worker import GitHubAccountContext
+
+                with GitHubAccountContext(gh_user) as ctx:
+                    ctx.run_git(["push", "origin", "HEAD"], cwd=str(repo_root), check=True)
+            else:
+                subprocess.run(
+                    ["git", "push", "origin", "HEAD"],
+                    cwd=str(repo_root),
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
 
     head = subprocess.run(
         ["git", "rev-parse", "HEAD"],
@@ -1192,6 +1200,7 @@ def seed_merged_book(
             str(bot_git_email),
             f"seed({book_slug}): extract chapters and initialize book_record",
             push_origin=push_origin,
+            gh_user=str(gh_user) if gh_user else None,
         )
 
     if prepare_only:
@@ -1444,6 +1453,7 @@ def seed_merged_book(
             str(bot_git_email),
             f"seed({book_slug}): finalize ch01 reference, glossary_sha, and collab_ledger",
             push_origin=True,
+            gh_user=str(gh_user) if gh_user else None,
         )
 
     return {
@@ -1532,7 +1542,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         prepare_only=args.prepare_only,
     )
     print(json.dumps(res, indent=2, ensure_ascii=False))
-    return 0 if res.get("seeded") else 1
+    return 0 if (res.get("seeded") or res.get("prepared")) else 1
 
 
 if __name__ == "__main__":

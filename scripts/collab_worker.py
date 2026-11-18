@@ -30,6 +30,10 @@ from scripts.collab_pr_validate import validate_review, validate_translation_pr
 
 def _get_gh_token(gh_user: str) -> str:
     """Fetch GitHub auth token for a specific user without switching global auth."""
+    if os.environ.get("GH_TOKEN"):
+        return os.environ["GH_TOKEN"]
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return "mock-gh-token"
     try:
         proc = subprocess.run(
             ["gh", "auth", "token", "-u", gh_user],
