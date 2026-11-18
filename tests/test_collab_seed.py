@@ -713,6 +713,124 @@ class TestCollabSeed(unittest.TestCase):
         ).stdout.strip()
         self.assertEqual(local_head, remote_head)
 
+    def test_seed_boundary_helpers_pronouns_glossary_headings_and_gh_client(self):
+        from scripts.collab_seed import (
+            GitHubSeedPRClient,
+            _extract_heading_title,
+            _normalize_pronouns_list,
+            _read_existing_checklist_envelope,
+            _requires_fiction_pronouns,
+            build_chapter_issue_spec,
+            sync_collab_book_record,
+        )
+
+        # 1. _normalize_pronouns_list boundaries (len(pair) == 2 vs 1, dict >=2 parts vs 1 part)
+        p_list = _normalize_pronouns_list({
+            "pronouns": [
+                {"pair": ["OnlyOne"], "a_to_b": "x", "b_to_a": "y"},
+                {"pair": ["A", "B"], "a_to_b": "tôi/anh", "b_to_a": "em/anh", "basis": "peer"},
+            ]
+        })
+        self.assertEqual(len(p_list), 1)
+        self.assertEqual(p_list[0]["pair"], ["A", "B"])
+
+        p_dict = _normalize_pronouns_list({
+            "character_pronouns": {
+                "Holmes <-> Watson": {"a_to_b": "tôi/anh", "b_to_a": "tôi/anh", "basis": "friend"},
+                "Narrator": "tôi",
+            }
+        })
+        by_first = {item["pair"][0]: item for item in p_dict}
+        self.assertEqual(by_first["Holmes"]["pair"], ["Holmes", "Watson"])
+        self.assertEqual(by_first["Narrator"]["pair"], ["Narrator", ""])
+
+        # 2. sync_collab_book_record nested glossary.terms vs normal keys
+        rec = {"glossary": {"terms": {"Socket": "Ổ cắm"}, "Port": "Cổng"}}
+        sync_collab_book_record(rec)
+        self.assertEqual(rec["glossary"]["Socket"], "Ổ cắm")
+        self.assertEqual(rec["glossary"]["Port"], "Cổng")
+        self.assertNotIn("terms", rec["glossary"])
+
+        # 3. build_chapter_issue_spec 1-segment vs 2-segment range & _extract_heading_title
+        one_seg = '<segment id="S-0009" type="paragraph"><original>Body text</original></segment>'
+        two_seg = (
+            '<segment id="S-0009" type="paragraph"><original>Body first</original></segment>\n'
+            '<segment id="S-0010" type="heading"><original># Real Heading</original></segment>'
+        )
+        spec_1 = build_chapter_issue_spec(
+            book_slug="b", ch_name="ch02", source_xml=one_seg, source_lang="en", target_lang="vi", glossary_sha="a" * 64
+        )
+        spec_2 = build_chapter_issue_spec(
+            book_slug="b", ch_name="ch02", source_xml=two_seg, source_lang="en", target_lang="vi", glossary_sha="a" * 64
+        )
+        self.assertEqual(spec_1["range"], "S-0009")
+        self.assertEqual(spec_2["range"], "S-0009..S-0010")
+        self.assertEqual(_extract_heading_title(two_seg, "ch02"), "Real Heading")
+        self.assertEqual(_extract_heading_title(one_seg, "ch02"), "ch02")
+
+        # 4. _read_existing_checklist_envelope seed_error None vs non-None
+        cl_p = self.repo_root / "cl_test.json"
+        cl_p.write_text(json.dumps({"seed_status": "blocked_failed", "seed_error": None, "chapters": []}), encoding="utf-8")
+        st0, err0, _ = _read_existing_checklist_envelope(cl_p, "b")
+        self.assertEqual(st0, "blocked_failed")
+        self.assertIsNone(err0)
+        cl_p.write_text(json.dumps({"seed_status": "blocked_failed", "seed_error": "exact error", "chapters": []}), encoding="utf-8")
+        _, err1, _ = _read_existing_checklist_envelope(cl_p, "b")
+        self.assertEqual(err1, "exact error")
+
+        # 5. _requires_fiction_pronouns exact boundaries: fences=2, tech_hits=5, quotes=4 vs 5
+        five_quotes = "“A” “B” “C”"  # 6 curly quote chars >= 5
+        four_quotes = "“A” “B"       # 4 curly quote chars < 5
+        self.assertTrue(_requires_fiction_pronouns({"genre": "general"}, five_quotes))
+        self.assertFalse(_requires_fiction_pronouns({"genre": "general"}, four_quotes))
+        self.assertFalse(_requires_fiction_pronouns({"genre": "non-fiction"}, five_quotes))
+
+        two_fences = f"{five_quotes}\n```py\nx=1\n```\n```py\ny=2\n```"
+        one_fence = f"{five_quotes}\n```py\nx=1\n```"
+        self.assertFalse(_requires_fiction_pronouns({"genre": "general"}, two_fences))
+        self.assertTrue(_requires_fiction_pronouns({"genre": "general"}, one_fence))
+
+        from scripts.orchestrate_run import TECHNICAL_SEED_GLOSSARY_V1
+        five_tech = five_quotes + " " + " ".join(s["source"] for s in TECHNICAL_SEED_GLOSSARY_V1[:5])
+        four_tech = five_quotes + " " + " ".join(s["source"] for s in TECHNICAL_SEED_GLOSSARY_V1[:4])
+        self.assertFalse(_requires_fiction_pronouns({"genre": "general"}, five_tech))
+        self.assertTrue(_requires_fiction_pronouns({"genre": "general"}, four_tech))
+
+        # 6. GitHubSeedPRClient token resolution & create_seed_pr PR number boundaries
+        gh_cli = GitHubSeedPRClient(self.repo_root, "o/r", "bot", "Bot", "b@e.com")
+        with patch.object(gh_cli, "_guard_pytest", lambda: None):
+            with patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("GH_TOKEN", None)
+                seen_envs = []
+
+                def fake_sub_fail_tok(cmd, *a, **kw):
+                    class R:
+                        returncode = 1 if cmd[:3] == ["gh", "auth", "token"] else 0
+                        stdout = "bad_token\n" if cmd[:3] == ["gh", "auth", "token"] else "[]"
+                    if cmd and cmd[0] == "gh" and cmd[:3] != ["gh", "auth", "token"]:
+                        seen_envs.append(kw.get("env", {}))
+                    return R()
+
+                with patch("scripts.collab_seed.subprocess.run", side_effect=fake_sub_fail_tok):
+                    gh_cli._run_gh(["pr", "list"])
+                self.assertNotIn("GH_TOKEN", seen_envs[0])
+
+            # Test create_seed_pr fallback to find_open_seed_pr and error when pr_num == 0
+            def fake_git_ok(cmd, *a, **kw):
+                class R:
+                    returncode = 0
+                    stdout = "a" * 40 + "\n"
+                return R()
+
+            with patch("scripts.collab_seed.subprocess.run", side_effect=fake_git_ok):
+                with patch.object(gh_cli, "_run_gh", return_value="created-no-url"):
+                    with patch.object(gh_cli, "find_open_seed_pr", return_value={"number": 77}):
+                        pr_ok = gh_cli.create_seed_pr("translate/b-ch01-bot", "t", "body", ["runs/b/ch01/translation.xml"], "<xml/>")
+                        self.assertEqual(pr_ok["number"], 77)
+                    with patch.object(gh_cli, "find_open_seed_pr", return_value={"number": 0}):
+                        with self.assertRaises(RuntimeError):
+                            gh_cli.create_seed_pr("translate/b-ch01-bot", "t", "body", ["runs/b/ch01/translation.xml"], "<xml/>")
+
 
 if __name__ == "__main__":
     unittest.main()
