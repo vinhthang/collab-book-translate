@@ -7,6 +7,8 @@ import unittest
 
 from scripts.collab_verdict import (
     compute_collab_verdict,
+    evaluate_pr_from_reviews,
+    filter_fresh_valid_reviews,
     has_blocking_changes_requested,
     normalize_evaluation_result,
 )
@@ -450,7 +452,7 @@ class TestCollabVerdict(unittest.TestCase):
         # 2. Evaluator exception / timeout / missing binary keeps PR in EVALUATING
         res_exc = compute_collab_verdict(
             None,
-            eval_error=TimeoutError("workbuddy timed out after 60s"),
+            eval_error=TimeoutError("evaluator timed out after 60s"),
             pass_threshold=4.0,
             revise_round_count=1,
         )
@@ -570,6 +572,100 @@ class TestCollabVerdict(unittest.TestCase):
         res = compute_collab_verdict(eval_result, pass_threshold=4.0, draft_text_or_len=1000)
         self.assertEqual(res["outcome"], "REVISE")
         self.assertEqual(res["next_round"], 1)
+
+    def test_filter_fresh_valid_reviews_filters_author_and_stale_commit(self):
+        reviews = [
+            # Self-review: must be excluded
+            {"author_login": "alice", "body": VALID_RUBRIC_BODY, "commit_oid": "head123"},
+            # Valid review on stale commit: must be excluded
+            {"author_login": "bob", "body": VALID_RUBRIC_BODY, "commit_oid": "old123", "submitted_at": 1000},
+            # Valid review on head commit: must be kept
+            {"author_login": "bob", "body": VALID_RUBRIC_BODY, "commit_oid": "head123", "submitted_at": 2000},
+            # Invalid review (no rubric): must be excluded
+            {"author_login": "carol", "body": "looks fine S-0001", "commit_oid": "head123"},
+        ]
+        fresh = filter_fresh_valid_reviews(reviews, pr_author="alice", head_oid="head123")
+        self.assertEqual(len(fresh), 1)
+        self.assertEqual(fresh[0]["author_login"], "bob")
+        self.assertEqual(fresh[0]["submitted_at"], 2000)
+
+    def test_evaluate_pr_from_reviews_pass_clean(self):
+        rev1 = {
+            "author_login": "bob",
+            "body": (
+                "Review S-0001:\n"
+                "- Fidelity: 4.8/5\n"
+                "- Fluency: 4.6/5\n"
+                "- Terminology: 4.7/5\n"
+                "- Register: 4.5/5\n"
+                "- Structure: 4.5/5\n"
+                "- Completeness: 4.5/5\n"
+            ),
+            "commit_oid": "head123",
+        }
+        xml = '<segment id="S-0001" type="paragraph"><original>Hello</original><translate>Xin chào bạn.</translate></segment>'
+        res = evaluate_pr_from_reviews(
+            reviews=[rev1],
+            pr_author="alice",
+            head_oid="head123",
+            translation_xml=xml,
+            pass_threshold=4.0,
+        )
+        self.assertEqual(res["verdict"], "PASS")
+        self.assertFalse(res["fallback_unverified"])
+        self.assertGreaterEqual(res["score_of_record"], 4.5)
+        self.assertEqual(res["critical_issue_count"], 0)
+
+    def test_evaluate_pr_from_reviews_fails_on_untranslated_or_critical(self):
+        rev_crit = {
+            "author_login": "bob",
+            "body": (
+                "Review S-0001:\n"
+                "- Fidelity: 4.5/5\n"
+                "- Fluency: 4.5/5\n"
+                "- Terminology: 4.5/5\n"
+                "- Register: 4.5/5\n"
+                "- Structure: 4.5/5\n"
+                "- Completeness: 4.5/5\n"
+                "[critical] S-0001 Missing entire sentence!\n"
+            ),
+            "commit_oid": "head123",
+        }
+        xml = '<segment id="S-0001" type="paragraph"><original>Hello</original><translate>Xin chào.</translate></segment>'
+        res = evaluate_pr_from_reviews(
+            reviews=[rev_crit],
+            pr_author="alice",
+            head_oid="head123",
+            translation_xml=xml,
+        )
+        self.assertEqual(res["verdict"], "FAIL")
+        self.assertGreaterEqual(res["critical_issue_count"], 1)
+
+    def test_evaluate_pr_from_reviews_fails_on_language_detection(self):
+        rev1 = {
+            "author_login": "bob",
+            "body": VALID_RUBRIC_BODY,
+            "commit_oid": "head123",
+        }
+        # English text left untranslated
+        xml = '<segment id="S-0001" type="paragraph"><original>The Prince and Princess sat at the top.</original><translate>The Prince and Princess sat at the top.</translate></segment>'
+        res = evaluate_pr_from_reviews(
+            reviews=[rev1],
+            pr_author="alice",
+            head_oid="head123",
+            translation_xml=xml,
+        )
+        self.assertEqual(res["verdict"], "FAIL")
+        self.assertGreaterEqual(res["critical_issue_count"], 1)
+
+    def test_evaluate_pr_from_reviews_needs_review_when_empty(self):
+        res = evaluate_pr_from_reviews(
+            reviews=[],
+            pr_author="alice",
+            head_oid="head123",
+            translation_xml="<translate>Xin chào</translate>",
+        )
+        self.assertEqual(res["verdict"], "NEEDS_REVIEW")
 
 
 if __name__ == "__main__":

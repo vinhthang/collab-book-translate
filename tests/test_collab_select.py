@@ -37,7 +37,7 @@ def test_parse_latest_window_start_and_candidate_score():
     assert parse_latest_candidate_score(score_comments, "bot", "c" * 40) is None
 
 
-def test_select_winning_pr_window_open():
+def test_select_winning_pr_immediate_no_window():
     candidates = [
         {
             "pr_number": 10,
@@ -48,12 +48,12 @@ def test_select_winning_pr_window_open():
             "unresolved_threads": 0,
         }
     ]
-    window_started_at = 1000.0
-    now = 1000.0 + (12 * 3600)
-    result = select_winning_pr(candidates, window_started_at, now, window_hours=24.0)
+    # In windowless mode, selection happens immediately without waiting for window_hours
+    result = select_winning_pr(candidates)
 
-    assert result["window_closed"] is False
-    assert result["winner"] is None
+    assert result["window_closed"] is True
+    assert result["selected"] is True
+    assert result["winner"]["pr_number"] == 10
     assert result["non_selected"] == []
 
 

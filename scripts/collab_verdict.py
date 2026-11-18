@@ -5,6 +5,9 @@ import re
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from scripts.collab_pr_validate import detect_prompt_injection
+from scripts.evaluators.anti_convert import check_anti_convert_issues
+from scripts.evaluators.scoring import compute_weighted_total
+from scripts.evaluate import enforce_language_detection
 from scripts.helper import check_redraft, resolve_pass_threshold
 
 CANONICAL_DIMENSIONS: Tuple[str, ...] = (
@@ -117,6 +120,183 @@ def _is_valid_req022_review(review: Dict[str, Any], pr_author: str) -> bool:
         if dim not in scores or not (1.0 <= scores[dim] <= 5.0):
             return False
     return True
+
+
+_REVIEW_ISSUE_RE = re.compile(
+    r"(?i)\[(critical|major|minor)\](?:\s*\[?(S-\d{4})\]?)?\s*([^\n]+)"
+)
+
+
+def filter_fresh_valid_reviews(
+    reviews: Optional[List[Dict[str, Any]]],
+    pr_author: str = "",
+    head_oid: str = "",
+) -> List[Dict[str, Any]]:
+    """Filter to non-author REQ-022-valid reviews whose commit_oid matches head_oid, keeping latest per reviewer."""
+    if not reviews:
+        return []
+    author = (pr_author or "").strip()
+    head = (head_oid or "").strip()
+
+    indexed = [r for r in reviews if isinstance(r, dict)]
+    if not indexed:
+        return []
+
+    by_reviewer: Dict[str, List[Dict[str, Any]]] = {}
+    for rev in indexed:
+        login = _extract_login(rev)
+        if not login or (author and login == author):
+            continue
+        if not _is_valid_req022_review(rev, author):
+            continue
+        r_oid = _extract_commit_oid(rev)
+        if head and r_oid and r_oid != head:
+            continue
+        by_reviewer.setdefault(login, []).append(rev)
+
+    fresh: List[Dict[str, Any]] = []
+    for login, rev_list in by_reviewer.items():
+        sorted_revs = sorted(
+            enumerate(rev_list),
+            key=lambda pair: (_parse_optional_ts(pair[1]) or 0.0, pair[0]),
+        )
+        latest_rev = sorted_revs[-1][1]
+        fresh.append(latest_rev)
+
+    return fresh
+
+
+def evaluate_pr_from_reviews(
+    reviews: Optional[List[Dict[str, Any]]],
+    pr_author: str = "",
+    head_oid: str = "",
+    translation_xml: str = "",
+    book_record: Optional[Dict[str, Any]] = None,
+    source_lang: str = "en",
+    pass_threshold: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Compute EvaluationResult and score_of_record deterministically from fresh peer reviews (REQ-032)."""
+    fresh_reviews = filter_fresh_valid_reviews(reviews, pr_author, head_oid)
+    effective_threshold = resolve_pass_threshold(cli_threshold=pass_threshold, book_record=book_record)
+
+    if not fresh_reviews:
+        return {
+            "verdict": "NEEDS_REVIEW",
+            "outcome": "NEEDS_REVIEW",
+            "weighted_total": 0.0,
+            "score_of_record": 0.0,
+            "effective_threshold": effective_threshold,
+            "fallback_unverified": False,
+            "dimension_scores": {d: 0.0 for d in CANONICAL_DIMENSIONS},
+            "issues": [],
+            "critical_issue_count": 0,
+            "major_issue_count": 0,
+            "minor_issue_count": 0,
+            "critical_count": 0,
+            "major_count": 0,
+            "minor_count": 0,
+            "reviews_count": 0,
+            "fresh_reviews": [],
+        }
+
+    dim_sums: Dict[str, float] = {d: 0.0 for d in CANONICAL_DIMENSIONS}
+    dim_counts: Dict[str, int] = {d: 0 for d in CANONICAL_DIMENSIONS}
+    parsed_issues: List[Dict[str, Any]] = []
+
+    for rev in fresh_reviews:
+        body = str(rev.get("body") or "")
+        scores: Dict[str, float] = {}
+        if isinstance(rev.get("scores"), dict):
+            for k, v in rev["scores"].items():
+                try:
+                    scores[str(k).lower()] = float(v)
+                except (TypeError, ValueError):
+                    pass
+        for dim_name, score_str in _RUBRIC_SCORE_RE.findall(body):
+            try:
+                scores[dim_name.lower()] = float(score_str)
+            except ValueError:
+                pass
+
+        for d in CANONICAL_DIMENSIONS:
+            if d in scores:
+                dim_sums[d] += _clamp_score(scores[d], default=0.0)
+                dim_counts[d] += 1
+
+        if isinstance(rev.get("issues"), list):
+            for iss in rev["issues"]:
+                if isinstance(iss, dict):
+                    parsed_issues.append(dict(iss))
+
+        for m in _REVIEW_ISSUE_RE.finditer(body):
+            sev = m.group(1).lower()
+            seg = m.group(2) or ""
+            prob = m.group(3).strip()
+            parsed_issues.append({
+                "severity": sev,
+                "segment_id": seg,
+                "problem": prob,
+                "suggestion": "",
+                "dimension": "completeness" if sev == "critical" else "fidelity",
+            })
+
+    dimension_scores: Dict[str, float] = {}
+    for d in CANONICAL_DIMENSIONS:
+        if dim_counts[d] > 0:
+            dimension_scores[d] = round(dim_sums[d] / dim_counts[d], 2)
+        else:
+            dimension_scores[d] = 0.0
+
+    weighted_total = compute_weighted_total(dimension_scores)
+
+    result_data: Dict[str, Any] = {
+        "verdict": "PASS" if weighted_total >= effective_threshold else "FAIL",
+        "weighted_total": weighted_total,
+        "dimensions": dimension_scores,
+        "issues": parsed_issues,
+    }
+
+    if translation_xml:
+        enforce_language_detection(result_data, translation_xml, source_lang=source_lang)
+        if source_lang == "zh":
+            ac_issues = check_anti_convert_issues(translation_xml, source_lang="zh")
+            if ac_issues:
+                result_data.setdefault("issues", []).extend(ac_issues)
+                dims = result_data.setdefault("dimensions", dimension_scores)
+                dims["terminology"] = min(dims.get("terminology", 5.0), 2.0)
+                result_data["weighted_total"] = compute_weighted_total(dims)
+                result_data["verdict"] = "FAIL"
+
+    final_dims = result_data.get("dimensions", dimension_scores)
+    final_weighted = round(float(result_data.get("weighted_total", weighted_total)), 2)
+    all_issues = result_data.get("issues", parsed_issues)
+
+    critical_count = sum(1 for i in all_issues if str(i.get("severity") or "").lower() == "critical")
+    major_count = sum(1 for i in all_issues if str(i.get("severity") or "").lower() == "major")
+    minor_count = sum(1 for i in all_issues if str(i.get("severity") or "").lower() == "minor")
+
+    if critical_count > 0 or final_weighted < effective_threshold or str(result_data.get("verdict")).upper() == "FAIL":
+        verdict = "FAIL"
+    else:
+        verdict = "PASS"
+
+    return {
+        "verdict": verdict,
+        "weighted_total": final_weighted,
+        "score_of_record": final_weighted,
+        "effective_threshold": effective_threshold,
+        "fallback_unverified": False,
+        "dimension_scores": final_dims,
+        "issues": all_issues,
+        "critical_issue_count": critical_count,
+        "major_issue_count": major_count,
+        "minor_issue_count": minor_count,
+        "critical_count": critical_count,
+        "major_count": major_count,
+        "minor_count": minor_count,
+        "reviews_count": len(fresh_reviews),
+        "fresh_reviews": fresh_reviews,
+    }
 
 
 def normalize_evaluation_result(

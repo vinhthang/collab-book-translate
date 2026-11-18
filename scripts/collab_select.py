@@ -93,26 +93,20 @@ def parse_latest_candidate_score(
 
 def select_winning_pr(
     candidates: List[Dict[str, Any]],
-    window_started_at: float,
-    now: float,
-    window_hours: float = 24.0,
+    window_started_at: Optional[float] = None,
+    now: Optional[float] = None,
+    window_hours: Optional[float] = None,
 ) -> Dict[str, Any]:
-    """Select the winning Candidate PR once window_hours has elapsed (REQ-026).
+    """Select the winning Candidate PR immediately without waiting for a candidate window (REQ-033).
 
     Ranks eligible candidates strictly by:
       (-score_of_record, major_issue_count, minor_issue_count, pr_number)
     """
-    if (now - window_started_at) < (window_hours * 3600.0):
-        return {
-            "window_closed": False,
-            "winner": None,
-            "non_selected": [],
-        }
-
     eligible = [c for c in candidates if _is_eligible_candidate(c)]
 
     if not eligible:
         return {
+            "selected": False,
             "window_closed": True,
             "winner": None,
             "non_selected": [],
@@ -174,6 +168,7 @@ def select_winning_pr(
         })
 
     return {
+        "selected": bool(winner),
         "window_closed": True,
         "winner": winner,
         "non_selected": non_selected,
