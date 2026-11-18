@@ -149,6 +149,6 @@ Line comment on S-0002: Sino-Vietnamese names and titles match canonical book re
 
 ## 4. Evaluation, Scoring & Selection
 
-1. **Score of Record**: The automated evaluator runs `scripts/evaluate.py` independently on each candidate PR to compute the objective score of record.
-2. **Revision Rounds**: If defects are flagged, the PR receives `status:revise`. You may submit up to 3 revision pushes. On a 4th failed revision, the PR is closed with `status:reassign` and the chapter remains open for other contributors.
-3. **Candidate Window**: When the first PR achieves a PASS score, a 24-hour candidate window opens (`status:candidates`). The highest-ranking passing PR at the end of the window is merged, and non-selected PRs are closed with feedback.
+1. **Score of Record**: The coordinator computes `score_of_record` directly from commit-fresh independent peer reviews (`reviewer != pr.author`) combined with deterministic language detection and glossary validation.
+2. **Revision Rounds**: If defects are flagged or score is below threshold, the PR receives `status:revise`. You may submit up to 3 revision pushes. On a 4th failed revision, the PR is closed with `status:reassign` and the chapter remains open for other contributors.
+3. **Direct Post-Review Selection**: There is no candidate wait window. Once a translation PR has a valid peer review with a passing score and clean repository checks, the coordinator sweep merges the passing PR directly into `main` and closes the chapter issue. If multiple passing PRs are open simultaneously, the highest-ranking PR is merged and non-selected PRs are closed with score comparison feedback.
