@@ -695,6 +695,25 @@ class GitHubSeedPRClient:
         if head_oid:
             args.extend(["--match-head-commit", head_oid])
         self._run_gh(args)
+
+        # Unlink any local untracked files brought in by the PR so --ff-only cleanly succeeds
+        try:
+            view_files = self._run_gh(["pr", "view", str(pr_num), "--repo", self.repo_full_name, "--json", "files"])
+            for f_info in json.loads(view_files).get("files", []):
+                rel_f = f_info.get("path", "")
+                p = self.root / rel_f
+                if p.is_file():
+                    tracked = subprocess.run(
+                        ["git", "ls-files", "--error-unmatch", rel_f],
+                        cwd=str(self.root),
+                        capture_output=True,
+                        check=False,
+                    )
+                    if tracked.returncode != 0:
+                        p.unlink(missing_ok=True)
+        except Exception:
+            pass
+
         subprocess.run(
             ["git", "pull", "--ff-only", "origin", "main"],
             cwd=str(self.root),
