@@ -141,6 +141,12 @@ python3 scripts/collab_worker.py submit-review \
 
 ## Published Translations
 
+- **[The Happy Prince and Other Tales (*Hoàng Tử Hạnh Phúc Và Các Truyện Khác*)](https://github.com/vinhthang/collab-book-translate/releases/tag/happy-prince-v1.0)** (v1.0):
+  - Author: Oscar Wilde
+  - Note: Unabridged 5-chapter public-domain translation (`en` -> `vi`, `ch01`–`ch05`, Project Gutenberg #902) translated and cross-reviewed across collaborator accounts `@vinhthang` and `@1quachuoi9vang`.
+  - Deliverables: EPUB 3, PDF, DOCX
+  - Quality scores of record: 3.50 (ch01 seed), 4.87 (ch02), 4.90 (ch03, competing PRs), 4.90 (ch04), 4.90 (ch05)
+  - Full audit trail: [`runs/happy-prince/collab_ledger.json`](runs/happy-prince/collab_ledger.json)
 - **[A Scandal in Bohemia (*Vụ Bê Bối Ở Xứ Bohemia*)](https://github.com/vinhthang/collab-book-translate/releases/tag/scandal-in-bohemia-v1.0)** (v1.0):
   - Author: Arthur Conan Doyle
   - Note: 3-chapter, 12-segment public-domain pilot abridgment of Arthur Conan Doyle's *A Scandal in Bohemia* (Project Gutenberg #1661).

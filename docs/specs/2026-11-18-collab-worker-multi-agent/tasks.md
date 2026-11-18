@@ -44,13 +44,13 @@ Sources: [spec.md](./spec.md), [design.md](./design.md)
 
 ## Task 5: Run quality gates, install plugin, push to GitHub, and execute live 2-account book translation
 
-- [ ] Complete the work and its applicable checks.
+- [x] Complete the work and its applicable checks.
 - Covers: REQ-031 / AC-031-1, AC-031-2, REQ-032 / AC-032-1, AC-032-2, REQ-033 / AC-033-1, AC-033-2, REQ-034 / AC-034-1, AC-034-2, REQ-035 / AC-035-1, AC-035-2, REQ-036 / AC-036-1, AC-036-2
 - Files: docs/specs/INDEX.md, docs/specs/2026-11-18-collab-multi-agent-translation/spec.md, docs/specs/2026-11-18-collab-worker-multi-agent/spec.md, docs/specs/2026-11-18-collab-worker-multi-agent/tasks.md, docs/specs/2026-11-18-collab-worker-multi-agent/verification.md
 - Dependencies: Task 4
 - Blocked by: None
 - Work: Verify full `pytest` suite, `mutation-guard` (`>= 80%` kill rate across modified/new `collab_*.py` modules), single-agent `code-review` (`0 P0`, `0 P1`), and `validate_specs.py --all`; symlink `~/.gemini/config/plugins/collab-book-translate`, verify via `lsrpc GetAllPlugins`, push `main` to `vinhthang/collab-book-translate`, run Oscar Wilde's 5-chapter *The Happy Prince and Other Tales* (`en->vi`) live across `vinhthang` and `1quachuoi9vang` through published EPUB 3 / PDF / DOCX GitHub Release, and record run evidence + `In-Testing` activation.
-- Completion evidence: Not executed.
+- Completion evidence: Commits `1a16543` and `f03d8c3` on `vinhthang/collab-book-translate` `main`. Full suite `296 passed in 6.73s` (`0` failed, `0` skipped); `mutation-guard` (`collab_config.py` `100.0%` 8/8, `collab_select.py` `100.0%` 20/20, `collab_verdict.py` `85.0%` 17/20, `collab_worker.py` `100.0%` 17/17); single-agent `code-review` `Approved` (`0 P0`, `0 P1`); `lsrpc GetAllPlugins` confirmed `collab-book-translate` enabled (`skills: ["collab-translate-book"]`, `agents: ["collab_reviewer", "collab_translator"]`); live 5-chapter *The Happy Prince and Other Tales* completed across `vinhthang` + `1quachuoi9vang` (PRs `#19`, `#20`, `#25`, `#26` beating `#27`, `#28`, `#29`; Issues `#21`–`#24` closed `status:done`) and published at Release `happy-prince-v1.0` (`55,203` B EPUB, `206,081` B PDF, `83,315` B DOCX).
 
 ## Gate 2: traceability and readiness
 

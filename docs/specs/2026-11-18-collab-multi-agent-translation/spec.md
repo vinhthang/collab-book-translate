@@ -4,7 +4,7 @@
 - Type: enhancement
 - Status: In-Testing
 - First entered In-Testing: 2026-11-18
-- Related specifications: Implemented: Replaces [2026-11-06-collab-multi-agent-translation](../2026-11-06-collab-multi-agent-translation/spec.md); Proposed: Changed by [2026-11-18-collab-worker-multi-agent](../2026-11-18-collab-worker-multi-agent/spec.md)
+- Related specifications: Implemented: Replaces [2026-11-06-collab-multi-agent-translation](../2026-11-06-collab-multi-agent-translation/spec.md); Implemented: Changed by [2026-11-18-collab-worker-multi-agent](../2026-11-18-collab-worker-multi-agent/spec.md)
 
 ## Problem and source intent
 
@@ -40,6 +40,7 @@ Inspected against standalone repository `collab-book-translate` at commit `423b9
 
 ### REQ-016: Zero-fallback plugin configuration schema and local config hygiene
 
+- Current contract: Changed by [2026-11-18-collab-worker-multi-agent/REQ-031](../2026-11-18-collab-worker-multi-agent/spec.md#req-031-streamlined-12-key-collabconfig-zero-vendor-tokens-and-antigravity-pluginjson-schema)
 - Source intent: Verbatim user prompts (*"you need to create config file for the plugin, do not fallback, but create config file for me"*; *"the rtk will be append outside of this plugin"*) and 2026-11-18 Option 1 decision (`config.json` gitignored, `config.example.json` tracked).
 - Statement: WHEN any collaborative CLI or workflow module loads plugin settings, THE configuration loader SHALL resolve the JSON file from explicit `--config`, `COLLAB_CONFIG_PATH`, or `<engine_root>/config.json` (where `<engine_root>` is the repository root directory containing `plugin.json`), without silent defaults, and SHALL validate all 14 required keys and domains:
   - `workspace_dir` (non-empty `str` path), `repo_full_name` (`str` matching `^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`), `bot_login` (non-empty `str`), `bot_git_name` (non-empty `str`), `bot_git_email` (non-empty `str`), `human_approver` (non-empty `str` with `human_approver != bot_login`),
@@ -72,6 +73,7 @@ Inspected against standalone repository `collab-book-translate` at commit `423b9
 
 ### REQ-020: Opening-sample analysis, `ch01` seed PR, immutable seed `glossary_sha`, and failed-seed recovery
 
+- Current contract: Changed by [2026-11-18-collab-worker-multi-agent/REQ-034](../2026-11-18-collab-worker-multi-agent/spec.md#req-034-worktree-isolated-ch01-seeding---prepare-only-workflow-and-idempotent-github-label-provisioning)
 - Source intent: Verbatim user decisions (*"Seed-then-parallel"*; `D2` live-PASS bot merge for `ch01`) and 2026-11-18 Option 1 decision resolving `P0-1a`, `P0` `ch01` gate, `P1-1..4`, and `P2-11`.
 - Statement: WHEN a `book/<slug>` PR is merged onto `main` and `runs/<slug>/checklist.json` has neither `seed_status == "seeded"` nor `seed_status == "blocked_failed"` (unless `--retry-blocked` is passed on `scripts/collab_seed.py`, which resets `seed_status` from `"blocked_failed"` to `"seeding"`), THE main agent SHALL:
   1. Extract `books/<slug>/source/*` into `<segment id="S-NNNN" type="...">` XML files `runs/<slug>/ch01..chNN/source.txt` (`N >= 1` chapters, each `1..2,000` segments and $\le 2,621,440$ UTF-8 bytes), verify zero un-cleared prompt-injection patterns in `source.txt` (`REQ-023`), and write `runs/<slug>/checklist.json` using the envelope schema `{"book_slug": "<slug>", "seed_status": "seeding", "seed_error": null, "chapters": [{"chapter": "ch01", "chapter_num": 1, "title": "...", "status": "pending"}, ...]}`.
@@ -107,6 +109,7 @@ Inspected against standalone repository `collab-book-translate` at commit `423b9
 
 ### REQ-024: Normative `EvaluationResult` contract, normalized verdict threshold, and per-reviewer `CHANGES_REQUESTED` clearing
 
+- Current contract: Changed by [2026-11-18-collab-worker-multi-agent/REQ-032](../2026-11-18-collab-worker-multi-agent/spec.md#req-032-agent-agnostic-peer-review-and-deterministic-score_of_record-evaluation)
 - Source intent: Verbatim user prompt (*"The main agent evaluates both the reviewer's comments and the translation PR"*) and re-review findings (`P1-4`, `P1-5`, `P1-9`, `P2-1`, `P2-4`, `P2-5`, `P2-9`).
 - Statement: WHEN a `ch02..chNN` PR passes `REQ-021`/`REQ-023` pre-checks and has $\ge 1$ valid review (`REQ-022`) (or is the bot `ch01` seed PR under `REQ-020`), THE main agent SHALL run a live (non-mock, non-fallback) evaluation using `evaluation_engine` over `chNN/source.txt`, `translation.xml`, and `runs/<slug>/book_record.json` producing an `EvaluationResult` JSON object with required fields:
   - `verdict`: `"PASS" | "FAIL" | "CONTESTED"`
@@ -127,6 +130,7 @@ Inspected against standalone repository `collab-book-translate` at commit `423b9
 
 ### REQ-026: Cohort competing-PR window, severity tie-breaks, and bounded 48 h starved-chapter fallback
 
+- Current contract: Changed by [2026-11-18-collab-worker-multi-agent/REQ-033](../2026-11-18-collab-worker-multi-agent/spec.md#req-033-direct-post-review-selection-and-merge-without-a-candidate-window-gate)
 - Source intent: Verbatim user decisions (`24 h` candidate window, deterministic best-PR selection, `D3` `48 h` starved-chapter fallback) and 2026-11-18 Option 1 decision resolving `P0-1b`, `P1-11`, `P2-3`, `P2-4`, `P2-6`, `P2-7`, `P2-8`, `P2-11`.
 - Statement: WHEN a chapter tracking issue transitions from `Open` to `Candidates` (`status:candidates`, i.e. acquires $\ge 1$ open `Candidate` PR after having none), THE main agent (`bot_login`) SHALL post `[collab-window-start epoch=<cur_now>]` on that issue; while the chapter remains in `Candidates`, THE main agent SHALL read `window_started_at` from the chronologically **latest** `bot_login`-authored `[collab-window-start epoch=<float>]` comment on that issue (posting a new `[collab-window-start epoch=<cur_now>]` if none exists, never falling back to `issue.created_at`, and blocking selection if no matching open issue exists). Once `cur_now - window_started_at >= window_hours * 3600`, THE main agent SHALL rank all currently open eligible `Candidate` PRs (those with zero blocking `CHANGES_REQUESTED` reviews per `REQ-024`, including candidates that arrived during or after the window before selection ran) by `(-score_of_record, major_issue_count, minor_issue_count, pr_number)` where `major_issue_count` and `minor_issue_count` are the counts of `"major"` and `"minor"` items in `EvaluationResult.issues` recorded in the latest `bot_login` `[collab-candidate-score ...]` comment for `<head_oid>`, and SHALL merge the winner (`--match-head-commit <winner_head_oid>`) while closing non-selected PRs as `NotSelected` (`status:not-selected`) with their score and reason. IF an `Open` chapter issue has zero open PRs of any state for `<slug>-<chNN>` and `cur_now - starvation_since_utc >= fallback_hours * 3600` (where `starvation_since_utc` is the later of `issue_created_at_utc` and the most recent PR closure timestamp for `<slug>-<chNN>`):
   - Counting only `bot_login` `[collab-fallback pr=#<num> attempt=<k>]` comments posted after the latest `/retry-fallback` comment from `human_approver` (if any): IF `chNN/source.txt` contains un-cleared prompt-injection patterns (`REQ-023`), THE main agent SHALL post `[collab-starved-escalated] @<human_approver>` once without invoking any LLM translator; OTHERWISE while post-reset attempts number fewer than `2`, THE main agent SHALL generate `runs/<slug>/<chNN>/translation.xml` applying `runs/<slug>/book_record.json` terminology/pronouns (including mandatory `<hanviet>` blocks per segment when `manifest.source_lang == "zh"`), push `translate/<slug>-<chNN>-<bot_login>`, open a normal PR conforming to `REQ-021` (`Issue: #<issue_num>`, `Glossary SHA: <book_record.glossary_sha>`, labelled `agent:<bot_login>`), and post `[collab-fallback pr=#<new_pr> attempt=<k+1>]` on the issue (posting no marker if generation or PR creation fails, so the next sweep retries).
@@ -136,6 +140,7 @@ Inspected against standalone repository `collab-book-translate` at commit `423b9
 
 ### REQ-027: Inlined state machine, transition guards, label reconciliation, and deterministic SHA-keyed revision cap
 
+- Current contract: Changed by [2026-11-18-collab-worker-multi-agent/REQ-033](../2026-11-18-collab-worker-multi-agent/spec.md#req-033-direct-post-review-selection-and-merge-without-a-candidate-window-gate)
 - Source intent: Verbatim user decision (3 revision rounds per PR; main-agent-controlled state labels) and re-review findings (`P1-1`, `P1-2`, `P1-10`, `P2-5`, `P2-6`).
 - Statement: WHEN chapter records, issues, and translation PRs progress through the workflow, THE main agent SHALL enforce:
   - **Pre-issue chapter `checklist.json` states (no GitHub issue, no `status:*` label)**: `Seeding` (`seed_status == "seeding"`) and `SeedBlocked` (`seed_status == "blocked_failed"`).

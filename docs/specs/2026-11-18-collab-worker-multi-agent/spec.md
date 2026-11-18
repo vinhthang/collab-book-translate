@@ -2,9 +2,9 @@
 
 - Feature ID: 2026-11-18-collab-worker-multi-agent
 - Type: enhancement
-- Status: In-Progress
-- First entered In-Testing: Never
-- Related specifications: Proposed: Changes [2026-11-18-collab-multi-agent-translation](../2026-11-18-collab-multi-agent-translation/spec.md)
+- Status: In-Testing
+- First entered In-Testing: 2026-11-18
+- Related specifications: Implemented: Changes [2026-11-18-collab-multi-agent-translation](../2026-11-18-collab-multi-agent-translation/spec.md)
 
 ## Problem and source intent
 
@@ -105,3 +105,4 @@ Inspected against `collab-book-translate` at commit `10ef139`:
 
 - `2026-11-18` — `None -> Planning`: Scope, removal of candidate window gate and `WorkBuddy` code/references, 4-role `README.md` onboarding model, and live 2-account GitHub verification on *The Happy Prince and Other Tales* approved by repository owner during `/grill-me` and `/plan` (`"Proceed with this clean, agent-agnostic plan"`, 2026-11-18).
 - `2026-11-18` — `Planning -> In-Progress`: Gate 1 and Gate 2 passed; implementation and live GitHub verification authorized by repository owner (`"Proceed with this clean, agent-agnostic plan"`, 2026-11-18).
+- `2026-11-18` — `In-Progress -> In-Testing`: Completed Tasks 1–5 (`1a16543`, `f03d8c3`); verified `296 passed in 6.73s` (`0` failed, `0` skipped), `mutation-guard` >= `85%` (`85.0%`–`100.0%`), single-agent `code-review` `Approved` (`0 P0`, `0 P1`), `lsrpc GetAllPlugins` discovery, and full 2-account live translation + GitHub Release `happy-prince-v1.0` publication. Activated 1-hop `- Current contract:` links on parent spec `2026-11-18-collab-multi-agent-translation`.
