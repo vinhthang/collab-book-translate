@@ -691,6 +691,9 @@ def _update_checklist_chapter_done(cl_file: Path, ch_id: str) -> None:
         atomic_write_json(cl_file, cl_data)
 
 
+_ENSURED_LABELS: Set[str] = set()
+
+
 class GitHubCLIClient:
     """Production GitHub client using the official gh CLI."""
 
@@ -716,6 +719,27 @@ class GitHubCLIClient:
         self.bot_git_email = bot_git_email
         self._bot_token: Optional[str] = None
         self._token_resolved = False
+
+    def ensure_labels(self, labels: Sequence[str]) -> None:
+        """Idempotently ensure labels exist in the GitHub repository (REQ-034)."""
+        for lbl in labels:
+            lbl_clean = str(lbl).strip()
+            if not lbl_clean or lbl_clean in _ENSURED_LABELS:
+                continue
+            try:
+                color = "ededed"
+                if lbl_clean.startswith("status:"):
+                    color = "0e8a16" if "merged" in lbl_clean or "done" in lbl_clean else "fbca04"
+                elif lbl_clean.startswith("book:"):
+                    color = "1d76db"
+                elif lbl_clean.startswith("lang:"):
+                    color = "5319e7"
+                elif lbl_clean.startswith("agent:"):
+                    color = "c2e0c6"
+                self._run_gh(["label", "create", lbl_clean, "--color", color, "--force"], check=False)
+                _ENSURED_LABELS.add(lbl_clean)
+            except Exception as e:
+                logger.debug("Failed creating label '%s': %s", lbl_clean, e)
 
     def _run_gh(self, args: List[str], *, check: bool = True) -> str:
         cmd = ["gh"] + args
@@ -871,6 +895,8 @@ class GitHubCLIClient:
     def set_pr_labels(self, pr_num: int, add: List[str], remove: List[str]) -> None:
         if not add and not remove:
             return
+        if add:
+            self.ensure_labels(add)
         args = ["pr", "edit", str(pr_num)]
         if add:
             args.extend(["--add-label", ",".join(add)])
@@ -887,6 +913,8 @@ class GitHubCLIClient:
     def set_issue_labels(self, issue_num: int, add: List[str], remove: List[str]) -> None:
         if not add and not remove:
             return
+        if add:
+            self.ensure_labels(add)
         args = ["issue", "edit", str(issue_num)]
         if add:
             args.extend(["--add-label", ",".join(add)])
@@ -895,6 +923,7 @@ class GitHubCLIClient:
         self._run_gh(args)
 
     def create_issue(self, title: str, body: str, labels: List[str]) -> Dict[str, Any]:
+        self.ensure_labels(labels)
         args = ["issue", "create", "--title", title, "--body", body]
         for lbl in labels:
             args.extend(["--label", lbl])
@@ -918,6 +947,7 @@ class GitHubCLIClient:
         translation_xml: str,
         labels: List[str],
     ) -> Dict[str, Any]:
+        self.ensure_labels(labels)
         subprocess.run(
             ["git", "checkout", "-B", head_ref, "main"],
             cwd=str(self.root),
@@ -1142,7 +1172,6 @@ def run_sweep(
     cfg = None
     if (
         repo_root is None
-        or window_hours is None
         or fallback_hours is None
         or max_revise_rounds is None
         or bot_login is None
@@ -1153,7 +1182,7 @@ def run_sweep(
 
         cfg = load_collab_config()
         repo_root = repo_root or cfg.workspace_dir
-        window_hours = window_hours if window_hours is not None else cfg.window_hours
+        window_hours = float(window_hours) if window_hours is not None else 0.0
         fallback_hours = fallback_hours if fallback_hours is not None else cfg.fallback_hours
         max_revise_rounds = max_revise_rounds if max_revise_rounds is not None else cfg.max_revise_rounds
         bot_login = bot_login or cfg.bot_login
@@ -1779,21 +1808,12 @@ def run_sweep(
                     gh.set_issue_labels(issue["number"], recon_open["to_add"], recon_open["to_remove"])
                 continue
 
-            # Resolve window_started_at strictly from latest bot_login [collab-window-start] (never issue.created_at!)
-            window_started_at = parse_latest_window_start(issue.get("comments", []), str(bot_login))
-            if window_started_at is None:
-                gh.comment_issue(
-                    issue["number"],
-                    f"[collab-window-start epoch={cur_now}]\n"
-                    f"Initialized candidate window clock at {cur_now}.",
-                )
-                window_started_at = cur_now
-
+            # REQ-033: Immediate windowless selection without candidate window gate
             sel_res = select_winning_pr(
                 chapter_candidates,
-                window_started_at=window_started_at,
+                window_started_at=cur_now,
                 now=cur_now,
-                window_hours=float(window_hours),
+                window_hours=float(window_hours or 0.0),
             )
 
             if not (sel_res.get("window_closed") and sel_res.get("winner")):
@@ -2231,14 +2251,15 @@ def run_sweep(
 
 
 def live_evaluate_pr(pr: Dict[str, Any], root: Path) -> Dict[str, Any]:
-    """Production evaluation helper for a translation PR via configured evaluation_engine."""
+    """Production evaluation helper for a translation PR via peer reviews + deterministic checks (REQ-032)."""
     from scripts.collab_config import load_collab_config
-    from scripts.evaluate import run_evaluation
+    from scripts.collab_verdict import evaluate_pr_from_reviews
 
     cfg = load_collab_config()
     root_path = Path(root).resolve()
     head_ref = str(pr.get("head_ref") or pr.get("headRefName") or "")
     head_oid = str(pr.get("head_oid") or pr.get("headRefOid") or "").strip()
+    pr_author = (pr.get("author") or {}).get("login", "") if isinstance(pr.get("author"), dict) else str(pr.get("author") or "")
     raw_chunk = parse_pr_body(pr.get("body", "")).get("chunk_id")
     ch_id, slug = _extract_ch_id_and_slug(head_ref, raw_chunk)
 
@@ -2258,25 +2279,25 @@ def live_evaluate_pr(pr: Dict[str, Any], root: Path) -> Dict[str, Any]:
     rec_path = root_path / "runs" / str(slug) / "book_record.json"
     book_record = json.loads(rec_path.read_text(encoding="utf-8")) if rec_path.exists() else {}
 
-    with tempfile.TemporaryDirectory() as td:
-        t_dir = Path(td)
-        s_p = t_dir / "source.txt"
-        d_p = t_dir / "translation.xml"
-        b_p = t_dir / "book_record.json"
-        o_p = t_dir / "eval.json"
+    manifest_path = root_path / "books" / str(slug) / "manifest.json"
+    source_lang = "en"
+    if manifest_path.exists():
+        try:
+            m_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+            source_lang = str(m_data.get("source_lang", "en")).strip()
+        except Exception:
+            pass
 
-        s_p.write_text(source_xml, encoding="utf-8")
-        d_p.write_text(trans_xml, encoding="utf-8")
-        b_p.write_text(json.dumps(book_record, ensure_ascii=False, indent=2), encoding="utf-8")
+    reviews = pr.get("reviews", [])
 
-        return run_evaluation(
-            source_path=str(s_p),
-            draft_path=str(d_p),
-            book_record_path=str(b_p),
-            output_path=str(o_p),
-            force_mock=False,
-            engine=cfg.evaluation_engine,
-        )
+    return evaluate_pr_from_reviews(
+        reviews=reviews,
+        pr_author=pr_author,
+        head_oid=head_oid,
+        translation_xml=trans_xml,
+        book_record=book_record,
+        source_lang=source_lang,
+    )
 
 
 def default_compile_book(root: Path, slug: str) -> List[str]:
@@ -2337,30 +2358,6 @@ def default_seed_book(
     if translate_fn is None:
         translate_fn = default_translate_chapter
 
-    if evaluate_fn is None:
-        def real_evaluate_fn(source_xml: str, trans_xml: str, rec: Dict[str, Any]) -> Dict[str, Any]:
-            from scripts.evaluate import run_evaluation
-
-            with tempfile.TemporaryDirectory() as td:
-                t_dir = Path(td)
-                s_p = t_dir / "source.txt"
-                d_p = t_dir / "translation.xml"
-                b_p = t_dir / "book_record.json"
-                o_p = t_dir / "eval.json"
-                s_p.write_text(source_xml, encoding="utf-8")
-                d_p.write_text(trans_xml, encoding="utf-8")
-                b_p.write_text(json.dumps(rec, ensure_ascii=False, indent=2), encoding="utf-8")
-                return run_evaluation(
-                    source_path=str(s_p),
-                    draft_path=str(d_p),
-                    book_record_path=str(b_p),
-                    output_path=str(o_p),
-                    force_mock=False,
-                    engine=cfg.evaluation_engine,
-                )
-
-        evaluate_fn = real_evaluate_fn
-
     return seed_merged_book(
         repo_root=Path(root).resolve(),
         book_slug=slug,
@@ -2371,6 +2368,7 @@ def default_seed_book(
         translate_fn=translate_fn,
         evaluate_fn=evaluate_fn,
         source_injection_cleared=source_injection_cleared,
+        push_origin=True,
     )
 
 
@@ -2383,6 +2381,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--fallback-hours", type=float, default=None, help="Fallback window in hours")
     parser.add_argument("--bot-login", default=None, help="Bot GitHub username")
     parser.add_argument("--human-approver", default=None, help="Human approver username")
+    parser.add_argument("--no-auto-seed", action="store_true", help="Do not automatically seed newly merged books")
     parser.add_argument("--lock-path", default=None, help="Path to lock file")
     parser.add_argument("--offline", action="store_true", help="Run in offline mode without live LLM evaluation")
     parser.add_argument(
@@ -2405,15 +2404,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     eval_fn = None if args.offline else live_evaluate_pr
     fb_fn = None if args.offline else default_translate_chapter
     lock_path = Path(args.lock_path).resolve() if args.lock_path else None
+    seed_fn = None if args.no_auto_seed else default_seed_book
 
     try:
         result = run_sweep(
             repo_root=repo_root,
             evaluate_fn=eval_fn,
             compile_fn=default_compile_book,
-            seed_fn=default_seed_book,
+            seed_fn=seed_fn,
             fallback_translate_fn=fb_fn,
-            window_hours=args.window_hours if args.window_hours is not None else cfg.window_hours,
+            window_hours=float(args.window_hours) if args.window_hours is not None else 0.0,
             fallback_hours=args.fallback_hours if args.fallback_hours is not None else cfg.fallback_hours,
             max_revise_rounds=cfg.max_revise_rounds,
             bot_login=args.bot_login or cfg.bot_login,

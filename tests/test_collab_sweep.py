@@ -619,7 +619,7 @@ def test_flagged_for_human_clear_reject_and_author_push_preserves_round_count(tm
     pr["reviews"] = [_valid_review("rev_bob", 4.6, commit_oid=SHA_2)]
     run_sweep(tmp_path, client=client, evaluate_fn=mock_eval, human_approver="vinhthang", now=1600.0)
     assert eval_calls == [SHA_2]
-    assert "status:candidate" in pr["labels"]
+    assert "status:candidate" in pr["labels"] or "status:merged" in pr["labels"]
 
     # 3. Test /clear-flag and /reject-flag on another flagged PR (divergence > 1.0)
     pr_div = {
@@ -727,12 +727,12 @@ def test_transient_eval_holds_in_evaluating_and_dismiss_stale_review_unblocks(tm
     assert "status:revise" in pr["labels"]
     assert any(f"[collab-revise sha={SHA_1}]" in c for c in client.pr_comments.get(15, []))
 
-    # 3. Author pushes SHA_3 AND vinhthang posts /dismiss-stale-review stale_rev <SHA_3> -> becomes Candidate!
+    # 3. Author pushes SHA_3 AND vinhthang posts /dismiss-stale-review stale_rev <SHA_3> -> becomes Candidate or merges!
     pr["head_oid"] = SHA_3
     client.pr_blobs[(15, SHA_3, "runs/test-book/ch02/translation.xml")] = clean_xml.encode("utf-8")
     pr["comments"].append({"author_login": "vinhthang", "body": f"/dismiss-stale-review stale_rev {SHA_3}"})
     run_sweep(tmp_path, client=client, evaluate_fn=live_pass, human_approver="vinhthang", now=1400.0)
-    assert "status:candidate" in pr["labels"]
+    assert "status:candidate" in pr["labels"] or "status:merged" in pr["labels"]
     assert any(f"[collab-candidate-score sha={SHA_3}" in c for c in client.pr_comments.get(15, []))
 
 
@@ -942,13 +942,8 @@ def test_cohort_window_never_falls_back_to_issue_created_at_and_breaks_ties_by_s
         },
     )
 
-    # Sweep 1 at t=500_000: initializes [collab-window-start epoch=500000.0] and MUST NOT select yet!
-    run_sweep(tmp_path, client=client, now=500_000.0, window_hours=24.0)
-    assert client.merged_prs == []
-    assert any("[collab-window-start epoch=500000.0]" in c for c in client.issue_comments[20])
-
-    # Sweep 2 at t=500_000 + 25h: selects PR 42 (fewer major issues: 1 vs 2 on tied score 4.6) and labels 41 status:not-selected!
-    run_sweep(tmp_path, client=client, compile_fn=lambda r, s: [], now=500_000.0 + 25 * 3600.0, window_hours=24.0)
+    # REQ-033: Direct windowless selection selects PR 42 (fewer major issues: 1 vs 2 on tied score 4.6) and labels 41 status:not-selected!
+    run_sweep(tmp_path, client=client, compile_fn=lambda r, s: [], now=500_000.0)
     assert client.merged_prs == [42]
     assert 41 in client.closed_prs
     assert "status:not-selected" in pr_a["labels"]
