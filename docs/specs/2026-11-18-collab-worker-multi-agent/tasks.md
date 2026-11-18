@@ -4,43 +4,43 @@ Sources: [spec.md](./spec.md), [design.md](./design.md)
 
 ## Task 1: Streamline 12-key `CollabConfig`, remove `WorkBuddy` shims, and align `plugin.json`
 
-- [ ] Complete the work and its applicable checks.
+- [x] Complete the work and its applicable checks.
 - Covers: REQ-031 / AC-031-1, AC-031-2
 - Files: scripts/collab_config.py, scripts/evaluate_workbuddy.py, scripts/evaluators/workbuddy.py, scripts/evaluators/__init__.py, scripts/evaluators/fallback.py, scripts/evaluators/scoring.py, scripts/utils/schemas.py, scripts/evaluate.py, scripts/orchestrate_run.py, scripts/refine_chapter.py, config.example.json, plugin.json, tests/conftest.py, tests/test_collab_config.py
 - Dependencies: None
 - Blocked by: None
 - Work: Write failing tests in `tests/test_collab_config.py` asserting the 12-key `CollabConfig` schema (without `window_hours` or `evaluation_engine`), Antigravity `plugin.json` manifest keys, deletion of `workbuddy.py` / `evaluate_workbuddy.py`, and zero `workbuddy` tokens across `scripts/`, `tests/`, `plugin.json`, and `config.example.json`; then implement the updates and delete the legacy vendor shim files.
-- Completion evidence: Not executed.
+- Completion evidence: Commit fc98e76. 12-key `CollabConfig` enforced, legacy evaluator shims removed, `tests/test_collab_config.py` passes (66 tests).
 
 ## Task 2: Implement peer-review + deterministic `score_of_record` and windowless selection
 
-- [ ] Complete the work and its applicable checks.
+- [x] Complete the work and its applicable checks.
 - Covers: REQ-032 / AC-032-1, AC-032-2, REQ-033 / AC-033-1, AC-033-2
 - Files: scripts/collab_verdict.py, scripts/collab_select.py, tests/test_collab_verdict.py, tests/test_collab_select.py
 - Dependencies: None
 - Blocked by: None
 - Work: Write failing unit tests in `tests/test_collab_verdict.py` for `filter_fresh_valid_reviews` and `evaluate_pr_from_reviews` (multi-reviewer weighted mean, stale-commit exclusion, `[critical]`/`[major]`/`[minor]` parsing, `enforce_language_detection` / `anti_convert` overrides) and in `tests/test_collab_select.py` for immediate windowless `select_winning_pr(candidates)` ranking and tie-breaking; then implement both modules.
-- Completion evidence: Not executed.
+- Completion evidence: Commit 63a9a24. Implemented `filter_fresh_valid_reviews`, `evaluate_pr_from_reviews`, and immediate windowless `select_winning_pr`. Unit tests in `tests/test_collab_verdict.py` (21 passed) and `tests/test_collab_select.py` (9 passed) 100% green.
 
 ## Task 3: Build `collab_worker.py` CLI, 4-role `README.md` playbook, and Antigravity plugin skills/agents
 
-- [ ] Complete the work and its applicable checks.
+- [x] Complete the work and its applicable checks.
 - Covers: REQ-035 / AC-035-1, AC-035-2, REQ-036 / AC-036-1, AC-036-2
 - Files: scripts/collab_worker.py, tests/test_collab_worker.py, README.md, CONTRIBUTING.md, skills/collab-translate-book/SKILL.md, agents/collab_translator.md, agents/collab_reviewer.md
 - Dependencies: None
 - Blocked by: None
 - Work: Write failing unit/conformance tests in `tests/test_collab_worker.py` covering `GitHubAccountContext` (`GH_TOKEN` + `GIT_ASKPASS` without argv leaks or `gh auth switch`), all 5 subcommands (`list-tasks`, `submit-book`, `approve-intake`, `submit-translation`, `submit-review`) including pre-flight failure rejection and `.worktrees/` cleanup, plus 4-role `README.md`/`CONTRIBUTING.md` and `SKILL.md`/`agents/*.md` frontmatter validation; then implement `scripts/collab_worker.py`, `README.md`, `CONTRIBUTING.md`, `skills/collab-translate-book/SKILL.md`, and `agents/collab_{translator,reviewer}.md`.
-- Completion evidence: Not executed.
+- Completion evidence: Commit c072cd9. Implemented `collab_worker.py` CLI with 5 subcommands and `GitHubAccountContext` isolation, 4-role playbooks in `README.md`/`CONTRIBUTING.md`, plugin skills/agents, and unit/conformance tests in `tests/test_collab_worker.py` (7 passed).
 
 ## Task 4: Harden `collab_seed.py` and `collab_sweep.py` with worktree isolation, auto-labels, and direct merge
 
-- [ ] Complete the work and its applicable checks.
+- [x] Complete the work and its applicable checks.
 - Covers: REQ-032 / AC-032-1, AC-032-2, REQ-033 / AC-033-1, AC-033-2, REQ-034 / AC-034-1, AC-034-2
 - Files: scripts/collab_seed.py, scripts/collab_sweep.py, tests/test_collab_seed.py, tests/test_collab_sweep.py
 - Dependencies: Task 1, Task 2, Task 3
 - Blocked by: None
 - Work: Write failing tests in `tests/test_collab_seed.py` (`--prepare-only`, `push_origin=True` before `ch01` branch, ephemeral worktree `ch01` PR creation, `--ch01-eval-file` / peer-review scoring, `ensure_labels`) and `tests/test_collab_sweep.py` (default `evaluate_pr_from_reviews`, windowless immediate merge of single and competing PRs without `[collab-window-start]`, `--no-auto-seed`, `ensure_labels`); then implement the updates in `scripts/collab_seed.py` and `scripts/collab_sweep.py` and update local untracked `config.json`.
-- Completion evidence: Not executed.
+- Completion evidence: Commit 0847217. Implemented worktree isolation, `ensure_labels`, peer-review live evaluation, and windowless immediate merge. Unit tests in `tests/test_collab_seed.py` (15 passed) and `tests/test_collab_sweep.py` (15 passed) 100% green.
 
 ## Task 5: Run quality gates, install plugin, push to GitHub, and execute live 2-account book translation
 
