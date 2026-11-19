@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -1039,8 +1040,14 @@ class GitHubCLIClient:
         labels: List[str],
     ) -> Dict[str, Any]:
         self.ensure_labels(labels)
+        safe_ref = re.sub(r"[^A-Za-z0-9._-]+", "_", head_ref)
+        wt_dir = self.root / ".worktrees" / f"fallback_{safe_ref}"
+        if wt_dir.exists():
+            shutil.rmtree(wt_dir, ignore_errors=True)
+        wt_dir.parent.mkdir(parents=True, exist_ok=True)
+
         subprocess.run(
-            ["git", "checkout", "-B", head_ref, "main"],
+            ["git", "worktree", "add", "-B", head_ref, str(wt_dir), "main"],
             cwd=str(self.root),
             capture_output=True,
             text=True,
@@ -1048,10 +1055,10 @@ class GitHubCLIClient:
         )
         try:
             for rel_p in changed_files:
-                abs_p = self.root / rel_p
+                abs_p = wt_dir / rel_p
                 abs_p.parent.mkdir(parents=True, exist_ok=True)
                 abs_p.write_text(translation_xml, encoding="utf-8")
-                subprocess.run(["git", "add", rel_p], cwd=str(self.root), check=True, capture_output=True)
+                subprocess.run(["git", "add", rel_p], cwd=str(wt_dir), check=True, capture_output=True)
             subprocess.run(
                 [
                     "git",
@@ -1060,33 +1067,35 @@ class GitHubCLIClient:
                     "commit",
                     "-m", title,
                 ],
-                cwd=str(self.root),
+                cwd=str(wt_dir),
                 capture_output=True,
                 text=True,
                 check=True,
             )
             head_oid = subprocess.run(
                 ["git", "rev-parse", "HEAD"],
-                cwd=str(self.root),
+                cwd=str(wt_dir),
                 capture_output=True,
                 text=True,
                 check=True,
             ).stdout.strip()
-            subprocess.run(
-                ["git", "push", "--force-with-lease", "origin", head_ref],
-                cwd=str(self.root),
-                capture_output=True,
-                text=True,
-                check=True,
-            )
+            from scripts.collab_worker import GitHubAccountContext
+
+            with GitHubAccountContext(self.bot_login) as ctx:
+                ctx.run_git(
+                    ["push", "--force-with-lease", "origin", head_ref],
+                    cwd=str(wt_dir),
+                    check=True,
+                )
         finally:
             subprocess.run(
-                ["git", "checkout", "main"],
+                ["git", "worktree", "remove", "--force", str(wt_dir)],
                 cwd=str(self.root),
                 capture_output=True,
-                text=True,
-                check=True,
+                check=False,
             )
+            if wt_dir.exists():
+                shutil.rmtree(wt_dir, ignore_errors=True)
 
         args = ["pr", "create", "--base", "main", "--head", head_ref, "--title", title, "--body", body]
         for lbl in labels:
@@ -1693,6 +1702,12 @@ def run_sweep(
             valid_reviews_by_login: Dict[str, Dict[str, Any]] = {}
             for r in reviews:
                 r_author = str(r.get("author_login") or (r.get("author") or {}).get("login") or "").strip()
+                r_oid = str(
+                    r.get("commit_oid")
+                    or r.get("head_oid")
+                    or (r.get("commit") or {}).get("oid")
+                    or ""
+                ).strip()
                 v_rev = validate_review(
                     pr_author_login=pr_author,
                     review_author_login=r_author,
@@ -1701,8 +1716,9 @@ def run_sweep(
                 )
                 if v_rev.get("injection_flags"):
                     review_inj_flags.extend(v_rev["injection_flags"])
-                if v_rev.get("valid"):
+                if v_rev.get("valid") and (not head_oid or not r_oid or r_oid == head_oid):
                     v_rev["author_login"] = r_author
+                    v_rev["commit_oid"] = r_oid
                     valid_reviews_by_login[r_author] = v_rev
 
             if review_inj_flags and not flag_cleared:
@@ -1740,6 +1756,23 @@ def run_sweep(
                     eval_res = _default_evaluate_pr(pr, root)
             except Exception as exc:
                 eval_exc = exc
+
+            if (
+                eval_exc is None
+                and isinstance(eval_res, dict)
+                and str(eval_res.get("verdict") or eval_res.get("outcome") or "").upper() == "NEEDS_REVIEW"
+                and not is_seed_ch01
+            ):
+                recon = reconcile_status_labels(current_labels, "status:needs-review")
+                if recon["to_add"] or recon["to_remove"]:
+                    gh.set_pr_labels(pr["number"], recon["to_add"], recon["to_remove"])
+                sweep_result["processed_translations"].append({
+                    "pr": pr["number"],
+                    "outcome": "NeedsReview",
+                    "chapter": ch_id,
+                    "slug": slug,
+                })
+                continue
 
             verdict_res = compute_collab_verdict(
                 eval_result=eval_res,
@@ -1931,12 +1964,39 @@ def run_sweep(
             br_file = run_dir / "book_record.json"
             additions_file = ch_dir / "analyze_additions.json"
 
-            # Re-verify REQ-022 reviews on winner
-            valid_revs = list(winner.get("valid_reviews") or [])
+            # Re-verify REQ-022 reviews on winner (strictly matching winner_oid)
+            valid_revs = [
+                rv
+                for rv in (winner.get("valid_reviews") or [])
+                if not winner_oid
+                or not (
+                    str(
+                        rv.get("commit_oid")
+                        or rv.get("head_oid")
+                        or (rv.get("commit") or {}).get("oid")
+                        or ""
+                    ).strip()
+                )
+                or str(
+                    rv.get("commit_oid")
+                    or rv.get("head_oid")
+                    or (rv.get("commit") or {}).get("oid")
+                    or ""
+                ).strip()
+                == winner_oid
+            ]
             if not valid_revs:
                 by_rev: Dict[str, Dict[str, Any]] = {}
                 for r in winner_pr.get("reviews", []):
                     r_auth = str(r.get("author_login") or (r.get("author") or {}).get("login") or "").strip()
+                    r_oid = str(
+                        r.get("commit_oid")
+                        or r.get("head_oid")
+                        or (r.get("commit") or {}).get("oid")
+                        or ""
+                    ).strip()
+                    if winner_oid and r_oid and r_oid != winner_oid:
+                        continue
                     v_rev = validate_review(
                         pr_author_login=winner_author,
                         review_author_login=r_auth,
@@ -1945,6 +2005,7 @@ def run_sweep(
                     )
                     if v_rev.get("valid"):
                         v_rev["author_login"] = r_auth
+                        v_rev["commit_oid"] = r_oid
                         by_rev[r_auth] = v_rev
                 valid_revs = list(by_rev.values())
 
@@ -2033,7 +2094,7 @@ def run_sweep(
                 frozen_sha = json.loads(br_file.read_text(encoding="utf-8")).get("glossary_sha")
                 update_book_record_from_eval(
                     book_record_path=br_file,
-                    chapter_dir=ch_dir,
+                    chapter_dir=None,
                     bind=True,
                     chapter_id=ch_id,
                     eval_data=winner["eval_res"],
@@ -2404,13 +2465,45 @@ def default_compile_book(root: Path, slug: str) -> List[str]:
     from scripts.compile_book import compile_book_formats
 
     cfg = load_collab_config()
-    run_dir = Path(root).resolve() / "runs" / slug
+    root_path = Path(root).resolve()
+    run_dir = root_path / "runs" / slug
     out_dir = run_dir / "release_assets"
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    man: Dict[str, Any] = {}
+    man_path = root_path / "books" / slug / "manifest.json"
+    if man_path.is_file():
+        try:
+            man_parsed = json.loads(man_path.read_text(encoding="utf-8"))
+            if isinstance(man_parsed, dict):
+                man = man_parsed
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.debug("Unable to read manifest %s: %s", man_path, exc)
+
+    br: Dict[str, Any] = {}
+    br_path = run_dir / "book_record.json"
+    if br_path.is_file():
+        try:
+            br_parsed = json.loads(br_path.read_text(encoding="utf-8"))
+            if isinstance(br_parsed, dict):
+                br = br_parsed
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.debug("Unable to read book_record %s: %s", br_path, exc)
+
+    title = br.get("title_vietnamese") or man.get("title") or br.get("title") or None
+    author = (
+        man.get("author")
+        or br.get("author")
+        or (br.get("brief") if isinstance(br.get("brief"), dict) else {}).get("author")
+        or None
+    )
+
     res = compile_book_formats(
         run_dir=run_dir,
         output_dir=out_dir,
         formats=cfg.release_formats,
+        title=title,
+        author=author,
         allow_incomplete=False,
     )
     return [str(p) for p in res.values()]
@@ -2452,12 +2545,14 @@ def default_seed_book(
     from scripts.collab_seed import seed_merged_book
 
     cfg = load_collab_config()
-
-    if translate_fn is None:
-        translate_fn = default_translate_chapter
+    root_path = Path(root).resolve()
+    prepare_only = (
+        translate_fn is None
+        and not (root_path / "runs" / slug / "ch01" / "source.txt").is_file()
+    )
 
     return seed_merged_book(
-        repo_root=Path(root).resolve(),
+        repo_root=root_path,
         book_slug=slug,
         repo_full_name=cfg.repo_full_name,
         gh_user=cfg.bot_login,
@@ -2465,6 +2560,7 @@ def default_seed_book(
         bot_git_email=cfg.bot_git_email,
         translate_fn=translate_fn,
         evaluate_fn=evaluate_fn,
+        prepare_only=prepare_only,
         source_injection_cleared=source_injection_cleared,
         push_origin=True,
     )

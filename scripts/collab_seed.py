@@ -39,7 +39,13 @@ from scripts.collab_pr_validate import (
     detect_prompt_injection,
     validate_translation_pr,
 )
-from scripts.collab_verdict import normalize_evaluation_result
+from scripts.collab_verdict import (
+    CANONICAL_DIMENSIONS,
+    evaluate_pr_from_reviews,
+    normalize_evaluation_result,
+)
+from scripts.evaluate import enforce_language_detection
+from scripts.evaluators.anti_convert import check_anti_convert_issues
 from scripts.extract import extract_book
 from scripts.helper import (
     atomic_write_json,
@@ -465,7 +471,7 @@ def _is_transient_eval_failure(
     if eval_res.get("error") or eval_res.get("transient_error"):
         return True
     raw_verdict = str(eval_res.get("verdict") or "").strip().upper()
-    return raw_verdict in ("ERROR", "TIMEOUT", "UNAVAILABLE")
+    return raw_verdict in ("ERROR", "TIMEOUT", "UNAVAILABLE", "NEEDS_REVIEW")
 
 
 class GitHubSeedPRClient:
@@ -569,7 +575,7 @@ class GitHubSeedPRClient:
             "--repo", self.repo_full_name,
             "--state", "open",
             "--head", head_ref,
-            "--json", "number,headRefName,headRefOid,body,title,files",
+            "--json", "number,headRefName,headRefOid,body,title,files,reviews,comments",
         ])
         items = json.loads(out) if out.strip() else []
         if not items:
@@ -582,6 +588,8 @@ class GitHubSeedPRClient:
             "body": pr.get("body", ""),
             "title": pr.get("title", ""),
             "changed_files": [f.get("path", "") for f in pr.get("files", []) if isinstance(f, dict)],
+            "reviews": pr.get("reviews") or [],
+            "comments": pr.get("comments") or [],
         }
 
     def create_seed_pr(
@@ -1152,6 +1160,8 @@ def seed_merged_book(
     book_record["title"] = str(manifest.get("title") or book_record.get("title") or book_slug)
 
     raw_brief = book_record.get("brief") if isinstance(book_record.get("brief"), dict) else {}
+    author_str = str(manifest.get("author") or book_record.get("author") or raw_brief.get("author") or "")
+    book_record["author"] = author_str
     effective_genre = str(manifest.get("genre") or raw_brief.get("genre") or "non-fiction").strip()
     summary_str = str(
         raw_brief.get("summary")
@@ -1159,7 +1169,7 @@ def seed_merged_book(
     ).strip()
     book_record["brief"] = {
         "genre": effective_genre,
-        "author": str(manifest.get("author") or raw_brief.get("author") or ""),
+        "author": author_str,
         "summary": summary_str,
         "source_lang": src_lang,
         "target_lang": tgt_lang,
@@ -1172,55 +1182,56 @@ def seed_merged_book(
         if manifest.get("genre") in (None, "", "general"):
             book_record["brief"]["genre"] = "fiction"
 
-        existing_pronouns = [
-            p for p in _normalize_pronouns_list(book_record)
-            if not p.get("provisional")
-            and _is_pair_attested_in_source(p["pair"], book_record.get("names") or [], sample_text)
-        ]
-        if not existing_pronouns:
-            if pronoun_extract_fn is not None:
-                try:
-                    ext = pronoun_extract_fn(sample_text, book_record)
-                except Exception as exc:
-                    return _quarantine(f"Fiction pronoun extraction failed: {exc}")
-                ext_names = (ext or {}).get("names") or []
-                ext_pronouns = (ext or {}).get("pronouns") or []
-                merged_names = list(book_record.get("names") or []) + [
-                    n for n in ext_names if isinstance(n, dict)
-                ]
-                book_record["names"] = merged_names
-                attested_pairs: List[Dict[str, Any]] = []
-                for p in ext_pronouns:
-                    if not isinstance(p, dict):
-                        continue
-                    pair = p.get("pair")
-                    if isinstance(pair, list) and len(pair) == 2:
-                        if _is_pair_attested_in_source(pair, merged_names, sample_text):
-                            attested_pairs.append({
-                                "pair": [str(pair[0]).strip(), str(pair[1]).strip()],
-                                "a_to_b": str(p.get("a_to_b") or ""),
-                                "b_to_a": str(p.get("b_to_a") or ""),
-                                "basis": str(p.get("basis") or ""),
-                                "provisional": False,
-                            })
-                if not attested_pairs:
-                    return _quarantine("Fiction pronoun extraction yielded 0 source-attested pairs")
-                book_record["pronouns"] = attested_pairs
-            else:
-                if os.environ.get("PYTEST_CURRENT_TEST"):
-                    raise RuntimeError(
-                        "Refusing to invoke live cbc fiction pronoun CLI inside pytest without pronoun_extract_fn"
-                    )
-                try:
-                    atomic_write_json(book_record_path, book_record)
-                    book_record = assert_fiction_pronouns_populated(
-                        workspace_dir=runs_dir,
-                        book_record_path=book_record_path,
-                        book_record=book_record,
-                        offline=False,
-                    )
-                except Exception as exc:
-                    return _quarantine(f"Live fiction pronoun extraction failed: {exc}")
+        if not prepare_only:
+            existing_pronouns = [
+                p for p in _normalize_pronouns_list(book_record)
+                if not p.get("provisional")
+                and _is_pair_attested_in_source(p["pair"], book_record.get("names") or [], sample_text)
+            ]
+            if not existing_pronouns:
+                if pronoun_extract_fn is not None:
+                    try:
+                        ext = pronoun_extract_fn(sample_text, book_record)
+                    except Exception as exc:
+                        return _quarantine(f"Fiction pronoun extraction failed: {exc}")
+                    ext_names = (ext or {}).get("names") or []
+                    ext_pronouns = (ext or {}).get("pronouns") or []
+                    merged_names = list(book_record.get("names") or []) + [
+                        n for n in ext_names if isinstance(n, dict)
+                    ]
+                    book_record["names"] = merged_names
+                    attested_pairs: List[Dict[str, Any]] = []
+                    for p in ext_pronouns:
+                        if not isinstance(p, dict):
+                            continue
+                        pair = p.get("pair")
+                        if isinstance(pair, list) and len(pair) == 2:
+                            if _is_pair_attested_in_source(pair, merged_names, sample_text):
+                                attested_pairs.append({
+                                    "pair": [str(pair[0]).strip(), str(pair[1]).strip()],
+                                    "a_to_b": str(p.get("a_to_b") or ""),
+                                    "b_to_a": str(p.get("b_to_a") or ""),
+                                    "basis": str(p.get("basis") or ""),
+                                    "provisional": False,
+                                })
+                    if not attested_pairs:
+                        return _quarantine("Fiction pronoun extraction yielded 0 source-attested pairs")
+                    book_record["pronouns"] = attested_pairs
+                else:
+                    if os.environ.get("PYTEST_CURRENT_TEST"):
+                        raise RuntimeError(
+                            "Refusing to invoke live cbc fiction pronoun CLI inside pytest without pronoun_extract_fn"
+                        )
+                    try:
+                        atomic_write_json(book_record_path, book_record)
+                        book_record = assert_fiction_pronouns_populated(
+                            workspace_dir=runs_dir,
+                            book_record_path=book_record_path,
+                            book_record=book_record,
+                            offline=False,
+                        )
+                    except Exception as exc:
+                        return _quarantine(f"Live fiction pronoun extraction failed: {exc}")
 
     sync_collab_book_record(book_record)
     atomic_write_json(book_record_path, book_record)
@@ -1289,7 +1300,15 @@ def seed_merged_book(
             ch01_trans_xml = ch01_trans_path.read_text(encoding="utf-8")
         else:
             if translate_fn is None:
-                return _quarantine("Live translate_fn callable is required for ch01 seeding")
+                _write_checklist_envelope(checklist_path, book_slug, "seeding", chapters_list, seed_error=None)
+                return {
+                    "seeded": False,
+                    "seed_status": "seeding",
+                    "book_slug": book_slug,
+                    "reason": "Awaiting ch01 seed translation PR",
+                    "issues_created": [],
+                    "failed_chapters": failed_chapters,
+                }
             ch01_trans_xml = translate_fn(ch01_source_xml, book_record, manifest)
             if not ch01_trans_xml or not ch01_trans_xml.strip():
                 return _quarantine("ch01 translation_fn returned empty translation.xml")
@@ -1346,18 +1365,38 @@ def seed_merged_book(
                 open_pr_num=open_pr_num,
             )
 
-        if evaluate_fn is None:
-            return _quarantine(
-                "Live evaluate_fn callable is required for ch01 seeding",
-                open_pr_num=open_pr_num,
-            )
-
         eval_exc: Optional[BaseException] = None
         eval_raw: Optional[Dict[str, Any]] = None
-        try:
-            eval_raw = evaluate_fn(ch01_source_xml, ch01_trans_xml, book_record)
-        except Exception as exc:
-            eval_exc = exc
+        if evaluate_fn is None:
+            det_probe: Dict[str, Any] = {
+                "verdict": "PASS",
+                "dimensions": {d: 5.0 for d in CANONICAL_DIMENSIONS},
+                "issues": [],
+            }
+            enforce_language_detection(det_probe, ch01_trans_xml, source_lang=src_lang)
+            if src_lang == "zh":
+                ac_issues = check_anti_convert_issues(ch01_trans_xml, source_lang="zh")
+                if ac_issues:
+                    det_probe.setdefault("issues", []).extend(ac_issues)
+                    det_probe["verdict"] = "FAIL"
+            if str(det_probe.get("verdict") or "").upper() == "FAIL":
+                return _quarantine(
+                    "ch01 seed deterministic language/anti-convert validation failed",
+                    open_pr_num=open_pr_num,
+                )
+            eval_raw = evaluate_pr_from_reviews(
+                reviews=open_pr.get("reviews") or [],
+                pr_author=str(gh_user),
+                head_oid=open_head_oid,
+                translation_xml=ch01_trans_xml,
+                book_record=book_record,
+                source_lang=src_lang,
+            )
+        else:
+            try:
+                eval_raw = evaluate_fn(ch01_source_xml, ch01_trans_xml, book_record)
+            except Exception as exc:
+                eval_exc = exc
 
         if _is_transient_eval_failure(eval_raw, eval_exc):
             # REQ-020 / AC-020-2: keep seed_status == "seeding" without closing PR so next sweep retries
@@ -1391,7 +1430,7 @@ def seed_merged_book(
         update_book_record_from_eval(
             book_record_path=book_record_path,
             eval_data=eval_res,
-            chapter_dir=ch01_dir,
+            chapter_dir=None,
             bind=True,
             chapter_id="ch01",
         )
@@ -1544,24 +1583,6 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         trans_fn = file_trans_fn
 
-        if eval_fn is None:
-            def default_eval_fn(source_xml: str, trans_xml: str, book_record: Dict[str, Any]) -> Dict[str, Any]:
-                from scripts.collab_verdict import evaluate_pr_from_reviews
-
-                return evaluate_pr_from_reviews(
-                    reviews=[{
-                        "author_login": "seed-evaluator",
-                        "body": "Fidelity: 4.8/5\nFluency: 4.8/5\nTerminology: 4.8/5\nRegister: 4.8/5\nStructure: 4.8/5\nCompleteness: 4.8/5\nS-0001: seed reference check clean\n",
-                        "commit_oid": "seed",
-                    }],
-                    pr_author="seed-bot",
-                    head_oid="seed",
-                    translation_xml=trans_xml,
-                    book_record=book_record,
-                )
-
-            eval_fn = default_eval_fn
-
     res = seed_merged_book(
         repo_root=repo_root,
         book_slug=args.book_slug,
@@ -1573,9 +1594,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         evaluate_fn=eval_fn,
         retry_blocked=args.retry_blocked,
         prepare_only=args.prepare_only,
+        push_origin=True,
     )
     print(json.dumps(res, indent=2, ensure_ascii=False))
-    return 0 if (res.get("seeded") or res.get("prepared")) else 1
+    return 0 if (res.get("seeded") or res.get("prepared") or res.get("seed_status") == "seeding") else 1
 
 
 if __name__ == "__main__":

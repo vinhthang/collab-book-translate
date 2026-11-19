@@ -45,13 +45,17 @@ def _load_optional_config(config_path: Optional[str] = None) -> Optional[CollabC
 
 def _get_gh_token(gh_user: str) -> str:
     """Fetch GitHub auth token for a specific user without switching global auth."""
-    if os.environ.get("GH_TOKEN"):
-        return os.environ["GH_TOKEN"]
     if os.environ.get("PYTEST_CURRENT_TEST"):
         return "mock-gh-token"
+    clean_user = (gh_user or "").strip()
+    if not clean_user and os.environ.get("GH_TOKEN"):
+        return os.environ["GH_TOKEN"]
+    clean_env = {k: v for k, v in os.environ.items() if k not in ("GH_TOKEN", "GITHUB_TOKEN")}
+    cmd = ["gh", "auth", "token"] + (["-u", clean_user] if clean_user else [])
     try:
         proc = subprocess.run(
-            ["gh", "auth", "token", "-u", gh_user],
+            cmd,
+            env=clean_env,
             capture_output=True,
             text=True,
             check=True,
@@ -229,20 +233,39 @@ def list_role_tasks(
     else:
         translate_issues = [iss for _, iss in chapter_issues]
 
-    # 2. Revise PRs: open PRs authored by gh_user with status:revise
+    def _matches_book(pr_obj: Dict[str, Any], pr_labels: List[str]) -> bool:
+        if not book_slug:
+            return True
+        if f"book:{book_slug}" in pr_labels:
+            return True
+        head_ref = str(pr_obj.get("headRefName") or "").strip()
+        return head_ref.startswith(f"translate/{book_slug}-")
+
+    # 2. Revise PRs: open translation PRs authored by gh_user with status:revise
+    # 3. Review tasks: open translation PRs authored by someone else needing fresh review
+    _non_reviewable_statuses = (
+        "status:revise",
+        "status:candidate",
+        "status:merged",
+        "status:reassign",
+        "status:not-selected",
+        "status:flagged",
+    )
     revise_prs: List[Dict[str, Any]] = []
+    review_prs: List[Dict[str, Any]] = []
     for pr in all_prs:
+        head_ref = str(pr.get("headRefName") or "").strip()
+        if head_ref and not head_ref.startswith("translate/"):
+            continue
         author = (pr.get("author") or {}).get("login", "")
         labels = [l.get("name", "") for l in pr.get("labels", [])]
+        if not _matches_book(pr, labels):
+            continue
+
         if author == gh_user and "status:revise" in labels:
             revise_prs.append(pr)
 
-    # 3. Review tasks: open PRs authored by someone else needing fresh review
-    review_prs: List[Dict[str, Any]] = []
-    for pr in all_prs:
-        author = (pr.get("author") or {}).get("login", "")
-        labels = [l.get("name", "") for l in pr.get("labels", [])]
-        if author != gh_user and ("status:needs-review" in labels or "status:revise" in labels or "status:open" in labels):
+        if author != gh_user and not any(s in labels for s in _non_reviewable_statuses):
             head_oid = pr.get("headRefOid", "")
             # Check if gh_user already posted a fresh review for head_oid
             already_reviewed = False
@@ -296,6 +319,9 @@ def submit_book(
         "genre": genre,
     }
 
+    branch = f"book/{slug}"
+    repo_root = Path(cfg.workspace_dir).resolve() if cfg.workspace_dir else REPO_ROOT
+
     # Preflight check
     val_res = validate_submission_pr(
         changed_files=[f"books/{slug}/manifest.json", f"books/{slug}/source/{src_path.name}"],
@@ -304,16 +330,16 @@ def submit_book(
         max_bytes=cfg.max_source_bytes,
         allowed_licenses=cfg.allowed_licenses,
         supported_pairs=cfg.supported_pairs,
+        head_ref=branch,
+        repo_root=repo_root,
     )
     if val_res.get("prescreen_status") == "FAIL":
         return {
             "success": False,
             "error": "Book submission pre-screen validation failed",
-            "defects": val_res.get("hard_defects", []),
+            "defects": val_res.get("defects", []),
         }
 
-    branch = f"book/{slug}"
-    repo_root = Path(cfg.workspace_dir) if config_path else REPO_ROOT
     worktree_dir = repo_root / ".worktrees" / f"submit_{slug}_{gh_user}"
 
     with GitHubAccountContext(gh_user) as ctx:
@@ -446,7 +472,7 @@ def submit_translation(
     branch = f"translate/{book_slug}-{chapter}-{gh_user}"
     agent_tag = agent_name or gh_user
 
-    repo_root = Path(cfg.workspace_dir) if config_path else REPO_ROOT
+    repo_root = Path(cfg.workspace_dir).resolve() if cfg.workspace_dir else REPO_ROOT
     ch_dir = repo_root / "runs" / book_slug / chapter
     source_file = ch_dir / "source.txt"
     manifest_file = repo_root / "books" / book_slug / "manifest.json"
@@ -504,9 +530,12 @@ def submit_translation(
         )
 
         changed_files = [f"runs/{book_slug}/{chapter}/translation.xml"]
+        additions_raw: Optional[bytes] = None
         if additions_file and Path(additions_file).exists():
             changed_files.append(f"runs/{book_slug}/{chapter}/analyze_additions.json")
+            additions_raw = Path(additions_file).read_bytes()
 
+        expected_sha = glossary_sha if glossary_sha and glossary_sha != "seed" else None
         val_res = validate_translation_pr(
             head_ref=branch,
             author_login=gh_user,
@@ -514,6 +543,9 @@ def submit_translation(
             changed_files=changed_files,
             source_xml_text=source_file.read_text(encoding="utf-8") if source_file.exists() else tx_text,
             translation_xml_text=tx_text,
+            expected_glossary_sha=expected_sha,
+            expected_issue_number=issue_num,
+            additions_raw=additions_raw,
             bot_login=cfg.bot_login,
             is_seed_pr=False,
             manifest=manifest_data,
@@ -556,6 +588,40 @@ def submit_translation(
                     ctx.run_gh(["label", "create", lbl, "--color", "c2e0c6", "--force", "-R", cfg.repo_full_name], check=False)
                 except subprocess.CalledProcessError as exc:
                     logger.debug("Label ensure ignored for '%s': %s", lbl, exc)
+            list_cmd = [
+                "pr",
+                "list",
+                "--state",
+                "open",
+                "--head",
+                branch,
+                "--json",
+                "number,url",
+            ] + (["-R", cfg.repo_full_name] if cfg.repo_full_name else [])
+            list_proc = ctx.run_gh(list_cmd, cwd=str(worktree_dir), check=False)
+            existing_prs = (
+                json.loads(list_proc.stdout)
+                if list_proc.returncode == 0 and (list_proc.stdout or "").strip()
+                else []
+            )
+            if existing_prs:
+                existing_num = existing_prs[0].get("number")
+                edit_cmd = [
+                    "pr",
+                    "edit",
+                    str(existing_num),
+                    "--title",
+                    f"translate({book_slug}): {chapter} by @{gh_user}",
+                    "--body",
+                    pr_body,
+                ] + (["-R", cfg.repo_full_name] if cfg.repo_full_name else [])
+                ctx.run_gh(edit_cmd, cwd=str(worktree_dir))
+                return {
+                    "success": True,
+                    "branch": branch,
+                    "pr_url": str(existing_prs[0].get("url") or "").strip(),
+                }
+
             pr_cmd = [
                 "pr",
                 "create",

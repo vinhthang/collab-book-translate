@@ -12,6 +12,7 @@ import json
 import mimetypes
 import os
 import re
+import sys
 import uuid
 import zipfile
 from pathlib import Path
@@ -57,7 +58,17 @@ class EPUBCompiler(BaseCompiler):
 
         # 1. Load book record & metadata
         book_record = self.load_book_record(run_dir)
-        br_meta = book_record.get("book_record", {})
+        br_meta = book_record.get("book_record", {}) if isinstance(book_record.get("book_record"), dict) else {}
+        brief = book_record.get("brief", {}) if isinstance(book_record.get("brief"), dict) else {}
+        manifest_meta: Dict[str, Any] = {}
+        manifest_path = run_dir.parent.parent / "books" / slug / "manifest.json"
+        if manifest_path.is_file():
+            try:
+                parsed_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                if isinstance(parsed_manifest, dict):
+                    manifest_meta = parsed_manifest
+            except (OSError, json.JSONDecodeError) as exc:
+                sys.stderr.write(f"Skipping unreadable manifest {manifest_path}: {exc}\n")
 
         if not title:
             title = (
@@ -65,17 +76,22 @@ class EPUBCompiler(BaseCompiler):
                 or book_record.get("title")
                 or br_meta.get("title_vietnamese")
                 or br_meta.get("title")
+                or brief.get("title")
+                or manifest_meta.get("title")
                 or f"{slug.replace('_', ' ').title()} (Bản dịch tiếng Việt)"
             )
         if not author:
             author = (
                 book_record.get("author")
                 or br_meta.get("author")
+                or brief.get("author")
+                or manifest_meta.get("author")
                 or "Tác giả"
             )
 
         ch_filter = self.parse_chapters_filter(chapters)
-        chapter_list = self.discover_chapters(run_dir, ch_filter)
+        allow_incomplete = bool(kwargs.get("allow_incomplete", False))
+        chapter_list = self.discover_chapters(run_dir, ch_filter, allow_incomplete=allow_incomplete)
         if not chapter_list:
             raise RuntimeError(f"No chapters found to compile in {run_dir}")
 

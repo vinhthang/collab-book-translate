@@ -481,6 +481,10 @@ def validate_submission_pr(
                 hard_defects.append(f"Source file failed chapter extraction: {exc}")
             else:
                 _validate_chapter_items(ch_results or [], hard_defects, extracted_originals)
+                if ch_results and not (out_dir / "ch01" / "source.txt").is_file() and not any(
+                    isinstance(c, dict) and c.get("ch_num") == 1 for c in ch_results
+                ):
+                    hard_defects.append("Source file extraction did not produce required chapter 'ch01'")
 
     # 7. Language & Vietnamese Diacritic Density Check
     sample_for_lang: Optional[str] = None

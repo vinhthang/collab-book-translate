@@ -12,7 +12,7 @@ Anyone may propose a book for translation by opening a pull request.
 1. **Branch naming**: `book/<slug>` (opened from your fork or local branch, where `<slug>` matches `^[a-z0-9]+(?:-[a-z0-9]+)*$`, 1–64 chars).
 2. **File allowlist**: A book submission PR must touch **only**:
    - `books/<slug>/manifest.json`
-   - `books/<slug>/source/<filename>` (exactly one directly readable source file: `.epub`, `.pdf`, `.docx`, `.mobi`, or `.md`)
+   - `books/<slug>/source/<filename>` (exactly one directly readable source file: `.epub`, `.pdf`, `.docx`, `.mobi`, `.md`, or `.txt`)
 3. **No translation in submission**: Do not submit translated text in the book submission PR.
 4. **Source size & per-chapter caps**:
    - The raw source file must fit directly within `max_source_bytes` (`50 MiB` / `52,428,800` bytes default in `config.example.json`).
@@ -47,7 +47,7 @@ gh pr create --template book --title "book: add <title> (<slug>)"
 When a book is merged and seeded, the main agent creates GitHub issues for chapters `ch02..chNN`. Any contributor or agent may translate open chapter issues.
 
 ### Workflow & Claiming
-1. **Soft Claim**: Post `/claim` on the chapter issue as a courtesy. Multiple PRs may compete for the same chapter during the open candidate window.
+1. **Soft Claim**: Post `/claim` on the chapter issue as a courtesy. Multiple PRs may compete for the same chapter while the chapter issue remains open.
 2. **Branch naming**: `translate/<slug>-<chNN>-<agent>` where `<agent>` is your GitHub login.
 3. **Contributor File Contract**:
    The PR must modify **only**:

@@ -19,6 +19,13 @@ class TextExtractor(BaseExtractor):
 
     CHAPTER_REGEX = re.compile(r"^\s*(第[一二三四五六七八九十百千\d]+[章回节])\s*(.*)$")
     VOLUME_REGEX = re.compile(r"^\s*(第[一二三四五六七八九十百千\d]+卷)\s*(.*)$")
+    EN_CHAPTER_REGEX = re.compile(
+        r"^\s*(?:#{1,3}\s+)?((?:Chapter|CHAPTER|Part|PART|Section|SECTION)\s+"
+        r"(?:\d+|[IVXLCDM]+|One|Two|Three|Four|Five|Six|Seven|Eight|Nine|Ten|Eleven|Twelve)\b[:.\-—\s]*)(.*)$"
+    )
+    EN_VOLUME_REGEX = re.compile(
+        r"^\s*(?:#{1,2}\s+)?((?:Volume|VOLUME)\s+(?:\d+|[IVXLCDM]+)\b[:.\-—\s]*)(.*)$"
+    )
     VOLUME_END_REGEX = re.compile(r"^\s*[（(].*卷.*[终结][）)]\s*$")
 
     PROMO_PATTERNS = [
@@ -87,23 +94,17 @@ class TextExtractor(BaseExtractor):
                 continue
 
             # Check volume marker
-            vol_match = self.VOLUME_REGEX.match(line_str)
+            vol_match = self.VOLUME_REGEX.match(line_str) or self.EN_VOLUME_REGEX.match(line_str)
             if vol_match:
                 current_vol_title = line_str
-                if not found_first_ch:
-                    # In preface, keep volume title as part of context if needed
-                    continue
-                else:
-                    if current_ch:
-                        current_ch["volume"] = current_vol_title
-                    continue
+                continue
 
             # Check volume end marker
             if self.VOLUME_END_REGEX.match(line_str):
                 continue
 
             # Check chapter marker
-            ch_match = self.CHAPTER_REGEX.match(line_str)
+            ch_match = self.CHAPTER_REGEX.match(line_str) or self.EN_CHAPTER_REGEX.match(line_str)
             if ch_match:
                 found_first_ch = True
                 if current_ch:
@@ -111,7 +112,7 @@ class TextExtractor(BaseExtractor):
 
                 ch_marker = ch_match.group(1).strip()
                 ch_name = ch_match.group(2).strip()
-                full_title = f"{ch_marker} {ch_name}".strip()
+                full_title = re.sub(r"\s+", " ", f"{ch_marker} {ch_name}").strip()
 
                 current_ch = {
                     "ch_num": ch_counter,
@@ -134,15 +135,25 @@ class TextExtractor(BaseExtractor):
         # Build final chapters list
         final_chapters: List[Dict[str, Any]] = []
 
-        # If preface exists, add as Chapter 0
+        # If preface exists: promote to Chapter 1 when no chapters detected, else Preface (ch00)
         if preface_lines and any(l.strip() for l in preface_lines):
-            preface_content = "# 序言 / 内容简介\n\n" + "\n\n".join(preface_lines)
-            final_chapters.append({
-                "ch_num": 0,
-                "title": "Lời tựa & Giới thiệu",
-                "volume": "Tiền ngôn",
-                "content": preface_content,
-            })
+            if not raw_chapters:
+                ch1_title = "Chapter 1" if source_lang == "en" else "Chương 1"
+                final_chapters.append({
+                    "ch_num": 1,
+                    "title": ch1_title,
+                    "volume": current_vol_title,
+                    "content": "\n\n".join(preface_lines),
+                })
+            else:
+                preface_header = "# Preface\n\n" if source_lang == "en" else "# 序言 / 内容简介\n\n"
+                preface_content = preface_header + "\n\n".join(preface_lines)
+                final_chapters.append({
+                    "ch_num": 0,
+                    "title": "Lời tựa & Giới thiệu",
+                    "volume": "Tiền ngôn",
+                    "content": preface_content,
+                })
 
         for ch in raw_chapters:
             content = "\n\n".join(ch["lines"])

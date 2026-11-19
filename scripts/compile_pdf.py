@@ -1288,6 +1288,18 @@ def compile_book(
             br_data = {}
 
     br_meta = br_data.get("book_record", {}) if isinstance(br_data, dict) else {}
+    brief_meta = br_data.get("brief", {}) if isinstance(br_data, dict) and isinstance(br_data.get("brief"), dict) else {}
+    manifest_meta: Dict[str, Any] = {}
+    abs_run = os.path.abspath(run_path)
+    manifest_path = os.path.join(os.path.dirname(os.path.dirname(abs_run)), "books", os.path.basename(abs_run), "manifest.json")
+    if os.path.isfile(manifest_path):
+        try:
+            with open(manifest_path, "r", encoding="utf-8") as mf:
+                parsed_manifest = json.load(mf)
+                if isinstance(parsed_manifest, dict):
+                    manifest_meta = parsed_manifest
+        except (OSError, json.JSONDecodeError) as exc:
+            sys.stderr.write(f"Skipping unreadable manifest {manifest_path}: {exc}\n")
 
     book_title = (
         title
@@ -1295,6 +1307,8 @@ def compile_book(
         or (br_data.get("title") if isinstance(br_data, dict) else None)
         or (br_meta.get("title_vietnamese") if isinstance(br_meta, dict) else None)
         or (br_meta.get("title") if isinstance(br_meta, dict) else None)
+        or brief_meta.get("title")
+        or manifest_meta.get("title")
         or os.path.basename(run_path).replace("_", " ").title()
     )
 
@@ -1302,6 +1316,8 @@ def compile_book(
         author
         or (br_data.get("author") if isinstance(br_data, dict) else None)
         or (br_meta.get("author") if isinstance(br_meta, dict) else None)
+        or brief_meta.get("author")
+        or manifest_meta.get("author")
         or ""
     )
 

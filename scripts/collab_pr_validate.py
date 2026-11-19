@@ -52,11 +52,13 @@ TRANS_TAG_RE: re.Pattern = re.compile(r"<translate>([\s\S]*?)</translate>")
 HANVIET_TAG_RE: re.Pattern = re.compile(r"<hanviet>([\s\S]*?)</hanviet>")
 
 SEGMENT_REF_RE: re.Pattern = re.compile(r"\bS-\d{4}\b")
-REVIEW_SCORE_SPEC_RE: re.Pattern = re.compile(
-    r"(?i)\b(Fidelity|Fluency|Terminology|Register|Structure|Completeness)\b[^0-9\n]*([1-5](?:\.\d+)?)(?:\s*/\s*5(?:\.0)?)?"
-)
-RAW_REVIEW_SCORE_RE: re.Pattern = re.compile(
-    r"(?i)\b(Fidelity|Fluency|Terminology|Register|Structure|Completeness)\b([^0-9\n]*?)(-\d+(?:\.\d+)?|\d+(?:\.\d+)?)(?:\s*/\s*(\d+(?:\.\d+)?))?(?![0-9.])"
+RUBRIC_SCORE_LINE_RE: re.Pattern = re.compile(
+    r"(?im)^[ \t]*(?:(?:\d+\.|[-*+])[ \t]+)?(?:\|[ \t]*)?\*{0,2}"
+    r"(Fidelity|Fluency|Terminology|Register|Structure|Completeness)\b\*{0,2}"
+    r"[ \t]*(?::\*{0,2}|\||=|[-–—])[ \t]*\*{0,2}"
+    r"(-\d+(?:\.\d+)?|\d+(?:\.\d+)?)"
+    r"(?:[ \t]*/[ \t]*(\d+(?:\.\d+)?))?"
+    r"(?![0-9./])"
 )
 RUBRIC_FIVE_SPAN_RE: re.Pattern = re.compile(
     r"(?i)\b(?:fidelity|fluency|terminology|register|structure|completeness)\b[\s*_:|-]{0,12}5(?:\.0+)?\s*/\s*5(?:\.0+)?(?!(?:\.\d|[0-9/A-Za-z]))"
@@ -903,6 +905,39 @@ def validate_translation_pr(
     }
 
 
+def parse_review_rubric_scores(review_body: str) -> Tuple[Dict[str, float], List[str]]:
+    """Parse structured 6-dimension rubric score lines on the 1.0..5.0 scale."""
+    scores: Dict[str, float] = {}
+    defects: List[str] = []
+
+    for m in RUBRIC_SCORE_LINE_RE.finditer(review_body or ""):
+        dim_name = m.group(1).lower()
+        score_str = m.group(2)
+        denom_str = m.group(3)
+
+        try:
+            score_val = float(score_str)
+        except ValueError:
+            defects.append(f"Invalid numeric score for '{dim_name}': '{score_str}'")
+            continue
+
+        if denom_str is not None and denom_str not in ("5", "5.0"):
+            defects.append(
+                f"Invalid rubric scale '/{denom_str}' for '{dim_name}'; expected '/5' or '/5.0'"
+            )
+            continue
+
+        scores[dim_name] = score_val
+        if not (1.0 <= score_val <= 5.0):
+            defects.append(f"Score for '{dim_name}' ({score_val}) is outside [1.0, 5.0]")
+
+    for dim in REVIEW_DIMENSIONS:
+        if dim not in scores:
+            defects.append(f"Missing required rubric score dimension: '{dim}'")
+
+    return scores, defects
+
+
 def validate_review(
     pr_author_login: str,
     review_author_login: str = "",
@@ -916,7 +951,6 @@ def validate_review(
     eff_pr_author = (pr_author_login or "").strip()
 
     defects: List[str] = []
-    scores: Dict[str, float] = {}
 
     # 1. Non-author reviewer independence
     if not eff_reviewer:
@@ -941,42 +975,8 @@ def validate_review(
         defects.extend(injection_flags)
 
     # 4. 6-dimension rubric score block in [1.0, 5.0]
-    spec_valid_dims = {
-        m.group(1).lower()
-        for m in REVIEW_SCORE_SPEC_RE.finditer(review_body or "")
-    }
-
-    for m in RAW_REVIEW_SCORE_RE.finditer(review_body or ""):
-        dim_name = m.group(1).lower()
-        sep = m.group(2)
-        score_str = m.group(3)
-        denom_str = m.group(4)
-
-        # Skip segment references like "Fidelity in S-0002"
-        if re.search(r"\bS-$", sep):
-            continue
-
-        try:
-            score_val = float(score_str)
-        except ValueError:
-            defects.append(f"Invalid numeric score for '{dim_name}': '{score_str}'")
-            continue
-
-        if denom_str is not None and denom_str not in ("5", "5.0"):
-            defects.append(
-                f"Invalid rubric scale '/{denom_str}' for '{dim_name}'; expected '/5' or '/5.0'"
-            )
-            continue
-
-        scores[dim_name] = score_val
-        if not (1.0 <= score_val <= 5.0):
-            defects.append(f"Score for '{dim_name}' ({score_val}) is outside [1.0, 5.0]")
-        elif dim_name not in spec_valid_dims:
-            defects.append(f"Score format for '{dim_name}' does not match REQ-022 rubric grammar")
-
-    for dim in REVIEW_DIMENSIONS:
-        if dim not in scores:
-            defects.append(f"Missing required rubric score dimension: '{dim}'")
+    scores, rubric_defects = parse_review_rubric_scores(review_body or "")
+    defects.extend(rubric_defects)
 
     return {
         "valid": len(defects) == 0,

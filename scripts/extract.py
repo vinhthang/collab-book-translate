@@ -133,6 +133,8 @@ def extract_document(
     extractor = get_extractor_for_file(input_source)
     if isinstance(extractor, PDFExtractor):
         kwargs["toc_level"] = toc_level
+    if isinstance(extractor, TextExtractor) and source_lang in ("en", "zh"):
+        kwargs["source_lang"] = source_lang
 
     results = extractor.extract(
         input_path=input_source,

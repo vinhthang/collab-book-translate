@@ -713,7 +713,7 @@ def test_transient_eval_holds_in_evaluating_and_dismiss_stale_review_unblocks(tm
 
     # 1. Transient TimeoutError -> holds in status:evaluating, 0 [collab-revise] markers!
     def raise_timeout(p, r):
-        raise TimeoutError("WorkBuddy timeout")
+        raise TimeoutError("evaluator timeout")
 
     run_sweep(tmp_path, client=client, evaluate_fn=raise_timeout, human_approver="vinhthang", now=1200.0)
     assert "status:evaluating" in pr["labels"]
@@ -729,6 +729,7 @@ def test_transient_eval_holds_in_evaluating_and_dismiss_stale_review_unblocks(tm
 
     # 3. Author pushes SHA_3 AND vinhthang posts /dismiss-stale-review stale_rev <SHA_3> -> becomes Candidate or merges!
     pr["head_oid"] = SHA_3
+    pr["reviews"].append(_valid_review("rev_bob", 4.5, state="APPROVED", commit_oid=SHA_3))
     client.pr_blobs[(15, SHA_3, "runs/test-book/ch02/translation.xml")] = clean_xml.encode("utf-8")
     pr["comments"].append({"author_login": "vinhthang", "body": f"/dismiss-stale-review stale_rev {SHA_3}"})
     run_sweep(tmp_path, client=client, evaluate_fn=live_pass, human_approver="vinhthang", now=1400.0)

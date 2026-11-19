@@ -4,7 +4,7 @@ import datetime
 import re
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-from scripts.collab_pr_validate import detect_prompt_injection
+from scripts.collab_pr_validate import detect_prompt_injection, parse_review_rubric_scores
 from scripts.evaluators.anti_convert import check_anti_convert_issues
 from scripts.evaluators.scoring import compute_weighted_total
 from scripts.evaluate import enforce_language_detection
@@ -20,10 +20,6 @@ CANONICAL_DIMENSIONS: Tuple[str, ...] = (
 )
 
 _SEGMENT_ANCHOR_RE = re.compile(r"\bS-\d{4}\b")
-_RUBRIC_SCORE_RE = re.compile(
-    r"(?i)\b(Fidelity|Fluency|Terminology|Register|Structure|Completeness)\b"
-    r"[^0-9\n]*([1-5](?:\.\d+)?)(?:\s*/\s*5(?:\.0)?)?"
-)
 _DISMISS_REVIEW_RE = re.compile(
     r"(?:^|\n)\s*/dismiss-stale-review\s+@?(\S+)\s+(\S+)(?:\s|$)"
 )
@@ -110,11 +106,13 @@ def _is_valid_req022_review(review: Dict[str, Any], pr_author: str) -> bool:
             except (TypeError, ValueError):
                 return False
 
-    for dim_name, score_str in _RUBRIC_SCORE_RE.findall(body):
-        try:
-            scores[dim_name.lower()] = float(score_str)
-        except ValueError:
-            return False
+    body_scores, body_defects = parse_review_rubric_scores(body)
+    if any(
+        "Invalid rubric scale" in d or "outside [1.0, 5.0]" in d or "Invalid numeric score" in d
+        for d in body_defects
+    ):
+        return False
+    scores.update(body_scores)
 
     for dim in CANONICAL_DIMENSIONS:
         if dim not in scores or not (1.0 <= scores[dim] <= 5.0):
@@ -212,11 +210,8 @@ def evaluate_pr_from_reviews(
                     scores[str(k).lower()] = float(v)
                 except (TypeError, ValueError):
                     pass
-        for dim_name, score_str in _RUBRIC_SCORE_RE.findall(body):
-            try:
-                scores[dim_name.lower()] = float(score_str)
-            except ValueError:
-                pass
+        body_scores, _ = parse_review_rubric_scores(body)
+        scores.update(body_scores)
 
         for d in CANONICAL_DIMENSIONS:
             if d in scores:

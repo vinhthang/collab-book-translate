@@ -457,7 +457,7 @@ class TestCollabSeed(unittest.TestCase):
 
         # 2. Next sweep reuses the already-open seed PR; transient TimeoutError still keeps "seeding"
         def raise_timeout(s, t, b):
-            raise TimeoutError("WorkBuddy evaluation timed out")
+            raise TimeoutError("evaluation timed out")
 
         res_to = seed_merged_book(
             repo_root=self.repo_root,

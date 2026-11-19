@@ -72,6 +72,20 @@ Any autonomous AI agent or human contributor can participate by adopting one or 
 
 ---
 
+## Setup & Configuration
+
+1. Install Python 3.12+ dependencies with [uv](https://github.com/astral-sh/uv):
+   ```bash
+   uv sync
+   ```
+2. Create a local gitignored configuration from [`config.example.json`](config.example.json) (or point `COLLAB_CONFIG_PATH` at your config file):
+   ```bash
+   cp config.example.json config.json
+   ```
+3. Authenticate collaborator accounts in GitHub CLI (`gh auth status`). `scripts/collab_worker.py`, `scripts/collab_seed.py`, and `scripts/collab_sweep.py` resolve per-user tokens (`gh auth token -u <login>`) and isolate git commits in `.worktrees/` so concurrent agents never mutate global authentication or the primary checkout.
+
+---
+
 ## Quickstart: Worker CLI (`collab_worker.py`)
 
 The repository includes `scripts/collab_worker.py` to isolate Git and GitHub credentials per command (`GH_TOKEN` + ephemeral `GIT_ASKPASS` script in a temp directory), allowing multiple agent personas to collaborate concurrently without mutating global authentication.
@@ -113,9 +127,11 @@ python3 scripts/collab_worker.py submit-translation \
   --book-slug <slug> \
   --chapter ch02 \
   --translation-file path/to/translation.xml \
+  --additions-file path/to/analyze_additions.json \
   --engine-model "Claude 3.5 Sonnet" \
   --agent-name "claude-worker"
 ```
+Passing `--additions-file` is optional. Re-running `submit-translation` on an existing `status:revise` branch updates the open PR via `gh pr edit` rather than failing on duplicate `gh pr create`.
 
 ### 5. Submit Peer Review (Role 3)
 ```bash
@@ -126,16 +142,38 @@ python3 scripts/collab_worker.py submit-review \
   --event COMMENT
 ```
 
+### 6. Coordinator Seeding & Sweep (Role 4)
+```bash
+# Prepare chapter source extractions and initial book_record.json without external PR creation:
+python3 scripts/collab_seed.py --book-slug <slug> --prepare-only
+
+# Open/update the bot ch01 reference PR from a pre-translated XML file (stays in seeding until reviewed):
+python3 scripts/collab_seed.py --book-slug <slug> --ch01-translation-file path/to/ch01_translation.xml
+
+# Run a coordinator sweep (intake pre-screen, review scoring, direct merges, release backfill):
+python3 scripts/collab_sweep.py
+```
+
 ---
 
 ## Repository Structure
 
 - `books/<slug>/`: Source book inputs and `manifest.json`.
-- `runs/<slug>/`: Canonical `book_record.json`, `checklist.json`, chapter `source.txt`, and `translation.xml`.
+- `runs/<slug>/`: Canonical `book_record.json`, `checklist.json`, `collab_ledger.json`, chapter `source.txt`, and `translation.xml`.
 - `scripts/`: Worker CLI (`collab_worker.py`), seeding (`collab_seed.py`), sweep coordinator (`collab_sweep.py`), validation, and release compilation.
 - `skills/`: Bundled Antigravity plugin skills (`collab-translate-book`).
 - `agents/`: Bundled subagent instructions (`collab_translator`, `collab_reviewer`).
 - `docs/specs/`: Formal specifications and architecture decisions.
+- `tests/`: Automated unit and regression test suites (304 passing tests).
+- `config.example.json`: Zero-fallback configuration template (`copy` to gitignored `config.json`).
+
+---
+
+## Testing
+
+```bash
+PYTHONPATH=. uv run pytest tests -q
+```
 
 ---
 
