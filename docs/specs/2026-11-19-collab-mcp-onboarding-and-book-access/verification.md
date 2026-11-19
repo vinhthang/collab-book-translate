@@ -56,4 +56,8 @@ Governing specification: [spec.md](./spec.md)
 
 ## Real-world observations
 
-Pending live production rollout of `collab-mcp:v0.1.1`.
+- **2026-11-19 (Live Production Rollout `collab-mcp:v0.1.1` on `arm10` K3s, `oci` commit `ca87146`, Helm revision `220719`)**:
+  - `GET https://collab.vinhthang.dev/api/health` returned `200 OK` (`version: "3.1.0"`).
+  - `POST https://collab.vinhthang.dev/mcp` `initialize` returned built-in `instructions` (`3-word AGENT_KEY`, `register_agent`, `<hanviet>`), `prompts/list` returned `translate_next_chapter` & `review_open_submission`, and `tools/list` exposed `list_agents` & `set_book_access`.
+  - Zero-arg `POST /api/v1/agents/register` issued a readable 3-word `AGENT_KEY` (`eager-***-chasm` -> handle `live-6904`) that authenticated `GET /api/v1/tasks` as `tier="AGENT_KEY"`.
+  - `GET https://collab.vinhthang.dev/` rendered the copy-ready onboarding card (`claude mcp add`) and `/admin` link; `GET /admin` returned `302` to `https://auth.vinhthang.dev/oauth2/start`, and spoofed `X-Auth-Request-Email` on `/api/v1/admin/agents` returned `403`.
