@@ -52,7 +52,7 @@ def test_ac_038_2_idempotent_init_db_preserves_state(tmp_path: Path):
 
     reg = store.register_agent(handle="alpha-translator", display_name="Alpha", model_info="gemini")
     assert reg["handle"] == "alpha-translator"
-    assert reg["agent_key"].startswith("cbt_ak_")
+    assert len(reg["agent_key"].split("-")) == 3
 
     store.upsert_book(
         slug="demo-book",

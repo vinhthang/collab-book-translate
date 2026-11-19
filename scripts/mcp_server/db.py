@@ -12,7 +12,7 @@ import time
 from typing import Any, Optional
 import uuid
 
-from scripts.mcp_server.auth import mint_agent_key, sha256_hex
+from scripts.mcp_server.auth import generate_default_handle, mint_agent_key, sha256_hex
 from scripts.mcp_server.config import McpServerConfig
 
 HANDLE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{1,38}[a-z0-9]$")
@@ -24,7 +24,9 @@ SCHEMA_STATEMENTS_COMMON = (
         display_name TEXT NOT NULL,
         model_info TEXT NOT NULL,
         key_sha256 TEXT NOT NULL UNIQUE,
-        created_at TEXT NOT NULL
+        key_hint TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        last_seen_at TEXT NOT NULL DEFAULT ''
     )
     """,
     """
@@ -46,6 +48,8 @@ SCHEMA_STATEMENTS_COMMON = (
         proposed_by TEXT NOT NULL,
         release_tag TEXT NOT NULL DEFAULT '',
         release_url TEXT NOT NULL DEFAULT '',
+        access_mode TEXT NOT NULL DEFAULT 'public',
+        allowed_agents_json TEXT NOT NULL DEFAULT '[]',
         updated_at TEXT NOT NULL
     )
     """,
@@ -75,6 +79,7 @@ SCHEMA_STATEMENTS_COMMON = (
         chapter_id TEXT NOT NULL,
         author_actor_id TEXT NOT NULL,
         author_handle TEXT NOT NULL,
+        author_ip_hash TEXT NOT NULL DEFAULT '',
         engine_model TEXT NOT NULL,
         status TEXT NOT NULL,
         round_number INTEGER NOT NULL,
@@ -186,11 +191,29 @@ class CollabStore:
                         cur.execute("SET search_path TO collab_service, public")
                         for stmt in SCHEMA_STATEMENTS_COMMON:
                             cur.execute(stmt.replace("REAL", "DOUBLE PRECISION"))
+                        cur.execute("ALTER TABLE agents ADD COLUMN IF NOT EXISTS key_hint TEXT NOT NULL DEFAULT ''")
+                        cur.execute("ALTER TABLE agents ADD COLUMN IF NOT EXISTS last_seen_at TEXT NOT NULL DEFAULT ''")
+                        cur.execute("ALTER TABLE books ADD COLUMN IF NOT EXISTS access_mode TEXT NOT NULL DEFAULT 'public'")
+                        cur.execute("ALTER TABLE books ADD COLUMN IF NOT EXISTS allowed_agents_json TEXT NOT NULL DEFAULT '[]'")
+                        cur.execute("ALTER TABLE submissions ADD COLUMN IF NOT EXISTS author_ip_hash TEXT NOT NULL DEFAULT ''")
                     conn.commit()
             else:
                 conn = self._get_sqlite()
                 for stmt in SCHEMA_STATEMENTS_COMMON:
                     conn.execute(stmt)
+                agent_cols = {r["name"] for r in conn.execute("PRAGMA table_info(agents)").fetchall()}
+                if "key_hint" not in agent_cols:
+                    conn.execute("ALTER TABLE agents ADD COLUMN key_hint TEXT NOT NULL DEFAULT ''")
+                if "last_seen_at" not in agent_cols:
+                    conn.execute("ALTER TABLE agents ADD COLUMN last_seen_at TEXT NOT NULL DEFAULT ''")
+                book_cols = {r["name"] for r in conn.execute("PRAGMA table_info(books)").fetchall()}
+                if "access_mode" not in book_cols:
+                    conn.execute("ALTER TABLE books ADD COLUMN access_mode TEXT NOT NULL DEFAULT 'public'")
+                if "allowed_agents_json" not in book_cols:
+                    conn.execute("ALTER TABLE books ADD COLUMN allowed_agents_json TEXT NOT NULL DEFAULT '[]'")
+                sub_cols = {r["name"] for r in conn.execute("PRAGMA table_info(submissions)").fetchall()}
+                if "author_ip_hash" not in sub_cols:
+                    conn.execute("ALTER TABLE submissions ADD COLUMN author_ip_hash TEXT NOT NULL DEFAULT ''")
                 conn.commit()
 
     def close(self) -> None:
@@ -202,47 +225,124 @@ class CollabStore:
     def register_agent(
         self,
         *,
-        handle: str,
+        handle: str = "",
         display_name: str = "",
         model_info: str = "",
     ) -> dict[str, str]:
-        clean = handle.strip().lower()
-        if not HANDLE_RE.match(clean):
-            raise ValueError(
-                "Agent handle must be 3-40 chars matching ^[a-z0-9][a-z0-9_-]{1,38}[a-z0-9]$"
-            )
-        existing = self._exec(
-            "SELECT handle FROM agents WHERE handle = ?",
-            (clean,),
-            fetchone=True,
-        )
-        if existing is not None:
-            raise ValueError(f"Agent handle '{clean}' is already registered")
+        with self._lock:
+            clean = handle.strip().lower()
+            if clean:
+                if not HANDLE_RE.match(clean):
+                    raise ValueError(
+                        "Agent handle must be 3-40 chars matching ^[a-z0-9][a-z0-9_-]{1,38}[a-z0-9]$"
+                    )
+                existing = self._exec(
+                    "SELECT handle FROM agents WHERE handle = ?",
+                    (clean,),
+                    fetchone=True,
+                )
+                if existing is not None:
+                    raise ValueError(f"Agent handle '{clean}' is already registered")
+            else:
+                for _ in range(16):
+                    candidate = generate_default_handle(model_info=model_info, display_name=display_name)
+                    if (
+                        HANDLE_RE.match(candidate)
+                        and self._exec("SELECT handle FROM agents WHERE handle = ?", (candidate,), fetchone=True)
+                        is None
+                    ):
+                        clean = candidate
+                        break
+                if not clean:
+                    raise RuntimeError("Failed to allocate unique default agent handle")
 
-        raw_key, key_sha = mint_agent_key()
-        now = _utc_iso()
-        self._exec(
-            """
-            INSERT INTO agents (handle, display_name, model_info, key_sha256, created_at)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (clean, (display_name or clean).strip(), model_info.strip(), key_sha, now),
-        )
-        return {
-            "handle": clean,
-            "display_name": (display_name or clean).strip(),
-            "model_info": model_info.strip(),
-            "agent_key": raw_key,
-            "created_at": now,
-        }
+            raw_key, key_sha, key_hint = "", "", ""
+            for _ in range(16):
+                rk, ks, kh = mint_agent_key()
+                if (
+                    self._exec("SELECT handle FROM agents WHERE key_sha256 = ?", (ks,), fetchone=True)
+                    is None
+                ):
+                    raw_key, key_sha, key_hint = rk, ks, kh
+                    break
+            if not raw_key:
+                raise RuntimeError("Failed to mint unique 3-word AGENT_KEY")
+
+            now = _utc_iso()
+            disp = (display_name or clean).strip()
+            mod = model_info.strip()
+            self._exec(
+                """
+                INSERT INTO agents (handle, display_name, model_info, key_sha256, key_hint, created_at, last_seen_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (clean, disp, mod, key_sha, key_hint, now, ""),
+            )
+            return {
+                "handle": clean,
+                "display_name": disp,
+                "model_info": mod,
+                "agent_key": raw_key,
+                "key_hint": key_hint,
+                "created_at": now,
+            }
 
     def get_agent_by_key(self, raw_key: str) -> Optional[dict[str, Any]]:
         digest = sha256_hex(raw_key.strip())
         return self._exec(
-            "SELECT handle, display_name, model_info, created_at FROM agents WHERE key_sha256 = ?",
+            "SELECT handle, display_name, model_info, key_hint, created_at, last_seen_at FROM agents WHERE key_sha256 = ?",
             (digest,),
             fetchone=True,
         )
+
+    def touch_agent_last_seen(self, handle: str) -> None:
+        self._exec(
+            "UPDATE agents SET last_seen_at = ? WHERE handle = ?",
+            (_utc_iso(), handle),
+        )
+
+    def list_agents(self) -> list[dict[str, Any]]:
+        return self._exec(
+            "SELECT handle, display_name, model_info, key_hint, created_at, last_seen_at FROM agents ORDER BY created_at DESC",
+            fetchall=True,
+        )
+
+    def resolve_agent_identifier(self, identifier: str) -> Optional[str]:
+        """Resolve either a canonical handle or a raw AGENT_KEY (via SHA-256) to canonical handle."""
+        token = identifier.strip()
+        if not token:
+            return None
+        by_key = self.get_agent_by_key(token)
+        if by_key is not None:
+            return str(by_key["handle"])
+        by_handle = self._exec(
+            "SELECT handle FROM agents WHERE handle = ?",
+            (token.lower(),),
+            fetchone=True,
+        )
+        if by_handle is not None:
+            return str(by_handle["handle"])
+        return None
+
+    def set_book_access(
+        self,
+        *,
+        slug: str,
+        access_mode: str,
+        allowed_agents: list[str],
+    ) -> dict[str, Any]:
+        self._exec(
+            """
+            UPDATE books
+            SET access_mode = ?, allowed_agents_json = ?, updated_at = ?
+            WHERE slug = ?
+            """,
+            (access_mode, json.dumps(allowed_agents, ensure_ascii=False), _utc_iso(), slug),
+        )
+        book = self.get_book(slug)
+        if book is None:
+            raise KeyError(f"Book '{slug}' not found")
+        return book
 
     def upsert_book(
         self,
@@ -322,6 +422,8 @@ class CollabStore:
         out = dict(row)
         out["book_record"] = json.loads(out.pop("book_record_json") or "{}")
         out["manifest"] = json.loads(out.pop("manifest_json") or "{}")
+        out["access_mode"] = str(out.get("access_mode") or "public")
+        out["allowed_agents"] = json.loads(out.pop("allowed_agents_json", "[]") or "[]")
         return out
 
     def get_book(self, slug: str) -> Optional[dict[str, Any]]:
@@ -437,6 +539,7 @@ class CollabStore:
         chapter_id: str,
         author_actor_id: str,
         author_handle: str,
+        author_ip_hash: str = "",
         engine_model: str,
         status: str,
         round_number: int,
@@ -455,11 +558,11 @@ class CollabStore:
         self._exec(
             """
             INSERT INTO submissions (
-                id, book_slug, chapter_id, author_actor_id, author_handle,
+                id, book_slug, chapter_id, author_actor_id, author_handle, author_ip_hash,
                 engine_model, status, round_number, max_rounds, workstream_id,
                 revision_token_sha256, translation_xml, final_txt, additions_json,
                 open_findings_json, security_flags_json, judge_summary, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 sub_id,
@@ -467,6 +570,7 @@ class CollabStore:
                 chapter_id,
                 author_actor_id,
                 author_handle,
+                author_ip_hash,
                 engine_model,
                 status,
                 round_number,

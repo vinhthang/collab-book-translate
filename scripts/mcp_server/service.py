@@ -84,6 +84,7 @@ def _merge_proposals_into_record(
 def _sanitize_submission_public(sub: dict[str, Any]) -> dict[str, Any]:
     out = dict(sub)
     out.pop("revision_token_sha256", None)
+    out.pop("author_ip_hash", None)
     return out
 
 
@@ -122,11 +123,53 @@ class CollabMcpService:
             window_seconds=60.0,
         )
 
+    def _can_access_book_work(self, ctx: AuthContext, book: dict[str, Any]) -> bool:
+        if ctx.tier == "ADMIN":
+            return True
+        if str(book.get("access_mode") or "public") == "public":
+            return True
+        allowed = set(book.get("allowed_agents") or [])
+        return ctx.tier == "AGENT_KEY" and ctx.handle in allowed
+
+    def _assert_book_work_access(self, ctx: AuthContext, book: dict[str, Any]) -> None:
+        if not self._can_access_book_work(ctx, book):
+            raise ServiceError(
+                (
+                    f"Book '{book['slug']}' is restricted to allowlisted AGENT_KEYs. "
+                    "Call register_agent() to get your 3-word AGENT_KEY and share it with the admin to request access."
+                ),
+                status_code=403,
+            )
+
+    def _maybe_auto_assign_agent(
+        self,
+        ctx: AuthContext,
+        *,
+        model_info: str = "",
+    ) -> tuple[AuthContext, Optional[dict[str, str]]]:
+        if ctx.tier != "ANONYMOUS":
+            return ctx, None
+        reg = self.store.register_agent(handle="", display_name="", model_info=model_info)
+        new_ctx = AuthContext(
+            tier="AGENT_KEY",
+            actor_id=f"agent:{reg['handle']}",
+            handle=reg["handle"],
+            client_ip_hash=ctx.client_ip_hash,
+        )
+        return new_ctx, {
+            "assigned_agent_key": reg["agent_key"],
+            "assigned_handle": reg["handle"],
+            "auth_notice": (
+                "An easy-to-read 3-word AGENT_KEY was automatically assigned to you. "
+                "Save it and pass agent_key=... (or Authorization: Bearer ...) on future calls."
+            ),
+        }
+
     def register_agent(
         self,
         ctx: AuthContext,
         *,
-        handle: str,
+        handle: str = "",
         display_name: str = "",
         model_info: str = "",
     ) -> dict[str, str]:
@@ -149,24 +192,28 @@ class CollabMcpService:
             chapters = self.store.list_chapters(b["slug"])
             done_cnt = sum(1 for c in chapters if c["status"] == "accepted")
             open_cnt = sum(1 for c in chapters if c["status"] == "open")
-            summary.append(
-                {
-                    "slug": b["slug"],
-                    "title": b["title"],
-                    "author": b["author"],
-                    "source_lang": b["source_lang"],
-                    "target_lang": b["target_lang"],
-                    "genre": b["genre"],
-                    "license": b["license_id"],
-                    "status": b["status"],
-                    "glossary_sha": b["glossary_sha"],
-                    "total_chapters": len(chapters),
-                    "accepted_chapters": done_cnt,
-                    "open_chapters": open_cnt,
-                    "release_tag": b["release_tag"],
-                    "release_url": b["release_url"],
-                }
-            )
+            allowed = list(b.get("allowed_agents") or [])
+            item: dict[str, Any] = {
+                "slug": b["slug"],
+                "title": b["title"],
+                "author": b["author"],
+                "source_lang": b["source_lang"],
+                "target_lang": b["target_lang"],
+                "genre": b["genre"],
+                "license": b["license_id"],
+                "status": b["status"],
+                "access_mode": str(b.get("access_mode") or "public"),
+                "allowed_agent_count": len(allowed),
+                "glossary_sha": b["glossary_sha"],
+                "total_chapters": len(chapters),
+                "accepted_chapters": done_cnt,
+                "open_chapters": open_cnt,
+                "release_tag": b["release_tag"],
+                "release_url": b["release_url"],
+            }
+            if ctx.tier == "ADMIN":
+                item["allowed_agents"] = allowed
+            summary.append(item)
         return summary
 
     def get_book(self, ctx: AuthContext, *, book_slug: str) -> dict[str, Any]:
@@ -187,6 +234,10 @@ class CollabMcpService:
         ]
         out = dict(book)
         out.pop("source_text", None)
+        allowed = list(out.get("allowed_agents") or [])
+        out["allowed_agent_count"] = len(allowed)
+        if ctx.tier != "ADMIN":
+            out.pop("allowed_agents", None)
         out["chapters"] = chapters
         return out
 
@@ -206,6 +257,8 @@ class CollabMcpService:
 
         for b in books:
             if not b or b["status"] not in {"active", "published"}:
+                continue
+            if not self._can_access_book_work(ctx, b):
                 continue
             slug = b["slug"]
             if role in {"all", "translator"}:
@@ -253,6 +306,7 @@ class CollabMcpService:
         book = self.store.get_book(book_slug)
         if book is None:
             raise ServiceError(f"Book '{book_slug}' not found", status_code=404)
+        self._assert_book_work_access(ctx, book)
         ch = self.store.get_chapter(book_slug, chapter_id)
         if ch is None:
             raise ServiceError(f"Chapter '{book_slug}/{chapter_id}' not found", status_code=404)
@@ -278,13 +332,19 @@ class CollabMcpService:
         chapter_id: str,
     ) -> dict[str, Any]:
         self._check_write_rate(ctx)
+        book = self.store.get_book(book_slug)
+        if book is None:
+            raise ServiceError(f"Book '{book_slug}' not found", status_code=404)
+        self._assert_book_work_access(ctx, book)
+        eff_ctx, auto_meta = self._maybe_auto_assign_agent(ctx)
+
         claim_token = f"cbt_cl_{secrets.token_hex(16)}"
         expires_at = time.time() + self.cfg.claim_ttl_seconds
         try:
             updated = self.store.claim_chapter(
                 book_slug=book_slug,
                 chapter_id=chapter_id,
-                actor_id=ctx.actor_id,
+                actor_id=eff_ctx.actor_id,
                 claim_token_sha256=sha256_hex(claim_token),
                 expires_at=expires_at,
             )
@@ -295,13 +355,16 @@ class CollabMcpService:
         except ValueError as exc:
             raise ServiceError(str(exc), status_code=400) from exc
 
-        return {
+        result: dict[str, Any] = {
             "book_slug": book_slug,
             "chapter_id": chapter_id,
             "claimed_by": updated["claimed_by"],
             "claim_token": claim_token,
             "claim_expires_at": updated["claim_expires_at"],
         }
+        if auto_meta:
+            result.update(auto_meta)
+        return result
 
     def submit_book_proposal(
         self,
@@ -402,6 +465,7 @@ class CollabMcpService:
         book = self.store.get_book(book_slug)
         if book is None:
             raise ServiceError(f"Book '{book_slug}' not found", status_code=404)
+        self._assert_book_work_access(ctx, book)
         ch = self.store.get_chapter(book_slug, chapter_id)
         if ch is None:
             raise ServiceError(f"Chapter '{book_slug}/{chapter_id}' not found", status_code=404)
@@ -538,10 +602,16 @@ class CollabMcpService:
                 details={"defects": [str(i) for i in lang_probe.get("issues", [])]},
             )
 
+        # Auto-assign a readable 3-word AGENT_KEY on first anonymous Round-1 submission (only after pre-LLM gates pass!)
+        eff_ctx = ctx
+        auto_meta: Optional[dict[str, str]] = None
+        if existing_sub is None and ctx.tier == "ANONYMOUS":
+            eff_ctx, auto_meta = self._maybe_auto_assign_agent(ctx, model_info=engine_model)
+
         # Create or resume review.vinhthang.dev TRANSLATION_REVIEW workstream
         if existing_sub is None:
             ws = self.review_client.create_workstream(
-                title=f"Translation Review: {book_slug}/{chapter_id} ({ctx.handle})",
+                title=f"Translation Review: {book_slug}/{chapter_id} ({eff_ctx.handle})",
                 max_rounds=self.cfg.max_revise_rounds,
             )
             ws_id = str(ws["id"])
@@ -586,8 +656,9 @@ class CollabMcpService:
             saved_sub = self.store.create_submission(
                 book_slug=book_slug,
                 chapter_id=chapter_id,
-                author_actor_id=ctx.actor_id,
-                author_handle=ctx.handle,
+                author_actor_id=eff_ctx.actor_id,
+                author_handle=eff_ctx.handle,
+                author_ip_hash=ctx.client_ip_hash,
                 engine_model=engine_model,
                 status=sub_status,
                 round_number=round_num,
@@ -627,6 +698,8 @@ class CollabMcpService:
         }
         if returned_rev_token:
             out_payload["revision_token"] = returned_rev_token
+        if auto_meta:
+            out_payload.update(auto_meta)
         return 200, out_payload
 
     def _finalize_accepted_chapter(
@@ -760,7 +833,19 @@ class CollabMcpService:
         sub = self.store.get_submission(submission_id)
         if sub is None:
             raise ServiceError(f"Submission '{submission_id}' not found", status_code=404)
+        book = self.store.get_book(sub["book_slug"])
+        if book is not None:
+            self._assert_book_work_access(ctx, book)
         assert_not_self_review(ctx.actor_id, sub["author_actor_id"])
+        if (
+            ctx.tier == "ANONYMOUS"
+            and sub.get("author_ip_hash")
+            and sub["author_ip_hash"] == ctx.client_ip_hash
+        ):
+            raise AuthError(
+                "Self-review is prohibited: anonymous reviewer matches submission origin IP",
+                status_code=403,
+            )
 
         val = validate_review(
             pr_author_login=sub["author_actor_id"],
@@ -793,6 +878,70 @@ class CollabMcpService:
         return saved
 
     # --- Admin Operations ---
+
+    def list_agents(self, ctx: AuthContext) -> list[dict[str, Any]]:
+        assert_admin(ctx)
+        return self.store.list_agents()
+
+    def admin_mint_agent(
+        self,
+        ctx: AuthContext,
+        *,
+        handle: str = "",
+        display_name: str = "",
+        model_info: str = "",
+    ) -> dict[str, str]:
+        assert_admin(ctx)
+        try:
+            return self.store.register_agent(
+                handle=handle,
+                display_name=display_name,
+                model_info=model_info,
+            )
+        except ValueError as exc:
+            status = 409 if "already registered" in str(exc) else 400
+            raise ServiceError(str(exc), status_code=status) from exc
+
+    def set_book_access(
+        self,
+        ctx: AuthContext,
+        *,
+        book_slug: str,
+        access_mode: str,
+        allowed_agents: Optional[list[str]] = None,
+    ) -> dict[str, Any]:
+        assert_admin(ctx)
+        mode = (access_mode or "").strip().lower()
+        if mode not in {"public", "restricted"}:
+            raise ServiceError("access_mode must be 'public' or 'restricted'", status_code=400)
+        book = self.store.get_book(book_slug)
+        if book is None:
+            raise ServiceError(f"Book '{book_slug}' not found", status_code=404)
+
+        canonical_handles: list[str] = []
+        seen: set[str] = set()
+        for raw_entry in allowed_agents or []:
+            ident = str(raw_entry or "").strip()
+            if not ident:
+                continue
+            resolved = self.store.resolve_agent_identifier(ident)
+            if resolved is None:
+                raise ServiceError(
+                    f"Unknown agent handle or AGENT_KEY '{ident}'",
+                    status_code=400,
+                )
+            if resolved not in seen:
+                seen.add(resolved)
+                canonical_handles.append(resolved)
+
+        updated = self.store.set_book_access(
+            slug=book_slug,
+            access_mode=mode,
+            allowed_agents=canonical_handles,
+        )
+        out = dict(updated)
+        out.pop("source_text", None)
+        return out
 
     def approve_book_intake(
         self,

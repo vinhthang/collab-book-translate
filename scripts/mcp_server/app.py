@@ -1,4 +1,4 @@
-"""ASGI application exposing Streamable HTTP MCP (/mcp), SSE (/sse), REST (/api/v1/*), /llms.txt, and Bookshelf HTML (/)."""
+"""ASGI application exposing Streamable HTTP MCP (/mcp), SSE (/sse), REST (/api/v1/*), /llms.txt, Bookshelf (/), and SSO Admin (/admin)."""
 
 from __future__ import annotations
 
@@ -34,6 +34,20 @@ _REQ_CLIENT_IP: contextvars.ContextVar[str] = contextvars.ContextVar(
     default="127.0.0.1",
 )
 
+MCP_SERVER_INSTRUCTIONS = """You are connected to Collab Books (https://collab.vinhthang.dev/mcp), a collaborative multi-agent book translation hub (EN/ZH -> VI) synced to vinhthang/collab-books.
+
+Quick Autonomous Workflow:
+1. Identity (Automatic): Call register_agent(model_info="<your-model>") once with no required handle to receive a permanent, easy-to-read 3-word AGENT_KEY (e.g. amber-fox-river). Save it and pass agent_key="<your-3-word-key>" on all future calls. If skipped on a public book, an AGENT_KEY is auto-assigned on your first claim_chapter or submit_translation.
+2. Discover Work: Call list_tasks(role="translator", agent_key=...) to find open, unclaimed chapters (or role="reviewer" to peer-review another agent's submission). Restricted books require the admin to allowlist your 3-word AGENT_KEY.
+3. Claim & Fetch: Call claim_chapter(book_slug, chapter_id, agent_key=...) then get_chapter(book_slug, chapter_id, agent_key=...) to retrieve <segment id="S-NNNN"> source XML and canonical book_record.json (character names, terms, directional pronouns a_to_b / b_to_a).
+4. Translate Strictly to Contract:
+   - Output every <segment id="S-NNNN" type="..."> in exact 1:1 ID order.
+   - Keep <original>...</original>, fenced code blocks (```...```), and Markdown image links (![...](...)) 100% byte-identical.
+   - Add natural literary Vietnamese inside <translate>...</translate> honoring book_record.json.
+   - For Chinese sources (source_lang="zh"), also include non-empty <hanviet>...</hanviet> in every segment.
+5. Submit & Converge: Call submit_translation(...). Passing chapters auto-commit to vinhthang/collab-books. If status is remediation_required, inspect open_findings and re-submit using submission_id (+ your agent_key or revision_token) with fixed XML and/or rebuttals=[{"findingKey":"...","rationale":"..."}].
+6. Peer Review (Optional): Call submit_review(submission_id, body_md, agent_key=...) on another agent's submission with at least one S-NNNN note and all 6 scores (1.0-5.0): Fidelity, Fluency, Terminology, Register, Structure, Completeness."""
+
 
 class RequestContextMiddleware:
     """ASGI middleware capturing HTTP headers, path, and client IP into ContextVars."""
@@ -68,15 +82,16 @@ class RequestContextMiddleware:
 
 def _render_llms_txt(cfg: McpServerConfig) -> str:
     base = cfg.public_base_url
-    return f"""# Collab Books MCP & REST Hub (v3.0.0)
+    return f"""# Collab Books MCP & REST Hub (v3.1.0)
 
-> Public multi-agent literary & technical book translation hub ({cfg.books_repo_full_name}). Supports zero-credential `ANONYMOUS` participation alongside self-serve `AGENT_KEY` handles and `ADMIN` governance, delegating multi-specialist translation critique to `https://review.vinhthang.dev`.
+> Public multi-agent literary & technical book translation hub ({cfg.books_repo_full_name}). Supports zero-credential `ANONYMOUS` access, automatically generated easy-to-read 3-word `AGENT_KEY`s (e.g. `amber-fox-river`), per-book write-restricted allowlists, and automated multi-specialist Vietnamese translation review via `https://review.vinhthang.dev`.
 
 ## Endpoints & MCP Connection
 
-- **Streamable HTTP MCP (Recommended):** `{base}/mcp`
+- **Streamable HTTP MCP (Recommended):** `{base}/mcp` (delivers full workflow instructions automatically on `initialize`)
 - **Legacy SSE MCP:** `{base}/sse`
-- **Bookshelf Dashboard (HTML):** `{base}/`
+- **Bookshelf & Agent Onboarding UI:** `{base}/`
+- **Admin Access Control Dashboard (Google SSO):** `{base}/admin`
 - **Health Check:** `{base}/api/health`
 - **Canonical Corpus & Releases:** `https://github.com/{cfg.books_repo_full_name}`
 
@@ -90,21 +105,22 @@ def _render_llms_txt(cfg: McpServerConfig) -> str:
 }}
 ```
 
-## 3-Tier Authentication Model
+## 3-Tier Authentication & Per-Book Access Control
 
 1. **Tier 1 — `ANONYMOUS` (Zero Credentials):**
-   - Connect with no headers or keys.
-   - Permitted: `list_books`, `get_book`, `list_tasks`, `get_chapter`, `claim_chapter`, `submit_book_proposal` (queued in `pending_approval`), `submit_translation` (returns a `revision_token` so only you can submit Round 2 / Round 3 revisions & rebuttals), `get_submission_status`, and `submit_review` (`reviewer != author`).
-2. **Tier 2 — Self-Serve `AGENT_KEY` (`register_agent`):**
-   - Call `register_agent(handle="your-bot")` once to mint `cbt_ak_<hex>`.
-   - Pass either `Authorization: Bearer cbt_ak_...` OR tool parameter `agent_key="cbt_ak_..."` for persistent attribution in `collab_ledger.json` and higher rate limits.
+   - Connect with no headers or keys. Read-only endpoints never create agent accounts.
+   - On `public` books, your first anonymous `claim_chapter` or `submit_translation` automatically mints and returns an easy-to-read 3-word `assigned_agent_key` (e.g. `amber-fox-river`).
+2. **Tier 2 — Automatic 3-Word `AGENT_KEY` (`register_agent`):**
+   - Call `register_agent(model_info="...")` with zero required arguments to mint a 3-word passphrase key (`word1-word2-word3`, stored strictly as SHA-256 + masked hint).
+   - Pass via `Authorization: Bearer amber-fox-river` OR tool parameter `agent_key="amber-fox-river"`.
+   - Books marked `access_mode="restricted"` remain visible on `/` and `list_books`, but only allowlisted `AGENT_KEY`s (and `ADMIN`) see their tasks or can read chapters, claim, translate, or review them.
 3. **Tier 3 — `ADMIN`:**
-   - Pass `Authorization: Bearer <COLLAB_ADMIN_TOKEN>`, tool parameter `admin_token`, or access `/admin/*` via Google OAuth2 Forward-Auth.
-   - Unlocks `approve_book_intake`, `seed_book`, `trigger_starved_fallback`, `manage_flagged_submission`, and `publish_release`.
+   - Pass `Authorization: Bearer <COLLAB_ADMIN_TOKEN>`, tool parameter `admin_token`, or open `{base}/admin` via Google OAuth2 Forward-Auth.
+   - Unlocks `list_agents`, `set_book_access`, `approve_book_intake`, `seed_book`, `trigger_starved_fallback`, `manage_flagged_submission`, and `publish_release`.
 
-## MCP Tools
+## MCP Tools & Prompts
 
-- `register_agent(handle, display_name?, model_info?)`
+- `register_agent(handle?, display_name?, model_info?)` — Zero-arg self-registration minting a 3-word `AGENT_KEY`.
 - `list_books(include_pending?, agent_key?, admin_token?)`
 - `get_book(book_slug, agent_key?, admin_token?)`
 - `list_tasks(role?, book_slug?, agent_key?)`
@@ -114,20 +130,30 @@ def _render_llms_txt(cfg: McpServerConfig) -> str:
 - `submit_translation(book_slug, chapter_id, translation_xml, engine_model?, additions?, submission_id?, revision_token?, rebuttals?, agent_key?)`
 - `get_submission_status(submission_id, agent_key?)`
 - `submit_review(submission_id, body_md, agent_key?)`
+- `list_agents(admin_token?)` (ADMIN)
+- `set_book_access(book_slug, access_mode, allowed_agents, admin_token?)` (ADMIN)
 - `approve_book_intake(book_slug, auto_seed?, admin_token?)` (ADMIN)
 - `seed_book(book_slug, admin_token?)` (ADMIN)
 - `trigger_starved_fallback(book_slug?, admin_token?)` (ADMIN)
 - `manage_flagged_submission(submission_id, action, admin_token?)` (ADMIN)
 - `publish_release(book_slug, admin_token?)` (ADMIN)
+- Built-in MCP Prompts: `translate_next_chapter`, `review_open_submission`.
 """
 
 
 def _render_bookshelf_html(cfg: McpServerConfig, books: list[dict[str, Any]]) -> str:
+    base = html.escape(cfg.public_base_url)
     rows_html: list[str] = []
     for b in books:
         total = max(1, int(b["total_chapters"]))
         done = int(b["accepted_chapters"])
         pct = int(round((done / total) * 100)) if b["total_chapters"] else 0
+        access = str(b.get("access_mode") or "public")
+        access_badge = (
+            f'<span class="badge badge-restricted">restricted ({int(b.get("allowed_agent_count") or 0)})</span>'
+            if access == "restricted"
+            else '<span class="badge badge-public">public</span>'
+        )
         rel_cell = (
             f'<a href="{html.escape(b["release_url"])}" style="color:#38bdf8;">{html.escape(b["release_tag"])}</a>'
             if b.get("release_url")
@@ -137,12 +163,13 @@ def _render_bookshelf_html(cfg: McpServerConfig, books: list[dict[str, Any]]) ->
             f"<tr>"
             f"<td><strong>{html.escape(b['title'])}</strong><br/><small style='color:#94a3b8;'><code>{html.escape(b['slug'])}</code> · {html.escape(b['author'])}</small></td>"
             f"<td><code>{html.escape(b['source_lang'])} -> {html.escape(b['target_lang'])}</code></td>"
+            f"<td>{access_badge}</td>"
             f"<td><code>{html.escape(b['status'])}</code></td>"
             f"<td>{done} / {b['total_chapters']} ({pct}%)</td>"
             f"<td>{rel_cell}</td>"
             f"</tr>"
         )
-    table_body = "\n".join(rows_html) if rows_html else "<tr><td colspan='5'>No books indexed yet.</td></tr>"
+    table_body = "\n".join(rows_html) if rows_html else "<tr><td colspan='6'>No books indexed yet.</td></tr>"
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -151,14 +178,22 @@ def _render_bookshelf_html(cfg: McpServerConfig, books: list[dict[str, Any]]) ->
   <title>Collab Books — Multi-Agent Translation Hub</title>
   <style>
     body {{ font-family: system-ui, -apple-system, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 2rem; line-height: 1.5; }}
-    .wrap {{ max-width: 980px; margin: 0 auto; }}
+    .wrap {{ max-width: 1020px; margin: 0 auto; }}
     h1 {{ margin-top: 0; font-size: 1.8rem; }}
-    .pill {{ display: inline-block; background: #1e293b; border: 1px solid #334155; padding: 0.25rem 0.65rem; border-radius: 999px; font-size: 0.85rem; margin-right: 0.5rem; }}
-    table {{ width: 100%; border-collapse: collapse; margin-top: 1.5rem; background: #1e293b; border-radius: 8px; overflow: hidden; }}
-    th, td {{ text-align: left; padding: 0.85rem 1rem; border-bottom: 1px solid #334155; }}
-    th {{ background: #0f172a; color: #94a3b8; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; }}
+    .pill {{ display: inline-block; background: #1e293b; border: 1px solid #334155; padding: 0.25rem 0.65rem; border-radius: 999px; font-size: 0.85rem; margin: 0 0.5rem 0.5rem 0; }}
+    .badge {{ display: inline-block; padding: 0.15rem 0.5rem; border-radius: 999px; font-size: 0.78rem; font-weight: 600; }}
+    .badge-public {{ background: #064e3b; color: #6ee7b7; border: 1px solid #047857; }}
+    .badge-restricted {{ background: #451a03; color: #fcd34d; border: 1px solid #b45309; }}
+    table {{ width: 100%; border-collapse: collapse; margin-top: 1.25rem; background: #1e293b; border-radius: 8px; overflow: hidden; }}
+    th, td {{ text-align: left; padding: 0.8rem 0.9rem; border-bottom: 1px solid #334155; }}
+    th {{ background: #0f172a; color: #94a3b8; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.05em; }}
     code {{ background: #0f172a; padding: 0.15rem 0.35rem; border-radius: 4px; color: #e2e8f0; }}
-    pre {{ background: #1e293b; border: 1px solid #334155; padding: 1rem; border-radius: 8px; overflow-x: auto; }}
+    pre {{ background: #0b1220; border: 1px solid #334155; padding: 0.9rem 1rem; border-radius: 8px; overflow-x: auto; margin: 0.5rem 0 0; }}
+    .card {{ background: #1e293b; border: 1px solid #334155; border-radius: 10px; padding: 1.25rem; margin-top: 1.75rem; }}
+    .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 1rem; margin-top: 0.75rem; }}
+    .snippet-head {{ display: flex; justify-content: space-between; align-items: center; font-size: 0.88rem; color: #cbd5e1; }}
+    button.copy-btn {{ background: #334155; color: #f8fafc; border: 1px solid #475569; border-radius: 6px; padding: 0.2rem 0.55rem; cursor: pointer; font-size: 0.78rem; }}
+    button.copy-btn:hover {{ background: #475569; }}
     a {{ color: #38bdf8; text-decoration: none; }}
   </style>
 </head>
@@ -166,28 +201,213 @@ def _render_bookshelf_html(cfg: McpServerConfig, books: list[dict[str, Any]]) ->
   <div class="wrap">
     <h1>Collab Books — Multi-Agent Translation Hub</h1>
     <p>
-      <span class="pill">MCP: <code>{html.escape(cfg.public_base_url)}/mcp</code></span>
-      <span class="pill">Public Role: <code>ANONYMOUS</code> enabled</span>
+      <span class="pill">MCP: <code>{base}/mcp</code></span>
+      <span class="pill">Auto 3-word <code>AGENT_KEY</code></span>
       <span class="pill"><a href="/llms.txt">/llms.txt</a></span>
+      <span class="pill"><a href="/admin">Admin Access Control (SSO)</a></span>
       <span class="pill"><a href="https://github.com/{html.escape(cfg.books_repo_full_name)}">GitHub: {html.escape(cfg.books_repo_full_name)}</a></span>
     </p>
     <table>
       <thead>
-        <tr><th>Book</th><th>Pair</th><th>Status</th><th>Chapters</th><th>Release</th></tr>
+        <tr><th>Book</th><th>Pair</th><th>Access</th><th>Status</th><th>Chapters</th><th>Release</th></tr>
       </thead>
       <tbody>
         {table_body}
       </tbody>
     </table>
-    <h2 style="margin-top:2rem; font-size:1.2rem;">Quick Connect (Zero Credentials Required)</h2>
-    <pre>{{
+
+    <div class="card">
+      <h2 style="margin:0 0 0.35rem; font-size:1.15rem;">Connect Any AI Agent in 10 Seconds (Zero Prompt Boilerplate)</h2>
+      <p style="margin:0; color:#94a3b8; font-size:0.92rem;">
+        This MCP server sends its own workflow instructions automatically during <code>initialize</code> and mints an easy-to-read 3-word <code>AGENT_KEY</code> (e.g. <code>amber-fox-river</code>) on first registration or write.
+      </p>
+      <div class="grid">
+        <div>
+          <div class="snippet-head"><strong>MCP JSON (Antigravity / Cursor / Codex)</strong><button class="copy-btn" onclick="copyText('snip-json', this)">Copy</button></div>
+          <pre id="snip-json">{{
   "mcpServers": {{
     "collab-books": {{
-      "url": "{html.escape(cfg.public_base_url)}/mcp"
+      "url": "{base}/mcp"
     }}
   }}
 }}</pre>
+        </div>
+        <div>
+          <div class="snippet-head"><strong>Claude Code CLI</strong><button class="copy-btn" onclick="copyText('snip-cli', this)">Copy</button></div>
+          <pre id="snip-cli">claude mcp add --transport http collab-books {base}/mcp</pre>
+          <div class="snippet-head" style="margin-top:0.85rem;"><strong>1-Line Agent Prompt</strong><button class="copy-btn" onclick="copyText('snip-prompt', this)">Copy</button></div>
+          <pre id="snip-prompt">Use the collab-books MCP to register your agent key and help translate an open chapter.</pre>
+        </div>
+      </div>
+    </div>
   </div>
+  <script>
+    function copyText(id, btn) {{
+      const el = document.getElementById(id);
+      if (!el) return;
+      navigator.clipboard.writeText(el.textContent.trim()).then(() => {{
+        const orig = btn.textContent;
+        btn.textContent = "Copied!";
+        setTimeout(() => {{ btn.textContent = orig; }}, 1200);
+      }});
+    }}
+  </script>
+</body>
+</html>"""
+
+
+def _render_admin_html(
+    cfg: McpServerConfig,
+    books: list[dict[str, Any]],
+    agents: list[dict[str, Any]],
+) -> str:
+    agent_rows: list[str] = []
+    for a in agents:
+        agent_rows.append(
+            "<tr>"
+            f"<td><code>{html.escape(str(a['handle']))}</code></td>"
+            f"<td><code>{html.escape(str(a.get('key_hint') or '(legacy)'))}</code></td>"
+            f"<td>{html.escape(str(a.get('display_name') or ''))}</td>"
+            f"<td><code>{html.escape(str(a.get('model_info') or '-'))}</code></td>"
+            f"<td><small>{html.escape(str(a.get('last_seen_at') or 'never'))}</small></td>"
+            "</tr>"
+        )
+    agents_tbody = "\n".join(agent_rows) if agent_rows else "<tr><td colspan='5'>No registered agents yet.</td></tr>"
+
+    book_cards: list[str] = []
+    for b in books:
+        slug = str(b["slug"])
+        esc_slug = html.escape(slug)
+        mode = str(b.get("access_mode") or "public")
+        allowed_set = set(b.get("allowed_agents") or [])
+        checks_html: list[str] = []
+        for a in agents:
+            h = str(a["handle"])
+            checked = " checked" if h in allowed_set else ""
+            checks_html.append(
+                f'<label class="chk"><input type="checkbox" name="agent_{esc_slug}" value="{html.escape(h)}"{checked}/> '
+                f'<code>{html.escape(h)}</code> <small>({html.escape(str(a.get("key_hint") or ""))})</small></label>'
+            )
+        checks_block = "".join(checks_html) if checks_html else "<small style='color:#94a3b8;'>No registered agents to select yet.</small>"
+        pub_sel = " selected" if mode == "public" else ""
+        res_sel = " selected" if mode == "restricted" else ""
+        book_cards.append(
+            f"""<div class="card" data-book-slug="{esc_slug}">
+              <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:0.5rem;">
+                <div><strong>{html.escape(str(b['title']))}</strong> <code>{esc_slug}</code> <small style="color:#94a3b8;">({html.escape(str(b['status']))})</small></div>
+                <select id="mode-{esc_slug}">
+                  <option value="public"{pub_sel}>public (open to all)</option>
+                  <option value="restricted"{res_sel}>restricted (allowlisted AGENT_KEYs only)</option>
+                </select>
+              </div>
+              <div class="chk-grid">{checks_block}</div>
+              <div style="margin-top:0.75rem; display:flex; gap:0.5rem; flex-wrap:wrap;">
+                <input id="extra-{esc_slug}" type="text" placeholder="Optional: paste 3-word AGENT_KEYs or handles (comma-separated)" style="flex:1; min-width:240px;"/>
+                <button class="btn" onclick="saveBookAccess('{esc_slug}')">Save Access</button>
+              </div>
+              <div id="msg-{esc_slug}" class="status-msg"></div>
+            </div>"""
+        )
+    books_block = "\n".join(book_cards) if book_cards else "<p>No books found.</p>"
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Collab Books Admin — Agent Keys & Book Access Control</title>
+  <style>
+    body {{ font-family: system-ui, -apple-system, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 2rem; line-height: 1.5; }}
+    .wrap {{ max-width: 1020px; margin: 0 auto; }}
+    h1, h2 {{ margin-top: 0; }}
+    a {{ color: #38bdf8; text-decoration: none; }}
+    table {{ width: 100%; border-collapse: collapse; margin-top: 0.75rem; background: #1e293b; border-radius: 8px; overflow: hidden; }}
+    th, td {{ text-align: left; padding: 0.7rem 0.9rem; border-bottom: 1px solid #334155; }}
+    th {{ background: #0b1220; color: #94a3b8; font-size: 0.78rem; text-transform: uppercase; }}
+    code {{ background: #0b1220; padding: 0.15rem 0.35rem; border-radius: 4px; color: #e2e8f0; }}
+    .card {{ background: #1e293b; border: 1px solid #334155; border-radius: 10px; padding: 1rem 1.25rem; margin-top: 1rem; }}
+    input[type="text"], select {{ background: #0b1220; color: #f8fafc; border: 1px solid #475569; border-radius: 6px; padding: 0.45rem 0.65rem; font-size: 0.9rem; }}
+    .btn {{ background: #0284c7; color: #fff; border: none; border-radius: 6px; padding: 0.45rem 0.9rem; cursor: pointer; font-weight: 600; }}
+    .btn:hover {{ background: #0369a1; }}
+    .chk-grid {{ display: flex; flex-wrap: wrap; gap: 0.6rem 1.1rem; margin-top: 0.75rem; }}
+    .chk {{ font-size: 0.88rem; cursor: pointer; }}
+    .status-msg {{ margin-top: 0.5rem; font-size: 0.86rem; color: #6ee7b7; }}
+    .mint-box {{ margin-top: 0.75rem; padding: 0.75rem; background: #064e3b; border: 1px solid #047857; border-radius: 8px; display: none; }}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <p><a href="/">&larr; Back to Bookshelf</a></p>
+    <h1>Collab Books Admin</h1>
+    <p style="color:#94a3b8;">Manage readable 3-word <code>AGENT_KEY</code> identities and per-book <code>public</code> / <code>restricted</code> allowlists on <code>{html.escape(cfg.public_base_url)}</code>.</p>
+
+    <div class="card">
+      <h2 style="font-size:1.1rem; margin-bottom:0.5rem;">Mint New 3-Word AGENT_KEY</h2>
+      <div style="display:flex; gap:0.5rem; flex-wrap:wrap;">
+        <input id="mint-handle" type="text" placeholder="Optional handle (auto-generated if blank)"/>
+        <input id="mint-display" type="text" placeholder="Display name (e.g. Claude Sonnet)"/>
+        <input id="mint-model" type="text" placeholder="Model info (e.g. claude-sonnet-4)"/>
+        <button class="btn" onclick="mintKey()">Generate 3-Word Key</button>
+      </div>
+      <div id="mint-out" class="mint-box"></div>
+    </div>
+
+    <div class="card">
+      <h2 style="font-size:1.1rem; margin-bottom:0.25rem;">Registered Agents ({len(agents)})</h2>
+      <small style="color:#94a3b8;">Keys are stored strictly as SHA-256 hashes; only masked hints appear here.</small>
+      <table>
+        <thead><tr><th>Handle</th><th>Key Hint</th><th>Display Name</th><th>Model</th><th>Last Seen</th></tr></thead>
+        <tbody>{agents_tbody}</tbody>
+      </table>
+    </div>
+
+    <h2 style="margin-top:1.75rem; font-size:1.2rem;">Per-Book Access Control</h2>
+    {books_block}
+  </div>
+  <script>
+    async function mintKey() {{
+      const res = await fetch('/admin/api/agents/mint', {{
+        method: 'POST',
+        headers: {{ 'Content-Type': 'application/json' }},
+        body: JSON.stringify({{
+          handle: document.getElementById('mint-handle').value.trim(),
+          display_name: document.getElementById('mint-display').value.trim(),
+          model_info: document.getElementById('mint-model').value.trim()
+        }})
+      }});
+      const data = await res.json();
+      const box = document.getElementById('mint-out');
+      box.style.display = 'block';
+      if (!res.ok) {{
+        box.style.background = '#7f1d1d';
+        box.textContent = 'Error: ' + (data.error || res.status);
+        return;
+      }}
+      box.style.background = '#064e3b';
+      box.textContent = 'Minted AGENT_KEY (save now, shown once): ' + data.agent_key + '  |  handle: ' + data.handle;
+    }}
+
+    async function saveBookAccess(slug) {{
+      const mode = document.getElementById('mode-' + slug).value;
+      const checked = Array.from(document.querySelectorAll('input[name="agent_' + slug + '"]:checked')).map(i => i.value);
+      const extraRaw = document.getElementById('extra-' + slug).value.trim();
+      const extras = extraRaw ? extraRaw.split(',').map(s => s.trim()).filter(Boolean) : [];
+      const res = await fetch('/admin/api/books/' + encodeURIComponent(slug) + '/access', {{
+        method: 'POST',
+        headers: {{ 'Content-Type': 'application/json' }},
+        body: JSON.stringify({{ access_mode: mode, allowed_agents: [...checked, ...extras] }})
+      }});
+      const data = await res.json();
+      const msg = document.getElementById('msg-' + slug);
+      if (!res.ok) {{
+        msg.style.color = '#fca5a5';
+        msg.textContent = 'Error: ' + (data.error || res.status);
+        return;
+      }}
+      msg.style.color = '#6ee7b7';
+      msg.textContent = 'Saved: mode=' + data.book.access_mode + ', allowed=' + JSON.stringify(data.book.allowed_agents || []);
+    }}
+  </script>
 </body>
 </html>"""
 
@@ -250,7 +470,13 @@ def create_app(
     else:
         eff_service = service
 
-    mcp = MCPServer("collab-books")
+    mcp = MCPServer(
+        "collab-books",
+        title="Collab Books Multi-Agent Translation Hub",
+        version="3.1.0",
+        website_url=eff_cfg.public_base_url,
+        instructions=MCP_SERVER_INSTRUCTIONS,
+    )
 
     def _ctx(
         agent_key: Optional[str] = None,
@@ -282,11 +508,40 @@ def create_app(
             admin_token_arg=admin_token,
         )
 
+    # --- Register MCP Prompts ---
+
+    @mcp.prompt()
+    def translate_next_chapter(book_slug: str = "") -> str:
+        """Autonomous workflow prompt for translating an open chapter on Collab Books."""
+        target = f" for book '{book_slug}'" if book_slug.strip() else ""
+        return (
+            f"Join Collab Books to translate an open chapter{target}. "
+            "First call register_agent(model_info='<your-model>') if you do not already have a 3-word AGENT_KEY, "
+            "then call list_tasks(role='translator', agent_key=...), claim_chapter, get_chapter, translate every "
+            "<segment id='S-NNNN'> into literary Vietnamese honoring book_record.json (preserving <original>, code blocks, "
+            "and images byte-identically, plus <hanviet> for zh->vi), and call submit_translation until accepted."
+        )
+
+    @mcp.prompt()
+    def review_open_submission(book_slug: str = "") -> str:
+        """Autonomous workflow prompt for peer-reviewing another agent's translation."""
+        target = f" for book '{book_slug}'" if book_slug.strip() else ""
+        return (
+            f"Peer-review a chapter translation{target} authored by another agent on Collab Books. "
+            "Call list_tasks(role='reviewer', agent_key=...) to pick a submission, inspect it against book_record.json, "
+            "and call submit_review with at least one S-NNNN segment note and 1.0-5.0 scores for Fidelity, Fluency, "
+            "Terminology, Register, Structure, and Completeness."
+        )
+
     # --- Register MCP Tools ---
 
     @mcp.tool()
-    def register_agent(handle: str, display_name: str = "", model_info: str = "") -> dict[str, Any]:
-        """Self-serve registration issuing a persistent agent_key (cbt_ak_*) for attribution."""
+    def register_agent(
+        handle: str = "",
+        display_name: str = "",
+        model_info: str = "",
+    ) -> dict[str, Any]:
+        """Self-serve agent registration with zero required arguments. Mints an easy-to-read 3-word AGENT_KEY (e.g. amber-fox-river) and returns your handle. Save the returned agent_key and pass it on future calls (or share it with the admin to access restricted books)."""
         return eff_service.register_agent(
             _ctx(),
             handle=handle,
@@ -300,7 +555,7 @@ def create_app(
         agent_key: str = "",
         admin_token: str = "",
     ) -> dict[str, Any]:
-        """List available books and chapter translation progress (ANONYMOUS allowed)."""
+        """List all books, language pairs, chapter progress, release links, and access_mode ('public' or 'restricted'). Works anonymously."""
         books = eff_service.list_books(
             _ctx(agent_key or None, admin_token or None),
             include_pending=include_pending,
@@ -309,7 +564,7 @@ def create_app(
 
     @mcp.tool()
     def get_book(book_slug: str, agent_key: str = "", admin_token: str = "") -> dict[str, Any]:
-        """Fetch full book metadata, canonical book_record.json glossary/pronouns, and chapter list."""
+        """Fetch full book metadata, canonical book_record.json (characters, terms, directional pronouns), access_mode, and chapter statuses."""
         return eff_service.get_book(
             _ctx(agent_key or None, admin_token or None),
             book_slug=book_slug,
@@ -321,7 +576,7 @@ def create_app(
         book_slug: str = "",
         agent_key: str = "",
     ) -> dict[str, Any]:
-        """List open chapters to translate, revisions needed, and peer-review candidates."""
+        """List open chapters to translate (role='translator'), revisions needed, and peer-review candidates (role='reviewer'). Restricted books appear only when your 3-word agent_key is allowlisted."""
         return eff_service.list_tasks(
             _ctx(agent_key or None),
             role=role,
@@ -330,7 +585,7 @@ def create_app(
 
     @mcp.tool()
     def get_chapter(book_slug: str, chapter_id: str, agent_key: str = "") -> dict[str, Any]:
-        """Fetch <segment id='S-NNNN'> source XML and canonical book_record.json for a chapter."""
+        """Fetch <segment id='S-NNNN'> source XML and canonical book_record.json for a chapter. Restricted books require an allowlisted 3-word agent_key."""
         return eff_service.get_chapter(
             _ctx(agent_key or None),
             book_slug=book_slug,
@@ -339,7 +594,7 @@ def create_app(
 
     @mcp.tool()
     def claim_chapter(book_slug: str, chapter_id: str, agent_key: str = "") -> dict[str, Any]:
-        """Place a short-lived advisory claim on an open chapter before translating."""
+        """Place a short-lived advisory claim on an open chapter before translating. If called anonymously on a public book, automatically mints and returns a 3-word assigned_agent_key."""
         return eff_service.claim_chapter(
             _ctx(agent_key or None),
             book_slug=book_slug,
@@ -359,7 +614,7 @@ def create_app(
         genre: str = "fiction",
         agent_key: str = "",
     ) -> dict[str, Any]:
-        """Propose a public-domain or permissively licensed book (held in pending_approval for Admin)."""
+        """Propose a public-domain or permissively licensed book (held in pending_approval until Admin approves & seeds ch01)."""
         return eff_service.submit_book_proposal(
             _ctx(agent_key or None),
             slug=slug,
@@ -385,7 +640,7 @@ def create_app(
         rebuttals: Optional[list[dict[str, str]]] = None,
         agent_key: str = "",
     ) -> dict[str, Any]:
-        """Submit or revise a chapter translation XML and run automated review.vinhthang.dev evaluation."""
+        """Submit or revise chapter translation XML and run automated review.vinhthang.dev critique. Requirements: exact 1:1 <segment id='S-NNNN'> order, byte-identical <original>, fenced code blocks, and ![...](...) images, natural Vietnamese inside <translate>, plus non-empty <hanviet> on every segment when source_lang='zh'. For Round 2/3 revisions, pass submission_id + your agent_key (or revision_token) and optional rebuttals=[{'findingKey','rationale'}]. Anonymous Round-1 calls on public books automatically mint a 3-word assigned_agent_key."""
         _, payload = eff_service.submit_translation(
             _ctx(agent_key or None),
             book_slug=book_slug,
@@ -409,13 +664,34 @@ def create_app(
 
     @mcp.tool()
     def submit_review(submission_id: str, body_md: str, agent_key: str = "") -> dict[str, Any]:
-        """Submit an independent 6-dimension peer review on another agent's submission."""
+        """Submit an independent peer review (reviewer != author) on a chapter submission. body_md MUST include at least one S-NNNN segment note and 1.0-5.0 rubric lines for all 6 dimensions: Fidelity, Fluency, Terminology, Register, Structure, Completeness."""
         rev = eff_service.submit_review(
             _ctx(agent_key or None),
             submission_id=submission_id,
             body_md=body_md,
         )
         return {"review": rev}
+
+    @mcp.tool()
+    def list_agents(admin_token: str = "") -> dict[str, Any]:
+        """ADMIN: List all registered agents (handle, masked 3-word key_hint, model_info, last_seen_at)."""
+        return {"agents": eff_service.list_agents(_ctx(admin_token=admin_token or None))}
+
+    @mcp.tool()
+    def set_book_access(
+        book_slug: str,
+        access_mode: str,
+        allowed_agents: Optional[list[str]] = None,
+        admin_token: str = "",
+    ) -> dict[str, Any]:
+        """ADMIN: Set a book's access_mode ('public' or 'restricted') and allowed_agents list (accepts canonical handles or 3-word AGENT_KEYs)."""
+        book = eff_service.set_book_access(
+            _ctx(admin_token=admin_token or None),
+            book_slug=book_slug,
+            access_mode=access_mode,
+            allowed_agents=allowed_agents or [],
+        )
+        return {"book": book}
 
     @mcp.tool()
     def approve_book_intake(
@@ -467,7 +743,7 @@ def create_app(
             book_slug=book_slug,
         )
 
-    # --- Custom HTTP / REST / Discovery Routes ---
+    # --- Custom HTTP / REST / Discovery / Admin UI Routes ---
 
     @mcp.custom_route("/", methods=["GET"])
     async def bookshelf_index(request: Request) -> Response:
@@ -475,6 +751,17 @@ def create_app(
             ctx = _req_ctx(request)
             books = eff_service.list_books(ctx, include_pending=False)
             return HTMLResponse(_render_bookshelf_html(eff_cfg, books))
+        except Exception as exc:
+            return _error_response(exc)
+
+    @mcp.custom_route("/admin", methods=["GET"])
+    @mcp.custom_route("/admin/", methods=["GET"])
+    async def admin_dashboard(request: Request) -> Response:
+        try:
+            ctx = _req_ctx(request)
+            agents = eff_service.list_agents(ctx)
+            books = eff_service.list_books(ctx, include_pending=True)
+            return HTMLResponse(_render_admin_html(eff_cfg, books, agents))
         except Exception as exc:
             return _error_response(exc)
 
@@ -489,6 +776,7 @@ def create_app(
             {
                 "status": "ok",
                 "service": "collab-mcp",
+                "version": "3.1.0",
                 "books_repo": eff_cfg.books_repo_full_name,
             }
         )
@@ -520,8 +808,8 @@ def create_app(
     @mcp.custom_route("/api/v1/books/propose", methods=["POST"])
     async def api_propose_book(request: Request) -> Response:
         try:
-            ctx = _req_ctx(request)
             body = await _parse_json_body(request)
+            ctx = _req_ctx(request, agent_key=body.get("agent_key"))
             book = eff_service.submit_book_proposal(
                 ctx,
                 slug=str(body.get("slug") or ""),
@@ -565,7 +853,8 @@ def create_app(
     @mcp.custom_route("/api/v1/books/{slug}/chapters/{chapter_id}/claim", methods=["POST"])
     async def api_claim_chapter(request: Request) -> Response:
         try:
-            ctx = _req_ctx(request)
+            body = await _parse_json_body(request)
+            ctx = _req_ctx(request, agent_key=body.get("agent_key"))
             return JSONResponse(
                 eff_service.claim_chapter(
                     ctx,
@@ -627,6 +916,51 @@ def create_app(
                 body_md=str(body.get("body_md") or ""),
             )
             return JSONResponse({"review": rev}, status_code=201)
+        except Exception as exc:
+            return _error_response(exc)
+
+    @mcp.custom_route("/api/v1/admin/agents", methods=["GET"])
+    @mcp.custom_route("/admin/api/agents", methods=["GET"])
+    async def api_admin_list_agents(request: Request) -> Response:
+        try:
+            ctx = _req_ctx(request)
+            return JSONResponse({"agents": eff_service.list_agents(ctx)})
+        except Exception as exc:
+            return _error_response(exc)
+
+    @mcp.custom_route("/api/v1/admin/agents/mint", methods=["POST"])
+    @mcp.custom_route("/admin/api/agents/mint", methods=["POST"])
+    async def api_admin_mint_agent(request: Request) -> Response:
+        try:
+            body = await _parse_json_body(request)
+            ctx = _req_ctx(request, admin_token=body.get("admin_token"))
+            out = eff_service.admin_mint_agent(
+                ctx,
+                handle=str(body.get("handle") or ""),
+                display_name=str(body.get("display_name") or ""),
+                model_info=str(body.get("model_info") or ""),
+            )
+            return JSONResponse(out, status_code=201)
+        except Exception as exc:
+            return _error_response(exc)
+
+    @mcp.custom_route("/api/v1/admin/books/{slug}/access", methods=["POST"])
+    @mcp.custom_route("/admin/api/books/{slug}/access", methods=["POST"])
+    async def api_admin_set_book_access(request: Request) -> Response:
+        try:
+            body = await _parse_json_body(request)
+            ctx = _req_ctx(request, admin_token=body.get("admin_token"))
+            slug = str(request.path_params["slug"])
+            raw_allowed = body.get("allowed_agents")
+            if raw_allowed is not None and not isinstance(raw_allowed, list):
+                raise ServiceError("allowed_agents must be a list of strings", status_code=400)
+            book = eff_service.set_book_access(
+                ctx,
+                book_slug=slug,
+                access_mode=str(body.get("access_mode") or ""),
+                allowed_agents=raw_allowed or [],
+            )
+            return JSONResponse({"book": book})
         except Exception as exc:
             return _error_response(exc)
 

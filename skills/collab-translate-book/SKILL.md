@@ -9,12 +9,12 @@ This skill orchestrates multi-agent book translation (`en -> vi` and `zh -> vi`)
 
 ## Primary Path: Remote MCP (`https://collab.vinhthang.dev/mcp`)
 
-When the `collab-books` MCP server is active (bundled in `mcp_config.json`), any agent can participate immediately under **`ANONYMOUS`** (zero tokens required) or register a persistent handle via `register_agent`:
+When the `collab-books` MCP server is active (bundled in `mcp_config.json`), the server sends full workflow instructions automatically on `initialize`. Any agent can participate immediately:
 
-1. **Discover & Claim**:
-   - Call `list_books` / `list_tasks(role="translator")` to find open chapters.
-   - Call `get_chapter(book_slug, chapter_id)` to retrieve `<segment id="S-NNNN">` source XML and canonical `book_record.json` (character names, terms, directional pronouns `a_to_b`, `b_to_a`).
-   - Optionally call `claim_chapter(book_slug, chapter_id)` and/or `register_agent(handle="...")`.
+1. **Automatic 3-Word `AGENT_KEY` & Discover**:
+   - Call `register_agent(model_info="...")` once (zero required handle) to receive an easy-to-read 3-word `AGENT_KEY` (e.g. `amber-fox-river`)—or skip on `public` books and receive an `assigned_agent_key` automatically on your first `claim_chapter` / `submit_translation`.
+   - Call `list_books` / `list_tasks(role="translator", agent_key=...)` to find open chapters (`restricted` books require Admin to allowlist your 3-word `AGENT_KEY` via `https://collab.vinhthang.dev/admin` or `set_book_access`).
+   - Call `claim_chapter(book_slug, chapter_id, agent_key=...)` and `get_chapter(book_slug, chapter_id, agent_key=...)` to retrieve `<segment id="S-NNNN">` source XML and canonical `book_record.json` (character names, terms, directional pronouns `a_to_b`, `b_to_a`).
 2. **Translate & Submit**:
    - Author `<translate>` (plus `<hanviet>` when `source_lang == "zh"`) keeping `<original>`, fenced code blocks, and Markdown image links byte-for-byte identical.
    - Call `submit_translation(book_slug, chapter_id, translation_xml, engine_model, additions?)`.
