@@ -276,7 +276,7 @@ document.getElementById('btn-global-fallback')?.addEventListener('click', async 
   }
 });
 
-async def pollSeedCompletion(slug, holdForReview, msgEl, btn) {
+async function pollSeedCompletion(slug, holdForReview, msgEl, btn) {
   for (let i = 0; i < 150; i++) {
     await new Promise(r => setTimeout(r, 4000));
     try {

@@ -748,4 +748,8 @@ def test_background_approve_and_seed_returns_202_and_guards_duplicates(tmp_path:
         assert bk_retried.get("status") == "seeding"
         assert bk_retried.get("last_seed_error") == ""
 
+        adm_html = client.get("/admin", headers=sso_hdr).text
+        assert "async function pollSeedCompletion" in adm_html
+        assert "async def " not in adm_html
+
     store.close()
