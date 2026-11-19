@@ -97,8 +97,7 @@ def test_verify_book_completeness_envelope_and_list_happy_paths(tmp_path: Path):
 
 
 def test_verify_book_completeness_published_pilot_scandal_in_bohemia():
-    repo_root = Path(__file__).resolve().parent.parent
-    pilot_run_dir = repo_root / "runs" / "scandal-in-bohemia"
+    pilot_run_dir = Path(__file__).resolve().parent / "fixtures" / "runs" / "scandal-in-bohemia"
     res = verify_book_completeness(pilot_run_dir)
     assert res["ready_to_publish"] is True, f"Pilot failed completeness: {res}"
     assert res["incomplete_chapters"] == []

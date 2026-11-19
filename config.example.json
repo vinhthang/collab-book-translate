@@ -1,6 +1,6 @@
 {
-  "workspace_dir": "/path/to/collab-book-translate",
-  "repo_full_name": "<owner>/collab-book-translate",
+  "workspace_dir": "/path/to/collab-books",
+  "repo_full_name": "<owner>/collab-books",
   "bot_login": "<bot-github-login>",
   "bot_git_name": "<bot-git-name>",
   "bot_git_email": "<bot-git-email>",

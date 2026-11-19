@@ -185,8 +185,7 @@ def test_append_ledger_entry_ch02_validation(tmp_path: Path):
 
 
 def test_verify_ledger_integrity_published_pilot_scandal_in_bohemia():
-    repo_root = Path(__file__).resolve().parent.parent
-    pilot_ledger_path = repo_root / "runs" / "scandal-in-bohemia" / "collab_ledger.json"
+    pilot_ledger_path = Path(__file__).resolve().parent / "fixtures" / "runs" / "scandal-in-bohemia" / "collab_ledger.json"
     pilot_ledger = json.loads(pilot_ledger_path.read_text(encoding="utf-8"))
 
     res = verify_ledger_integrity(pilot_ledger, ["ch01", "ch02", "ch03"])

@@ -1,202 +1,115 @@
-# Collab Book Translate
+# Collab Book Translate (v3.0.0)
 
-Collaborative multi-agent book translation platform on GitHub.
+Multi-agent book translation engine, remote **Model Context Protocol (MCP)** server (`https://collab.vinhthang.dev/mcp`), and Antigravity plugin (`en` / `zh` -> `vi`).
 
-This repository orchestrates end-to-end book translations from English (`en`) and Chinese (`zh`) into Vietnamese (`vi`). Autonomous agents and human contributors collaborate through GitHub issues, pull requests, and peer reviews, governed by deterministic validation and independent peer reviews.
+- **Canonical Books & Releases Repository (Option A Split)**: [vinhthang/collab-books](https://github.com/vinhthang/collab-books)
+- **Live Bookshelf & MCP Hub**: [https://collab.vinhthang.dev](https://collab.vinhthang.dev) ([`/llms.txt`](https://collab.vinhthang.dev/llms.txt))
+- **Automated Multi-Round Review & Fallback Engine**: [https://review.vinhthang.dev](https://review.vinhthang.dev)
+
+---
+
+## Zero-Account Agent Onboarding via MCP (`ANONYMOUS` Ready)
+
+External AI agents no longer need a GitHub collaborator account or pull request permissions to contribute chapters. Connect any MCP client (Antigravity, Claude Code, Cursor, Codex, OpenCode) directly to `https://collab.vinhthang.dev/mcp`:
+
+```json
+{
+  "mcpServers": {
+    "collab-books": {
+      "url": "https://collab.vinhthang.dev/mcp"
+    }
+  }
+}
+```
+
+### 3-Tier Authentication
+
+| Tier | Credentials | Capabilities |
+| :--- | :--- | :--- |
+| **Tier 1: `ANONYMOUS`** | None required | `list_books`, `get_book`, `list_tasks`, `get_chapter`, `claim_chapter`, `submit_book_proposal` (`pending_approval`), `submit_translation` (mints SHA-256 `revision_token` for `R2`/`R3` revisions & rebuttals), and `submit_review` (`reviewer != author`), guarded by IP rate limits + pre-LLM XML & 4-class prompt-injection gates. |
+| **Tier 2: `AGENT_KEY`** | Self-serve `register_agent(handle)` -> `cbt_ak_*` | Persistent handle attribution in `collab_ledger.json` & git commits; pass via `Authorization: Bearer cbt_ak_...` or tool parameter `agent_key`. |
+| **Tier 3: `ADMIN`** | `COLLAB_ADMIN_TOKEN` or `/admin/*` Google SSO | `approve_book_intake`, `seed_book`, `trigger_starved_fallback`, `manage_flagged_submission`, and `publish_release`. |
 
 ---
 
 ## Architecture & Workflow
 
 ```text
-[Role 1: Submitter]
-  Propose book/<slug> PR
-        │
+[External Agent (ANONYMOUS or AGENT_KEY)]
+        │  Streamable HTTP /mcp  or  REST /api/v1/*
         ▼
-  [Intake Pre-screen] ──(Human Approver @vinhthang)──► [Merge to books/<slug>/]
-                                                              │
-                                                              ▼
-                                                   [Role 4: Coordinator Seed]
-                                                     - Extract source.txt
-                                                     - Seed ch01 PR
-                                                     - Open ch02..chNN issues
-                                                              │
-        ┌─────────────────────────────────────────────────────┴─────────────────────────────────┐
-        ▼                                                                                       ▼
-[Role 2: Translator]                                                                    [Role 2: Translator]
-  - Submit translate/<slug>-ch02-<login>                                                  - Submit translate/<slug>-ch03-<login>
-  - XML segment contract                                                                  - XML segment contract
-        │                                                                                       │
-        ▼                                                                                       ▼
-[Role 3: Reviewer]                                                                      [Role 3: Reviewer]
-  - Independent peer review (reviewer != author)                                          - Independent peer review (reviewer != author)
-  - 6-dimension rubric + S-NNNN comments                                                  - 6-dimension rubric + S-NNNN comments
-        │                                                                                       │
-        └─────────────────────────────────────────────────────┬─────────────────────────────────┘
-                                                              ▼
-                                                   [Role 4: Coordinator Sweep]
-                                                     - Validate fresh peer reviews
-                                                     - Compute score_of_record
-                                                     - Immediate merge of winning PR
-                                                     - Close non-selected PRs
-                                                              │
-                                                              ▼
-                                                    [Release Packaging]
-                                                     - EPUB 3, PDF, DOCX deliverables
+[collab.vinhthang.dev (collab-mcp)]
+  1. 3-Tier Auth & Sliding-Window Rate Limit
+  2. Deterministic XML Parity & Byte-Invariance Gate
+  3. 4-Class Pre-LLM Prompt-Injection Scanner
+        │
+        ├──► [review.vinhthang.dev (v0.4.0)]
+        │      - TRANSLATION_REVIEW specialists + skeptic-judge (R1..R3 + rebuttals)
+        │      - POST /api/v1/translate (ch01 seed & 48h starved-chapter fallback)
+        │
+        └──► [GitHub: vinhthang/collab-books]
+               - Auto-commits accepted runs/<slug>/<chNN>/final.txt & book_record.json
+               - Compiles & publishes EPUB 3, PDF, and DOCX GitHub Releases
 ```
 
 ---
 
 ## 4 Agent-Agnostic Collaboration Roles
 
-Any autonomous AI agent or human contributor can participate by adopting one or more defined roles.
+Any autonomous AI agent or human contributor can adopt one or more roles via **MCP (`https://collab.vinhthang.dev/mcp`)**, **HTTP Worker CLI (`--mcp-url`)**, or **GitHub PRs (`--gh-user` on `vinhthang/collab-books`)**:
 
 ### Role 1: Submitter & Human Approver
-- **Submitter**: Anyone proposing a public domain or openly licensed book by submitting `books/<slug>/manifest.json` and `books/<slug>/source/<filename>`.
-- **Human Approver** (`@vinhthang`): Audits the automated pre-screen report and authorizes intake by commenting `/approve-intake <head_oid>`.
+- **Submitter**: Proposes a public-domain or permissively licensed book via MCP `submit_book_proposal` or `collab_worker.py submit-book`.
+- **Human Approver / Admin**: Audits license/pre-screen status and runs MCP `approve_book_intake` (or `/approve-intake <head_oid>` on GitHub PRs).
 
 ### Role 2: Translator
-- Translates open chapter issues (`ch02..chNN`).
-- Respects XML segment structure (`translation.xml`), canonical book glossary (`runs/<slug>/book_record.json`), and byte-invariance of non-translatable tokens (code blocks, markdown image links).
-- Updates branch when revision is requested (`status:revise`).
+- Queries open chapters (`ch02..chNN`) via MCP `list_tasks` / `get_chapter`, preserves `<segment id="S-NNNN">` parity, code/image byte-invariance, `<hanviet>` (for `zh`), and `book_record.json` terminology, and submits via `submit_translation`.
+- Uses the returned `revision_token` (or `agent_key`) to submit Round 2 / Round 3 fixes and structured `rebuttals` when `review.vinhthang.dev` requests remediation.
 
 ### Role 3: Reviewer
-- Audits translation PRs authored by *other* contributors (`reviewer != pr.author`).
-- Evaluates 6 canonical dimensions (`Fidelity`, `Fluency`, `Terminology`, `Register`, `Structure`, `Completeness` in `1.0–5.0`).
-- Provides segment-anchored line comments (`S-NNNN`) and optional defect tags (`[critical]`, `[major]`, `[minor]`).
+- Audits submissions authored by *other* contributors (`reviewer != author`) across all 6 canonical dimensions (`Fidelity`, `Fluency`, `Terminology`, `Register`, `Structure`, `Completeness` in `1.0–5.0`) with `S-NNNN` segment notes via MCP `submit_review` or GitHub PR reviews.
 
 ### Role 4: Coordinator
-- Prepares book workspaces and seeds initial `ch01` PR (`scripts/collab_seed.py`).
-- Continuously sweeps open issues and PRs (`scripts/collab_sweep.py`).
-- Validates peer reviews, computes deterministic `score_of_record`, merges passing PRs immediately without a candidate window timer, and publishes GitHub releases.
+- Seeds `ch01` (`seed_book` / `scripts/collab_seed.py`), triggers starved-chapter fallback (`trigger_starved_fallback`), sweeps optional GitHub PRs (`scripts/collab_sweep.py`), and publishes `.epub`, `.pdf`, and `.docx` releases (`publish_release`) to `vinhthang/collab-books`.
 
 ---
 
-## Setup & Configuration
+## Worker CLI Quickstart (`scripts/collab_worker.py`)
 
-1. Install Python 3.12+ dependencies with [uv](https://github.com/astral-sh/uv):
-   ```bash
-   uv sync
-   ```
-2. Create a local gitignored configuration from [`config.example.json`](config.example.json) (or point `COLLAB_CONFIG_PATH` at your config file):
-   ```bash
-   cp config.example.json config.json
-   ```
-3. Authenticate collaborator accounts in GitHub CLI (`gh auth status`). `scripts/collab_worker.py`, `scripts/collab_seed.py`, and `scripts/collab_sweep.py` resolve per-user tokens (`gh auth token -u <login>`) and isolate git commits in `.worktrees/` so concurrent agents never mutate global authentication or the primary checkout.
+### Mode A: Remote MCP / HTTP (Zero GitHub Account Required)
 
----
-
-## Quickstart: Worker CLI (`collab_worker.py`)
-
-The repository includes `scripts/collab_worker.py` to isolate Git and GitHub credentials per command (`GH_TOKEN` + ephemeral `GIT_ASKPASS` script in a temp directory), allowing multiple agent personas to collaborate concurrently without mutating global authentication.
-
-### 1. Check Assigned Tasks
 ```bash
+# List open translation tasks as ANONYMOUS
 python3 scripts/collab_worker.py list-tasks \
-  --role all \
-  --gh-user <login> \
-  --book-slug <slug> \
-  --workers vinhthang,1quachuoi9vang \
-  --mode sharded
-```
+  --mcp-url https://collab.vinhthang.dev/mcp \
+  --role translator
 
-### 2. Submit a Book Proposal (Role 1)
-```bash
-python3 scripts/collab_worker.py submit-book \
-  --gh-user <login> \
-  --slug <slug> \
-  --source-file path/to/source.txt \
-  --title "<Book Title>" \
-  --author "<Author Name>" \
-  --source-lang en \
-  --target-lang vi \
-  --license public-domain
-```
+# Optional: self-register a persistent agent handle
+python3 scripts/collab_worker.py register-agent \
+  --mcp-url https://collab.vinhthang.dev/mcp \
+  --handle my-translator-bot \
+  --model-info "gemini-2.5-pro"
 
-### 3. Approve Book Intake (Role 1 - Human Approver Only)
-```bash
-python3 scripts/collab_worker.py approve-intake \
-  --gh-user vinhthang \
-  --pr <pr_number>
-```
-
-### 4. Submit Chapter Translation (Role 2)
-```bash
-python3 scripts/collab_worker.py submit-translation \
-  --gh-user <login> \
-  --book-slug <slug> \
+# Fetch chapter source XML and submit translation
+python3 scripts/collab_worker.py get-chapter \
+  --mcp-url https://collab.vinhthang.dev/mcp \
+  --book-slug happy-prince \
   --chapter ch02 \
-  --translation-file path/to/translation.xml \
-  --additions-file path/to/analyze_additions.json \
-  --engine-model "Claude 3.5 Sonnet" \
-  --agent-name "claude-worker"
-```
-Passing `--additions-file` is optional. Re-running `submit-translation` on an existing `status:revise` branch updates the open PR via `gh pr edit` rather than failing on duplicate `gh pr create`.
+  --output-file ch02_source.xml
 
-### 5. Submit Peer Review (Role 3)
-```bash
-python3 scripts/collab_worker.py submit-review \
-  --gh-user <login> \
-  --pr <pr_number> \
-  --review-file path/to/review.md \
-  --event COMMENT
+python3 scripts/collab_worker.py submit-translation \
+  --mcp-url https://collab.vinhthang.dev/mcp \
+  --book-slug happy-prince \
+  --chapter ch02 \
+  --translation-file ch02_vi.xml \
+  --engine-model "gemini-2.5-pro"
 ```
 
-### 6. Coordinator Seeding & Sweep (Role 4)
+### Mode B: GitHub PR Workflow (`vinhthang/collab-books`)
+
 ```bash
-# Prepare chapter source extractions and initial book_record.json without external PR creation:
-python3 scripts/collab_seed.py --book-slug <slug> --prepare-only
-
-# Open/update the bot ch01 reference PR from a pre-translated XML file (stays in seeding until reviewed):
-python3 scripts/collab_seed.py --book-slug <slug> --ch01-translation-file path/to/ch01_translation.xml
-
-# Run a coordinator sweep (intake pre-screen, review scoring, direct merges, release backfill):
+uv sync
+cp config.example.json config.json
+python3 scripts/collab_worker.py list-tasks --role translator --gh-user vinhthang
 python3 scripts/collab_sweep.py
 ```
-
----
-
-## Repository Structure
-
-- `books/<slug>/`: Source book inputs and `manifest.json`.
-- `runs/<slug>/`: Canonical `book_record.json`, `checklist.json`, `collab_ledger.json`, chapter `source.txt`, and `translation.xml`.
-- `scripts/`: Worker CLI (`collab_worker.py`), seeding (`collab_seed.py`), sweep coordinator (`collab_sweep.py`), validation, and release compilation.
-- `skills/`: Bundled Antigravity plugin skills (`collab-translate-book`).
-- `agents/`: Bundled subagent instructions (`collab_translator`, `collab_reviewer`).
-- `docs/specs/`: Formal specifications and architecture decisions.
-- `tests/`: Automated unit and regression test suites (304 passing tests).
-- `config.example.json`: Zero-fallback configuration template (`copy` to gitignored `config.json`).
-
----
-
-## Testing
-
-```bash
-PYTHONPATH=. uv run pytest tests -q
-```
-
----
-
-## Published Translations
-
-- **[The Happy Prince and Other Tales (*Hoàng Tử Hạnh Phúc Và Các Truyện Khác*)](https://github.com/vinhthang/collab-book-translate/releases/tag/happy-prince-v1.0)** (v1.0):
-  - Author: Oscar Wilde
-  - Note: Unabridged 5-chapter public-domain translation (`en` -> `vi`, `ch01`–`ch05`, Project Gutenberg #902) translated and cross-reviewed across collaborator accounts `@vinhthang` and `@1quachuoi9vang`.
-  - Deliverables: EPUB 3, PDF, DOCX
-  - Quality scores of record: 3.50 (ch01 seed), 4.87 (ch02), 4.90 (ch03, competing PRs), 4.90 (ch04), 4.90 (ch05)
-  - Full audit trail: [`runs/happy-prince/collab_ledger.json`](runs/happy-prince/collab_ledger.json)
-- **[A Scandal in Bohemia (*Vụ Bê Bối Ở Xứ Bohemia*)](https://github.com/vinhthang/collab-book-translate/releases/tag/scandal-in-bohemia-v1.0)** (v1.0):
-  - Author: Arthur Conan Doyle
-  - Note: 3-chapter, 12-segment public-domain pilot abridgment of Arthur Conan Doyle's *A Scandal in Bohemia* (Project Gutenberg #1661).
-  - Deliverables: EPUB 3, PDF, DOCX
-  - Quality scores of record: 4.60 (ch01), 4.63 (ch02), 4.50 (ch03)
-  - Full audit trail: [`runs/scandal-in-bohemia/collab_ledger.json`](runs/scandal-in-bohemia/collab_ledger.json)
-
----
-
-## How to Contribute
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for full details on:
-- XML segment structure and byte-invariance rules.
-- 6-dimension evaluation rubric and severity markers.
-- Multi-agent coordination and direct post-review merging.

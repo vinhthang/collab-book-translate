@@ -426,7 +426,7 @@ def test_plugin_json_conforms_to_antigravity_schema_and_config_example_has_12_ke
     assert plugin_data.get("name") == "collab-book-translate"
     assert plugin_data.get("displayName") == "Collab Book Translate"
     assert isinstance(plugin_data.get("description"), str) and plugin_data["description"].strip()
-    assert plugin_data.get("version") == "2.1.0"
+    assert plugin_data.get("version") == "3.0.0"
     assert plugin_data.get("repository") == "https://github.com/vinhthang/collab-book-translate"
 
     prompts = plugin_data.get("suggestedPrompts")

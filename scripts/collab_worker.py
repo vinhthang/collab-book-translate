@@ -27,8 +27,156 @@ if str(REPO_ROOT) not in sys.path:
 from scripts.collab_config import CollabConfig, ConfigError, load_collab_config
 from scripts.collab_intake import validate_submission_pr
 from scripts.collab_pr_validate import validate_review, validate_translation_pr
+import httpx
 
 logger = logging.getLogger(__name__)
+
+
+def _get_mcp_http_client() -> Any:
+    return httpx.Client(timeout=180.0)
+
+
+def _normalize_mcp_base_url(raw_url: str) -> str:
+    clean = raw_url.strip().rstrip("/")
+    if clean.endswith("/mcp"):
+        clean = clean[:-4]
+    return clean
+
+
+def resolve_worker_mode(gh_user: Optional[str], mcp_url: Optional[str]) -> Dict[str, str]:
+    eff_mcp = (mcp_url or os.environ.get("COLLAB_MCP_URL") or "").strip()
+    eff_gh = (gh_user or "").strip()
+    if eff_mcp and not eff_gh:
+        return {"mode": "mcp", "target": _normalize_mcp_base_url(eff_mcp)}
+    if eff_gh and not mcp_url:
+        return {"mode": "github", "target": eff_gh}
+    if mcp_url:
+        return {"mode": "mcp", "target": _normalize_mcp_base_url(mcp_url)}
+    return {
+        "mode": "error",
+        "error": "Provide either --mcp-url (or COLLAB_MCP_URL) for remote MCP/REST mode or --gh-user for GitHub PR mode",
+    }
+
+
+def run_mcp_command(
+    *,
+    subcommand: str,
+    mcp_url: str,
+    agent_key: str = "",
+    role: str = "all",
+    book_slug: Optional[str] = None,
+    chapter: Optional[str] = None,
+    handle: str = "",
+    display_name: str = "",
+    model_info: str = "",
+    slug: str = "",
+    source_file: str = "",
+    title: str = "",
+    author: str = "",
+    source_lang: str = "en",
+    target_lang: str = "vi",
+    license_name: str = "public-domain",
+    license_url: str = "",
+    genre: str = "fiction",
+    translation_file: str = "",
+    additions_file: Optional[str] = None,
+    engine_model: str = "mcp-agent",
+    submission_id: Optional[str] = None,
+    revision_token: Optional[str] = None,
+    rebuttals_file: Optional[str] = None,
+    review_file: str = "",
+    output_file: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Execute worker subcommands over HTTP against collab-mcp (ANONYMOUS or AGENT_KEY)."""
+    base = _normalize_mcp_base_url(mcp_url)
+    headers: Dict[str, str] = {}
+    eff_key = (agent_key or os.environ.get("COLLAB_AGENT_KEY") or "").strip()
+    if eff_key:
+        headers["Authorization"] = f"Bearer {eff_key}"
+
+    client = _get_mcp_http_client()
+    close_after = isinstance(client, httpx.Client)
+    try:
+        if subcommand == "register-agent":
+            resp = client.post(
+                f"{base}/api/v1/agents/register",
+                headers=headers,
+                json={"handle": handle, "display_name": display_name, "model_info": model_info},
+            )
+        elif subcommand == "list-tasks":
+            params: Dict[str, str] = {"role": role}
+            if book_slug:
+                params["book_slug"] = book_slug
+            resp = client.get(f"{base}/api/v1/tasks", headers=headers, params=params)
+        elif subcommand == "get-chapter":
+            resp = client.get(
+                f"{base}/api/v1/books/{book_slug}/chapters/{chapter}",
+                headers=headers,
+            )
+        elif subcommand == "submit-book":
+            sf = Path(source_file)
+            if not sf.is_file():
+                return {"success": False, "error": f"Source file not found: {source_file}"}
+            resp = client.post(
+                f"{base}/api/v1/books/propose",
+                headers=headers,
+                json={
+                    "slug": slug,
+                    "title": title,
+                    "author": author,
+                    "source_lang": source_lang,
+                    "target_lang": target_lang,
+                    "genre": genre,
+                    "license": license_name,
+                    "license_url": license_url,
+                    "source_filename": sf.name,
+                    "source_text": sf.read_text(encoding="utf-8"),
+                },
+            )
+        elif subcommand == "submit-translation":
+            tf = Path(translation_file)
+            if not tf.is_file():
+                return {"success": False, "error": f"Translation file not found: {translation_file}"}
+            payload: Dict[str, Any] = {
+                "book_slug": book_slug,
+                "chapter_id": chapter,
+                "translation_xml": tf.read_text(encoding="utf-8"),
+                "engine_model": engine_model,
+            }
+            if additions_file:
+                payload["additions"] = json.loads(Path(additions_file).read_text(encoding="utf-8"))
+            if submission_id:
+                payload["submission_id"] = submission_id
+            if revision_token:
+                payload["revision_token"] = revision_token
+            if rebuttals_file:
+                payload["rebuttals"] = json.loads(Path(rebuttals_file).read_text(encoding="utf-8"))
+            resp = client.post(f"{base}/api/v1/submissions", headers=headers, json=payload)
+        elif subcommand == "submit-review":
+            rf = Path(review_file)
+            if not rf.is_file():
+                return {"success": False, "error": f"Review file not found: {review_file}"}
+            resp = client.post(
+                f"{base}/api/v1/submissions/{submission_id}/reviews",
+                headers=headers,
+                json={"body_md": rf.read_text(encoding="utf-8")},
+            )
+        else:
+            return {"success": False, "error": f"Unsupported MCP subcommand: {subcommand}"}
+
+        data = resp.json() if resp.content else {}
+        if resp.status_code >= 400:
+            return {
+                "success": False,
+                "status_code": resp.status_code,
+                **data,
+            }
+        if subcommand == "get-chapter" and output_file and "source_xml" in data:
+            Path(output_file).write_text(str(data["source_xml"]), encoding="utf-8")
+        return {"success": True, **data}
+    finally:
+        if close_after:
+            client.close()
 
 
 def _load_optional_config(config_path: Optional[str] = None) -> Optional[CollabConfig]:
@@ -707,18 +855,37 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Multi-account, role-aware worker CLI (collab-book-translate).")
     subparsers = parser.add_subparsers(dest="subcommand", required=True)
 
+    # register-agent (MCP mode)
+    p_reg = subparsers.add_parser("register-agent", help="Self-serve agent handle registration on collab-mcp.")
+    p_reg.add_argument("--mcp-url", default="")
+    p_reg.add_argument("--handle", required=True)
+    p_reg.add_argument("--display-name", default="")
+    p_reg.add_argument("--model-info", default="")
+
+    # get-chapter (MCP mode)
+    p_getc = subparsers.add_parser("get-chapter", help="Fetch chapter source XML and book_record from collab-mcp.")
+    p_getc.add_argument("--mcp-url", default="")
+    p_getc.add_argument("--agent-key", default="")
+    p_getc.add_argument("--book-slug", required=True)
+    p_getc.add_argument("--chapter", required=True)
+    p_getc.add_argument("--output-file")
+
     # list-tasks
     p_list = subparsers.add_parser("list-tasks", help="List tasks filtered by role.")
     p_list.add_argument("--role", choices=["translator", "reviewer", "all"], default="all")
-    p_list.add_argument("--gh-user", required=True)
+    p_list.add_argument("--gh-user")
+    p_list.add_argument("--mcp-url", default="")
+    p_list.add_argument("--agent-key", default="")
     p_list.add_argument("--book-slug")
     p_list.add_argument("--workers", help="Comma-separated logins for sharding.")
     p_list.add_argument("--mode", choices=["sharded", "compete"], default="sharded")
     p_list.add_argument("--config")
 
     # submit-book
-    p_book = subparsers.add_parser("submit-book", help="Propose a book intake PR.")
-    p_book.add_argument("--gh-user", required=True)
+    p_book = subparsers.add_parser("submit-book", help="Propose a book intake PR or MCP proposal.")
+    p_book.add_argument("--gh-user")
+    p_book.add_argument("--mcp-url", default="")
+    p_book.add_argument("--agent-key", default="")
     p_book.add_argument("--slug", required=True)
     p_book.add_argument("--source-file", required=True)
     p_book.add_argument("--title", required=True)
@@ -738,26 +905,90 @@ def main() -> None:
     p_app.add_argument("--config")
 
     # submit-translation
-    p_trans = subparsers.add_parser("submit-translation", help="Submit chapter translation PR.")
-    p_trans.add_argument("--gh-user", required=True)
+    p_trans = subparsers.add_parser("submit-translation", help="Submit chapter translation via MCP or PR.")
+    p_trans.add_argument("--gh-user")
+    p_trans.add_argument("--mcp-url", default="")
+    p_trans.add_argument("--agent-key", default="")
     p_trans.add_argument("--book-slug", required=True)
     p_trans.add_argument("--chapter", required=True)
     p_trans.add_argument("--translation-file", required=True)
     p_trans.add_argument("--additions-file")
     p_trans.add_argument("--engine-model", default="human")
     p_trans.add_argument("--agent-name")
+    p_trans.add_argument("--submission-id")
+    p_trans.add_argument("--revision-token")
+    p_trans.add_argument("--rebuttals-file")
     p_trans.add_argument("--claim", action="store_true")
     p_trans.add_argument("--config")
 
     # submit-review
-    p_rev = subparsers.add_parser("submit-review", help="Submit peer review.")
-    p_rev.add_argument("--gh-user", required=True)
-    p_rev.add_argument("--pr", type=int, required=True)
+    p_rev = subparsers.add_parser("submit-review", help="Submit peer review via MCP or PR.")
+    p_rev.add_argument("--gh-user")
+    p_rev.add_argument("--mcp-url", default="")
+    p_rev.add_argument("--agent-key", default="")
+    p_rev.add_argument("--pr", type=int)
+    p_rev.add_argument("--submission-id")
     p_rev.add_argument("--review-file", required=True)
     p_rev.add_argument("--event", choices=["COMMENT", "APPROVE", "REQUEST_CHANGES"], default="COMMENT")
     p_rev.add_argument("--config")
 
     args = parser.parse_args()
+
+    if args.subcommand in ("register-agent", "get-chapter"):
+        mode_info = resolve_worker_mode(None, args.mcp_url)
+        if mode_info["mode"] != "mcp":
+            print(json.dumps({"success": False, "error": mode_info["error"]}, indent=2))
+            sys.exit(1)
+        res = run_mcp_command(
+            subcommand=args.subcommand,
+            mcp_url=mode_info["target"],
+            agent_key=getattr(args, "agent_key", ""),
+            book_slug=getattr(args, "book_slug", None),
+            chapter=getattr(args, "chapter", None),
+            handle=getattr(args, "handle", ""),
+            display_name=getattr(args, "display_name", ""),
+            model_info=getattr(args, "model_info", ""),
+            output_file=getattr(args, "output_file", None),
+        )
+        print(json.dumps(res, indent=2, ensure_ascii=False))
+        if not res.get("success"):
+            sys.exit(1)
+        return
+
+    if args.subcommand != "approve-intake":
+        mode_info = resolve_worker_mode(getattr(args, "gh_user", None), getattr(args, "mcp_url", None))
+        if mode_info["mode"] == "error":
+            print(json.dumps({"success": False, "error": mode_info["error"]}, indent=2))
+            sys.exit(1)
+        if mode_info["mode"] == "mcp":
+            res = run_mcp_command(
+                subcommand=args.subcommand,
+                mcp_url=mode_info["target"],
+                agent_key=getattr(args, "agent_key", ""),
+                role=getattr(args, "role", "all"),
+                book_slug=getattr(args, "book_slug", None),
+                chapter=getattr(args, "chapter", None),
+                slug=getattr(args, "slug", ""),
+                source_file=getattr(args, "source_file", ""),
+                title=getattr(args, "title", ""),
+                author=getattr(args, "author", ""),
+                source_lang=getattr(args, "source_lang", "en"),
+                target_lang=getattr(args, "target_lang", "vi"),
+                license_name=getattr(args, "license", "public-domain"),
+                license_url=getattr(args, "license_url", ""),
+                genre=getattr(args, "genre", "fiction"),
+                translation_file=getattr(args, "translation_file", ""),
+                additions_file=getattr(args, "additions_file", None),
+                engine_model=getattr(args, "engine_model", "mcp-agent"),
+                submission_id=getattr(args, "submission_id", None),
+                revision_token=getattr(args, "revision_token", None),
+                rebuttals_file=getattr(args, "rebuttals_file", None),
+                review_file=getattr(args, "review_file", ""),
+            )
+            print(json.dumps(res, indent=2, ensure_ascii=False))
+            if not res.get("success"):
+                sys.exit(1)
+            return
 
     if args.subcommand == "list-tasks":
         workers = [w.strip() for w in args.workers.split(",")] if args.workers else None

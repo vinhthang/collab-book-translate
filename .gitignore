@@ -4,6 +4,8 @@ __pycache__/
 .pytest_cache/
 .DS_Store
 /config.json
+/books/
+/runs/
 .worktrees/
 runs/**/*.epub
 runs/**/*.pdf

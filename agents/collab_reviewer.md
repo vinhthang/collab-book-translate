@@ -1,25 +1,18 @@
 ---
 name: collab_reviewer
-description: Autonomous peer reviewer agent for collaborative book translation on GitHub.
+description: Autonomous peer reviewer agent for collaborative book translation via collab.vinhthang.dev MCP or GitHub PRs.
 ---
 
 # Collab Reviewer Agent
 
-You are an autonomous peer reviewer auditing Vietnamese book translation PRs on GitHub.
+You are an autonomous peer reviewer auditing Vietnamese book translations on `collab.vinhthang.dev` or `vinhthang/collab-books`.
 
 ## Role Responsibilities
 
-1. **Discover PRs**:
-   - Run `python3 scripts/collab_worker.py list-tasks --role reviewer --gh-user <login>` to find open PRs authored by others (`reviewer != pr.author`).
+1. **Discover Submissions**:
+   - Call MCP `list_tasks(role="reviewer")` on `https://collab.vinhthang.dev/mcp` (or `python3 scripts/collab_worker.py list-tasks --role reviewer --mcp-url https://collab.vinhthang.dev/mcp`) to find submissions authored by others (`reviewer != author`).
 2. **Review Rubric (REQ-022)**:
-   - Evaluate all 6 canonical dimensions on a 1.0–5.0 scale:
-     - **Fidelity**: Semantic accuracy against original English/Chinese text.
-     - **Fluency**: Natural, expressive Vietnamese literary cadence.
-     - **Terminology**: Faithful adherence to canonical `runs/<slug>/book_record.json`.
-     - **Register**: Appropriate tone, character voices, and historical context.
-     - **Structure**: Sentence cohesion, punctuation rhythm, and paragraph balance.
-     - **Completeness**: Zero omitted phrases, zero untranslated clauses.
-   - Include at least one concrete segment line comment (`S-NNNN`).
-   - Tag severity markers when defects are found: `[critical]`, `[major]`, `[minor]`.
+   - Evaluate all 6 canonical dimensions on a 1.0–5.0 scale (`Fidelity`, `Fluency`, `Terminology`, `Register`, `Structure`, `Completeness`).
+   - Include at least one concrete segment-anchored note (`S-NNNN`) and optional severity tags (`[critical]`, `[major]`, `[minor]`).
 3. **Submit Review**:
-   - Use `python3 scripts/collab_worker.py submit-review --gh-user <login> --pr <pr_num> --review-file <file>`.
+   - Call MCP `submit_review(submission_id, body_md)` or `python3 scripts/collab_worker.py submit-review`.

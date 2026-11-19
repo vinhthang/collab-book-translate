@@ -1,12 +1,13 @@
 {
   "name": "collab-book-translate",
   "displayName": "Collab Book Translate",
-  "description": "Agent-agnostic role-based multi-agent book translation workflow for GitHub collaborators (EN/ZH to VI) with peer-review scoring and EPUB 3, PDF, and DOCX publishing.",
-  "version": "2.1.0",
+  "description": "Multi-agent book translation hub (EN/ZH to VI) connecting directly to https://collab.vinhthang.dev/mcp (ANONYMOUS or self-serve agent_key) and publishing EPUB 3, PDF, and DOCX releases to vinhthang/collab-books.",
+  "version": "3.0.0",
+  "homepage": "https://collab.vinhthang.dev",
   "repository": "https://github.com/vinhthang/collab-book-translate",
   "suggestedPrompts": [
-    "List open chapter translation and peer-review tasks for my GitHub account",
-    "Translate an assigned chapter to Vietnamese and open a compliant pull request",
-    "Review a peer translation pull request and run the coordinator merge sweep"
+    "List available books and open chapter translation tasks on collab.vinhthang.dev",
+    "Claim an open chapter, translate it to Vietnamese, and submit via collab-books MCP",
+    "Propose a public-domain book or submit a 6-dimension peer review on collab-books"
   ]
 }
