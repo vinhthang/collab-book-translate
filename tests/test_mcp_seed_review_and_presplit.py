@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import subprocess
+from unittest.mock import patch
+import httpx
 from starlette.testclient import TestClient
 
 from scripts.collab_ledger import verify_ledger_integrity
@@ -384,5 +387,139 @@ def test_ac_051_presplit_validation_boundaries_and_security_quarantine(tmp_path:
         )
         assert r_inj.status_code == 201
         assert r_inj.json()["book"]["status"] == "flagged_security"
+
+    store.close()
+
+
+def test_git_sync_scopes_staging_to_target_slug_and_reject_cleans_untracked_dirs(tmp_path: Path):
+    cfg, store, rs_client, svc = _build_env(tmp_path)
+    app = create_app(cfg=cfg, service=svc)
+    sso_hdr = {"x-auth-request-email": "admin@vinhthang.dev"}
+
+    src_xml = '<segment id="S-0001" type="paragraph">\n<original>\nQuiet dawn.\n</original>\n</segment>\n'
+    tr_xml = (
+        '<segment id="S-0001" type="paragraph">\n<original>\nQuiet dawn.\n</original>\n'
+        '<translate>\nBình minh yên ả trên triền đồi.\n</translate>\n</segment>\n'
+    )
+
+    with TestClient(app) as client:
+        # 1. Propose book-reject and queue seed to review (leaves books/book-reject & runs/book-reject untracked on disk)
+        p_rej = client.post(
+            "/api/v1/books/propose",
+            json={
+                "slug": "book-reject",
+                "title": "Book To Reject",
+                "author": "Tester",
+                "source_lang": "en",
+                "target_lang": "vi",
+                "license": "public-domain",
+                "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+                "source_filename": "rej.md",
+                "chapters": [{"chapter_id": "ch01", "title": "Ch 1", "source_text": "Hello."}],
+            },
+        )
+        assert p_rej.status_code == 201
+        rs_client.next_translate_result = {
+            "translationXml": (
+                '<segment id="S-0001" type="paragraph">\n<original>\nHello.\n</original>\n'
+                '<translate>\nXin chào thế giới.\n</translate>\n</segment>\n'
+            ),
+            "additions": {"proposals": []},
+            "engineUsed": "gemini",
+        }
+        assert client.post(
+            "/admin/books/book-reject/approve",
+            headers=sso_hdr,
+            json={"auto_seed": True, "hold_for_review": True},
+        ).status_code == 200
+        assert (cfg.books_repo_dir / "books" / "book-reject").is_dir()
+        assert (cfg.books_repo_dir / "runs" / "book-reject").is_dir()
+
+        # 2. Propose and accept a chapter on book-live -> git commit MUST only stage book-live, NOT book-reject!
+        store.upsert_book(
+            slug="book-live",
+            title="Live Book",
+            author="Author",
+            source_lang="en",
+            target_lang="vi",
+            genre="fiction",
+            license_id="public-domain",
+            license_url="https://example.org",
+            status="active",
+            glossary_sha="",
+            book_record={},
+            manifest={"slug": "book-live", "source_lang": "en", "target_lang": "vi"},
+            proposed_by="admin",
+        )
+        store.upsert_chapter(
+            book_slug="book-live",
+            chapter_id="ch01",
+            chapter_num=1,
+            title="Chapter 1",
+            source_xml=src_xml,
+            status="open",
+        )
+        assert client.post(
+            "/api/v1/submissions",
+            json={
+                "book_slug": "book-live",
+                "chapter_id": "ch01",
+                "translation_xml": tr_xml,
+            },
+        ).status_code == 200
+
+        tracked = subprocess.run(
+            ["git", "-C", str(cfg.books_repo_dir), "ls-files"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.splitlines()
+        assert any(p.startswith("runs/book-live/") for p in tracked)
+        assert not any("book-reject" in p for p in tracked)
+        cl = json.loads((cfg.books_repo_dir / "runs" / "book-live" / "checklist.json").read_text(encoding="utf-8"))
+        assert cl["chapters"][0]["status"] == "done"
+
+        # Test _upload_github_release fallback when release already exists (422 -> GET existing)
+        ep = tmp_path / "demo.epub"
+        ep.write_bytes(b"epub-bytes")
+        req_log: list[tuple[str, str]] = []
+
+        def _handler(request: httpx.Request) -> httpx.Response:
+            req_log.append((request.method, str(request.url)))
+            if request.method == "POST" and str(request.url).endswith("/releases"):
+                return httpx.Response(422, json={"message": "already_exists"})
+            if request.method == "GET" and "/releases/tags/" in str(request.url):
+                return httpx.Response(
+                    200,
+                    json={
+                        "upload_url": "https://uploads.github.com/assets{?name}",
+                        "html_url": "https://github.com/owner/collab-books/releases/tag/v1.0",
+                    },
+                )
+            return httpx.Response(201, json={"state": "uploaded"})
+
+        transport = httpx.MockTransport(_handler)
+        real_client_cls = httpx.Client
+        with patch("scripts.mcp_server.git_sync.httpx.Client", lambda **kw: real_client_cls(transport=transport, **kw)):
+            cfg_gh = cfg.__class__(**{**cfg.__dict__, "github_token": "tok-test"})
+            sync_gh = svc.git_sync.__class__(cfg_gh, publish_github_release=True)
+            url_out = sync_gh._upload_github_release(
+                slug="book-live",
+                title="Live Book",
+                release_tag="book-live-v1.0",
+                files=[ep],
+            )
+        assert url_out.endswith("/releases/tag/v1.0")
+        assert any(m == "GET" and "/releases/tags/book-live-v1.0" in u for m, u in req_log)
+
+        # 3. Reject book-reject -> removes untracked books/book-reject and runs/book-reject from disk
+        rej_res = client.post(
+            "/admin/books/book-reject/reject",
+            headers=sso_hdr,
+            json={"reason": "Clean up"},
+        )
+        assert rej_res.status_code == 200
+        assert not (cfg.books_repo_dir / "books" / "book-reject").exists()
+        assert not (cfg.books_repo_dir / "runs" / "book-reject").exists()
 
     store.close()

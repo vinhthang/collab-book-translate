@@ -6,6 +6,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -241,11 +242,14 @@ class CollabBooksGitSync:
             if chapter_id not in existing_chapters:
                 append_ledger_entry(ledger_path, slug, ledger_entry)
 
-            add_paths = [p for p in ("books", "runs") if (repo_dir / p).exists()]
+            add_paths = [
+                p for p in (f"books/{slug}", f"runs/{slug}")
+                if (repo_dir / p).exists()
+            ]
             if add_paths:
-                self._run_git(["add"] + add_paths)
-            status_out = self._run_git(["status", "--porcelain"])
-            if status_out:
+                self._run_git(["add", "--"] + add_paths)
+            staged_out = self._run_git(["diff", "--cached", "--name-only"])
+            if staged_out:
                 self._run_git(
                     [
                         "-c",
@@ -260,6 +264,26 @@ class CollabBooksGitSync:
                 if self._has_origin():
                     self._run_git(["push", "origin", "main"])
             return self._current_head_sha()
+
+    def cleanup_untracked_book_files(self, *, slug: str) -> None:
+        """Remove local untracked books/<slug> and runs/<slug> directories on rejection."""
+        if not slug or "/" in slug or "\\" in slug or slug in {".", ".."}:
+            return
+        with self._lock:
+            repo_dir = self._cfg.books_repo_dir
+            if not repo_dir.is_dir():
+                return
+            tracked_paths: list[str] = []
+            if (repo_dir / ".git").exists():
+                raw = self._run_git(["ls-files", "--", f"books/{slug}", f"runs/{slug}"])
+                tracked_paths = [line for line in raw.splitlines() if line.strip()]
+            tracked_set = set(tracked_paths)
+            for root_name in ("books", "runs"):
+                if any(p.startswith(f"{root_name}/{slug}/") for p in tracked_set):
+                    continue
+                target = repo_dir / root_name / slug
+                if target.is_dir():
+                    shutil.rmtree(target)
 
     def compile_and_publish_release(
         self,

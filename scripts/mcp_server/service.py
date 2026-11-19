@@ -1209,6 +1209,7 @@ class CollabMcpService:
                 status_code=409,
             )
         updated = self.store.set_book_status(slug=book_slug, status="rejected")
+        self.git_sync.cleanup_untracked_book_files(slug=book_slug)
         out = dict(updated)
         out.pop("source_text", None)
         out.pop("proposed_chapters", None)
