@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import contextvars
+import functools
 import html
 import json
 import logging
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
+import anyio
 from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.requests import Request
@@ -274,6 +276,56 @@ document.getElementById('btn-global-fallback')?.addEventListener('click', async 
   }
 });
 
+async def pollSeedCompletion(slug, holdForReview, msgEl, btn) {
+  for (let i = 0; i < 150; i++) {
+    await new Promise(r => setTimeout(r, 4000));
+    try {
+      const r = await fetch('/admin/api/books/' + encodeURIComponent(slug));
+      const d = await r.json();
+      if (!r.ok) {
+        if (msgEl) {
+          msgEl.style.color = '#fca5a5';
+          msgEl.textContent = 'Error polling seed status: ' + (d.error || r.status);
+        }
+        btn.disabled = false;
+        return;
+      }
+      if (!d.seeding_in_progress) {
+        if (d.status === 'seed_failed') {
+          if (msgEl) {
+            msgEl.style.color = '#fca5a5';
+            msgEl.textContent = 'Seed failed: ' + (d.last_seed_error || 'check server logs');
+          }
+          btn.disabled = false;
+          return;
+        }
+        if (msgEl) {
+          msgEl.style.color = '#6ee7b7';
+          msgEl.textContent = holdForReview
+            ? 'Seed draft queued in Submissions for peer/admin review! Reloading...'
+            : 'Approved & seeded ch01. Reloading...';
+        }
+        setTimeout(() => location.reload(), 700);
+        return;
+      }
+      if (msgEl) {
+        msgEl.style.color = '#7dd3fc';
+        msgEl.textContent = 'Background ch01 seed running via review.vinhthang.dev (' + ((i + 1) * 4) + 's elapsed)...';
+      }
+    } catch (err) {
+      if (msgEl) {
+        msgEl.style.color = '#fcd34d';
+        msgEl.textContent = 'Polling retry (' + String(err) + ')...';
+      }
+    }
+  }
+  if (msgEl) {
+    msgEl.style.color = '#fcd34d';
+    msgEl.textContent = 'Still seeding in background after 10m. Refresh /admin to check status.';
+  }
+  btn.disabled = false;
+}
+
 document.querySelectorAll('.js-approve-seed-review, .js-approve-seed').forEach(btn => {
   btn.addEventListener('click', async () => {
     const slug = btn.dataset.slug;
@@ -282,20 +334,28 @@ document.querySelectorAll('.js-approve-seed-review, .js-approve-seed').forEach(b
     btn.disabled = true;
     const out = await postJson(
       '/admin/books/' + encodeURIComponent(slug) + '/approve',
-      { auto_seed: true, hold_for_review: holdForReview },
+      { auto_seed: true, hold_for_review: holdForReview, background: true },
       msg,
       holdForReview
-        ? 'Generating ch01 seed via review.vinhthang.dev and queuing for peer/admin review (~30-90s)...'
-        : 'Approving & seeding ch01 via review.vinhthang.dev (~30-90s)...'
+        ? 'Starting background ch01 seed via review.vinhthang.dev into Review Queue...'
+        : 'Starting background ch01 seed via review.vinhthang.dev...'
     );
-    btn.disabled = false;
     if (out.ok) {
+      if (out.data.book && out.data.book.seeding_started) {
+        if (msg) {
+          msg.style.color = '#7dd3fc';
+          msg.textContent = 'Background ch01 seed started (~60-150s). Polling status...';
+        }
+        await pollSeedCompletion(slug, holdForReview, msg, btn);
+        return;
+      }
       msg.style.color = '#6ee7b7';
       msg.textContent = holdForReview
         ? 'Seed draft queued in Submissions for peer/admin review! Reloading...'
         : 'Approved & seeded ch01. Reloading...';
       setTimeout(() => location.reload(), 700);
     }
+    btn.disabled = false;
   });
 });
 
@@ -326,16 +386,24 @@ document.querySelectorAll('.js-retry-seed').forEach(btn => {
     btn.disabled = true;
     const out = await postJson(
       '/admin/books/' + encodeURIComponent(slug) + '/seed',
-      { hold_for_review: true },
+      { hold_for_review: true, background: true },
       msg,
-      'Generating ch01 seed via review.vinhthang.dev into Review Queue (~30-90s)...'
+      'Restarting background ch01 seed into Review Queue...'
     );
-    btn.disabled = false;
     if (out.ok) {
+      if (out.data.book && out.data.book.seeding_started) {
+        if (msg) {
+          msg.style.color = '#7dd3fc';
+          msg.textContent = 'Background ch01 seed started (~60-150s). Polling status...';
+        }
+        await pollSeedCompletion(slug, true, msg, btn);
+        return;
+      }
       msg.style.color = '#6ee7b7';
       msg.textContent = 'Seed queued for peer/admin review! Reloading...';
       setTimeout(() => location.reload(), 700);
     }
+    btn.disabled = false;
   });
 });
 
@@ -891,6 +959,11 @@ async def _parse_json_body(request: Request) -> dict[str, Any]:
     return parsed
 
 
+async def _run_sync(fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
+    """Offload synchronous DB, git, or review-server I/O from the Uvicorn event loop."""
+    return await anyio.to_thread.run_sync(functools.partial(fn, *args, **kwargs))
+
+
 def _error_response(exc: Exception) -> JSONResponse:
     if isinstance(exc, AuthError):
         return JSONResponse({"error": str(exc)}, status_code=exc.status_code)
@@ -1187,14 +1260,16 @@ def create_app(
         book_slug: str,
         auto_seed: bool = True,
         hold_for_review: bool = False,
+        background: bool = False,
         admin_token: str = "",
     ) -> dict[str, Any]:
-        """ADMIN: Approve a proposed book, extract chapters, and auto-seed ch01 (auto_seed=True; pass hold_for_review=True to queue seed for peer/admin review) or open ch01 directly for translating agents (auto_seed=False)."""
+        """ADMIN: Approve a proposed book, extract chapters, and auto-seed ch01 (auto_seed=True; pass hold_for_review=True to queue seed for peer/admin review, background=True to run asynchronously) or open ch01 directly for translating agents (auto_seed=False)."""
         return eff_service.approve_book_intake(
             _ctx(admin_token=admin_token or None),
             book_slug=book_slug,
             auto_seed=auto_seed,
             hold_for_review=hold_for_review,
+            background=background,
         )
 
     @mcp.tool()
@@ -1229,13 +1304,15 @@ def create_app(
     def seed_book(
         book_slug: str,
         hold_for_review: bool = False,
+        background: bool = False,
         admin_token: str = "",
     ) -> dict[str, Any]:
-        """ADMIN: Seed ch01 via review.vinhthang.dev /api/v1/translate + TRANSLATION_REVIEW (set hold_for_review=True to queue for peer/admin review)."""
+        """ADMIN: Seed ch01 via review.vinhthang.dev /api/v1/translate + TRANSLATION_REVIEW (set hold_for_review=True to queue for peer/admin review, background=True to run asynchronously)."""
         return eff_service.seed_book(
             _ctx(admin_token=admin_token or None),
             book_slug=book_slug,
             hold_for_review=hold_for_review,
+            background=background,
         )
 
     @mcp.tool()
@@ -1271,22 +1348,28 @@ def create_app(
 
     @mcp.custom_route("/", methods=["GET"])
     async def bookshelf_index(request: Request) -> Response:
-        try:
+        def _work() -> str:
             ctx = _req_ctx(request)
             books = eff_service.list_books(ctx, include_pending=False)
-            return HTMLResponse(_render_bookshelf_html(eff_cfg, books))
+            return _render_bookshelf_html(eff_cfg, books)
+
+        try:
+            return HTMLResponse(await _run_sync(_work))
         except Exception as exc:
             return _error_response(exc)
 
     @mcp.custom_route("/admin", methods=["GET"])
     @mcp.custom_route("/admin/", methods=["GET"])
     async def admin_dashboard(request: Request) -> Response:
-        try:
+        def _work() -> str:
             ctx = _req_ctx(request)
             agents = eff_service.list_agents(ctx)
             books = eff_service.list_books(ctx, include_pending=True)
             submissions = eff_service.list_admin_submissions(ctx)
-            return HTMLResponse(_render_admin_html(eff_cfg, books, agents, submissions))
+            return _render_admin_html(eff_cfg, books, agents, submissions)
+
+        try:
+            return HTMLResponse(await _run_sync(_work))
         except Exception as exc:
             return _error_response(exc)
 
@@ -1309,24 +1392,30 @@ def create_app(
     @mcp.custom_route("/api/v1/agents/register", methods=["POST"])
     async def api_register_agent(request: Request) -> Response:
         try:
-            ctx = _req_ctx(request)
             body = await _parse_json_body(request)
-            out = eff_service.register_agent(
-                ctx,
-                handle=str(body.get("handle") or ""),
-                display_name=str(body.get("display_name") or ""),
-                model_info=str(body.get("model_info") or ""),
-            )
-            return JSONResponse(out, status_code=201)
+
+            def _work() -> dict[str, Any]:
+                ctx = _req_ctx(request)
+                return eff_service.register_agent(
+                    ctx,
+                    handle=str(body.get("handle") or ""),
+                    display_name=str(body.get("display_name") or ""),
+                    model_info=str(body.get("model_info") or ""),
+                )
+
+            return JSONResponse(await _run_sync(_work), status_code=201)
         except Exception as exc:
             return _error_response(exc)
 
     @mcp.custom_route("/api/v1/books", methods=["GET"])
     async def api_list_books(request: Request) -> Response:
-        try:
+        def _work() -> dict[str, Any]:
             ctx = _req_ctx(request)
             inc = request.query_params.get("include_pending", "").lower() == "true"
-            return JSONResponse({"books": eff_service.list_books(ctx, include_pending=inc)})
+            return {"books": eff_service.list_books(ctx, include_pending=inc)}
+
+        try:
+            return JSONResponse(await _run_sync(_work))
         except Exception as exc:
             return _error_response(exc)
 
@@ -1334,46 +1423,54 @@ def create_app(
     async def api_propose_book(request: Request) -> Response:
         try:
             body = await _parse_json_body(request)
-            ctx = _req_ctx(request, agent_key=body.get("agent_key"))
-            book = eff_service.submit_book_proposal(
-                ctx,
-                slug=str(body.get("slug") or ""),
-                title=str(body.get("title") or ""),
-                author=str(body.get("author") or ""),
-                source_lang=str(body.get("source_lang") or "en"),
-                target_lang=str(body.get("target_lang") or "vi"),
-                genre=str(body.get("genre") or "fiction"),
-                license_id=str(body.get("license") or body.get("license_id") or ""),
-                license_url=str(body.get("license_url") or ""),
-                source_filename=str(body.get("source_filename") or "source.md"),
-                source_text=str(body.get("source_text") or ""),
-                chapters=body.get("chapters"),
-                book_record=body.get("book_record"),
-            )
-            return JSONResponse({"book": book}, status_code=201)
+
+            def _work() -> dict[str, Any]:
+                ctx = _req_ctx(request, agent_key=body.get("agent_key"))
+                return eff_service.submit_book_proposal(
+                    ctx,
+                    slug=str(body.get("slug") or ""),
+                    title=str(body.get("title") or ""),
+                    author=str(body.get("author") or ""),
+                    source_lang=str(body.get("source_lang") or "en"),
+                    target_lang=str(body.get("target_lang") or "vi"),
+                    genre=str(body.get("genre") or "fiction"),
+                    license_id=str(body.get("license") or body.get("license_id") or ""),
+                    license_url=str(body.get("license_url") or ""),
+                    source_filename=str(body.get("source_filename") or "source.md"),
+                    source_text=str(body.get("source_text") or ""),
+                    chapters=body.get("chapters"),
+                    book_record=body.get("book_record"),
+                )
+
+            return JSONResponse({"book": await _run_sync(_work)}, status_code=201)
         except Exception as exc:
             return _error_response(exc)
 
     @mcp.custom_route("/api/v1/books/{slug}", methods=["GET"])
+    @mcp.custom_route("/admin/api/books/{slug}", methods=["GET"])
     async def api_get_book(request: Request) -> Response:
-        try:
+        def _work() -> dict[str, Any]:
             ctx = _req_ctx(request)
             slug = str(request.path_params["slug"])
-            return JSONResponse(eff_service.get_book(ctx, book_slug=slug))
+            return eff_service.get_book(ctx, book_slug=slug)
+
+        try:
+            return JSONResponse(await _run_sync(_work))
         except Exception as exc:
             return _error_response(exc)
 
     @mcp.custom_route("/api/v1/books/{slug}/chapters/{chapter_id}", methods=["GET"])
     async def api_get_chapter(request: Request) -> Response:
-        try:
+        def _work() -> dict[str, Any]:
             ctx = _req_ctx(request)
-            return JSONResponse(
-                eff_service.get_chapter(
-                    ctx,
-                    book_slug=str(request.path_params["slug"]),
-                    chapter_id=str(request.path_params["chapter_id"]),
-                )
+            return eff_service.get_chapter(
+                ctx,
+                book_slug=str(request.path_params["slug"]),
+                chapter_id=str(request.path_params["chapter_id"]),
             )
+
+        try:
+            return JSONResponse(await _run_sync(_work))
         except Exception as exc:
             return _error_response(exc)
 
@@ -1381,24 +1478,29 @@ def create_app(
     async def api_claim_chapter(request: Request) -> Response:
         try:
             body = await _parse_json_body(request)
-            ctx = _req_ctx(request, agent_key=body.get("agent_key"))
-            return JSONResponse(
-                eff_service.claim_chapter(
+
+            def _work() -> dict[str, Any]:
+                ctx = _req_ctx(request, agent_key=body.get("agent_key"))
+                return eff_service.claim_chapter(
                     ctx,
                     book_slug=str(request.path_params["slug"]),
                     chapter_id=str(request.path_params["chapter_id"]),
                 )
-            )
+
+            return JSONResponse(await _run_sync(_work))
         except Exception as exc:
             return _error_response(exc)
 
     @mcp.custom_route("/api/v1/tasks", methods=["GET"])
     async def api_list_tasks(request: Request) -> Response:
-        try:
+        def _work() -> dict[str, Any]:
             ctx = _req_ctx(request)
             role = request.query_params.get("role", "all")
             slug = request.query_params.get("book_slug") or None
-            return JSONResponse(eff_service.list_tasks(ctx, role=role, book_slug=slug))
+            return eff_service.list_tasks(ctx, role=role, book_slug=slug)
+
+        try:
+            return JSONResponse(await _run_sync(_work))
         except Exception as exc:
             return _error_response(exc)
 
@@ -1406,29 +1508,36 @@ def create_app(
     async def api_submit_translation(request: Request) -> Response:
         try:
             body = await _parse_json_body(request)
-            ctx = _req_ctx(request, agent_key=body.get("agent_key"))
-            code, out = eff_service.submit_translation(
-                ctx,
-                book_slug=str(body.get("book_slug") or ""),
-                chapter_id=str(body.get("chapter_id") or ""),
-                translation_xml=str(body.get("translation_xml") or ""),
-                engine_model=str(body.get("engine_model") or "mcp-agent"),
-                additions=body.get("additions"),
-                submission_id=body.get("submission_id"),
-                revision_token=body.get("revision_token"),
-                rebuttals=body.get("rebuttals"),
-                hold_for_review=bool(body.get("hold_for_review", False)),
-            )
+
+            def _work() -> tuple[int, dict[str, Any]]:
+                ctx = _req_ctx(request, agent_key=body.get("agent_key"))
+                return eff_service.submit_translation(
+                    ctx,
+                    book_slug=str(body.get("book_slug") or ""),
+                    chapter_id=str(body.get("chapter_id") or ""),
+                    translation_xml=str(body.get("translation_xml") or ""),
+                    engine_model=str(body.get("engine_model") or "mcp-agent"),
+                    additions=body.get("additions"),
+                    submission_id=body.get("submission_id"),
+                    revision_token=body.get("revision_token"),
+                    rebuttals=body.get("rebuttals"),
+                    hold_for_review=bool(body.get("hold_for_review", False)),
+                )
+
+            code, out = await _run_sync(_work)
             return JSONResponse(out, status_code=code)
         except Exception as exc:
             return _error_response(exc)
 
     @mcp.custom_route("/api/v1/submissions/{submission_id}", methods=["GET"])
     async def api_get_submission(request: Request) -> Response:
-        try:
+        def _work() -> dict[str, Any]:
             ctx = _req_ctx(request)
             sub_id = str(request.path_params["submission_id"])
-            return JSONResponse(eff_service.get_submission_status(ctx, submission_id=sub_id))
+            return eff_service.get_submission_status(ctx, submission_id=sub_id)
+
+        try:
+            return JSONResponse(await _run_sync(_work))
         except Exception as exc:
             return _error_response(exc)
 
@@ -1436,23 +1545,29 @@ def create_app(
     async def api_submit_review(request: Request) -> Response:
         try:
             body = await _parse_json_body(request)
-            ctx = _req_ctx(request, agent_key=body.get("agent_key"))
-            sub_id = str(request.path_params["submission_id"])
-            rev = eff_service.submit_review(
-                ctx,
-                submission_id=sub_id,
-                body_md=str(body.get("body_md") or ""),
-            )
-            return JSONResponse({"review": rev}, status_code=201)
+
+            def _work() -> dict[str, Any]:
+                ctx = _req_ctx(request, agent_key=body.get("agent_key"))
+                sub_id = str(request.path_params["submission_id"])
+                return eff_service.submit_review(
+                    ctx,
+                    submission_id=sub_id,
+                    body_md=str(body.get("body_md") or ""),
+                )
+
+            return JSONResponse({"review": await _run_sync(_work)}, status_code=201)
         except Exception as exc:
             return _error_response(exc)
 
     @mcp.custom_route("/api/v1/admin/agents", methods=["GET"])
     @mcp.custom_route("/admin/api/agents", methods=["GET"])
     async def api_admin_list_agents(request: Request) -> Response:
-        try:
+        def _work() -> list[dict[str, Any]]:
             ctx = _req_ctx(request)
-            return JSONResponse({"agents": eff_service.list_agents(ctx)})
+            return eff_service.list_agents(ctx)
+
+        try:
+            return JSONResponse({"agents": await _run_sync(_work)})
         except Exception as exc:
             return _error_response(exc)
 
@@ -1461,14 +1576,17 @@ def create_app(
     async def api_admin_mint_agent(request: Request) -> Response:
         try:
             body = await _parse_json_body(request)
-            ctx = _req_ctx(request, admin_token=body.get("admin_token"))
-            out = eff_service.admin_mint_agent(
-                ctx,
-                handle=str(body.get("handle") or ""),
-                display_name=str(body.get("display_name") or ""),
-                model_info=str(body.get("model_info") or ""),
-            )
-            return JSONResponse(out, status_code=201)
+
+            def _work() -> dict[str, Any]:
+                ctx = _req_ctx(request, admin_token=body.get("admin_token"))
+                return eff_service.admin_mint_agent(
+                    ctx,
+                    handle=str(body.get("handle") or ""),
+                    display_name=str(body.get("display_name") or ""),
+                    model_info=str(body.get("model_info") or ""),
+                )
+
+            return JSONResponse(await _run_sync(_work), status_code=201)
         except Exception as exc:
             return _error_response(exc)
 
@@ -1477,19 +1595,22 @@ def create_app(
     async def api_admin_set_book_access(request: Request) -> Response:
         try:
             body = await _parse_json_body(request)
-            ctx = _req_ctx(request, admin_token=body.get("admin_token"))
-            slug = str(request.path_params["slug"])
             raw_allowed = body.get("allowed_agents")
             if raw_allowed is not None and not isinstance(raw_allowed, list):
                 raise ServiceError("allowed_agents must be a list of strings", status_code=400)
-            book = eff_service.set_book_access(
-                ctx,
-                book_slug=slug,
-                access_mode=str(body.get("access_mode") or ""),
-                allowed_agents=raw_allowed or [],
-                approval_mode=body.get("approval_mode"),
-            )
-            return JSONResponse({"book": book})
+
+            def _work() -> dict[str, Any]:
+                ctx = _req_ctx(request, admin_token=body.get("admin_token"))
+                slug = str(request.path_params["slug"])
+                return eff_service.set_book_access(
+                    ctx,
+                    book_slug=slug,
+                    access_mode=str(body.get("access_mode") or ""),
+                    allowed_agents=raw_allowed or [],
+                    approval_mode=body.get("approval_mode"),
+                )
+
+            return JSONResponse({"book": await _run_sync(_work)})
         except Exception as exc:
             return _error_response(exc)
 
@@ -1498,14 +1619,17 @@ def create_app(
     async def api_admin_set_book_approval_mode(request: Request) -> Response:
         try:
             body = await _parse_json_body(request)
-            ctx = _req_ctx(request, admin_token=body.get("admin_token"))
-            slug = str(request.path_params["slug"])
-            book = eff_service.set_book_approval_mode(
-                ctx,
-                book_slug=slug,
-                approval_mode=str(body.get("approval_mode") or ""),
-            )
-            return JSONResponse({"book": book})
+
+            def _work() -> dict[str, Any]:
+                ctx = _req_ctx(request, admin_token=body.get("admin_token"))
+                slug = str(request.path_params["slug"])
+                return eff_service.set_book_approval_mode(
+                    ctx,
+                    book_slug=slug,
+                    approval_mode=str(body.get("approval_mode") or ""),
+                )
+
+            return JSONResponse({"book": await _run_sync(_work)})
         except Exception as exc:
             return _error_response(exc)
 
@@ -1514,20 +1638,21 @@ def create_app(
     async def api_admin_approve_book(request: Request) -> Response:
         try:
             body = await _parse_json_body(request)
-            ctx = _req_ctx(request, admin_token=body.get("admin_token"))
-            slug = str(request.path_params["slug"])
-            auto_seed = bool(body.get("auto_seed", True))
-            hold_for_review = bool(body.get("hold_for_review", False))
-            return JSONResponse(
-                {
-                    "book": eff_service.approve_book_intake(
-                        ctx,
-                        book_slug=slug,
-                        auto_seed=auto_seed,
-                        hold_for_review=hold_for_review,
-                    )
-                }
-            )
+
+            def _work() -> dict[str, Any]:
+                ctx = _req_ctx(request, admin_token=body.get("admin_token"))
+                slug = str(request.path_params["slug"])
+                return eff_service.approve_book_intake(
+                    ctx,
+                    book_slug=slug,
+                    auto_seed=bool(body.get("auto_seed", True)),
+                    hold_for_review=bool(body.get("hold_for_review", False)),
+                    background=bool(body.get("background", False)),
+                )
+
+            book = await _run_sync(_work)
+            status = 202 if book.get("seeding_started") else 200
+            return JSONResponse({"book": book}, status_code=status)
         except Exception as exc:
             return _error_response(exc)
 
@@ -1536,29 +1661,35 @@ def create_app(
     async def api_admin_reject_book(request: Request) -> Response:
         try:
             body = await _parse_json_body(request)
-            ctx = _req_ctx(request, admin_token=body.get("admin_token"))
-            slug = str(request.path_params["slug"])
-            reason = str(body.get("reason") or "")
-            return JSONResponse({"book": eff_service.reject_book_proposal(ctx, book_slug=slug, reason=reason)})
+
+            def _work() -> dict[str, Any]:
+                ctx = _req_ctx(request, admin_token=body.get("admin_token"))
+                slug = str(request.path_params["slug"])
+                reason = str(body.get("reason") or "")
+                return eff_service.reject_book_proposal(ctx, book_slug=slug, reason=reason)
+
+            return JSONResponse({"book": await _run_sync(_work)})
         except Exception as exc:
             return _error_response(exc)
 
     @mcp.custom_route("/api/v1/admin/submissions", methods=["GET"])
     @mcp.custom_route("/admin/api/submissions", methods=["GET"])
     async def api_admin_list_submissions(request: Request) -> Response:
-        try:
+        def _work() -> list[dict[str, Any]]:
             ctx = _req_ctx(request)
             slug = request.query_params.get("book_slug") or None
             status = request.query_params.get("status") or None
             raw_limit = request.query_params.get("limit")
             limit = int(raw_limit) if raw_limit and raw_limit.isdigit() else 50
-            subs = eff_service.list_admin_submissions(
+            return eff_service.list_admin_submissions(
                 ctx,
                 book_slug=slug,
                 status=status,
                 limit=limit,
             )
-            return JSONResponse({"submissions": subs})
+
+        try:
+            return JSONResponse({"submissions": await _run_sync(_work)})
         except Exception as exc:
             return _error_response(exc)
 
@@ -1567,12 +1698,20 @@ def create_app(
     async def api_admin_seed_book(request: Request) -> Response:
         try:
             body = await _parse_json_body(request)
-            ctx = _req_ctx(request, admin_token=body.get("admin_token"))
-            slug = str(request.path_params["slug"])
-            hold_for_review = bool(body.get("hold_for_review", False))
-            return JSONResponse(
-                {"book": eff_service.seed_book(ctx, book_slug=slug, hold_for_review=hold_for_review)}
-            )
+
+            def _work() -> dict[str, Any]:
+                ctx = _req_ctx(request, admin_token=body.get("admin_token"))
+                slug = str(request.path_params["slug"])
+                return eff_service.seed_book(
+                    ctx,
+                    book_slug=slug,
+                    hold_for_review=bool(body.get("hold_for_review", False)),
+                    background=bool(body.get("background", False)),
+                )
+
+            book = await _run_sync(_work)
+            status = 202 if book.get("seeding_started") else 200
+            return JSONResponse({"book": book}, status_code=status)
         except Exception as exc:
             return _error_response(exc)
 
@@ -1581,9 +1720,13 @@ def create_app(
     async def api_admin_fallback(request: Request) -> Response:
         try:
             body = await _parse_json_body(request)
-            ctx = _req_ctx(request, admin_token=body.get("admin_token"))
-            slug = body.get("book_slug")
-            return JSONResponse(eff_service.trigger_starved_fallback(ctx, book_slug=slug))
+
+            def _work() -> dict[str, Any]:
+                ctx = _req_ctx(request, admin_token=body.get("admin_token"))
+                slug = body.get("book_slug")
+                return eff_service.trigger_starved_fallback(ctx, book_slug=slug)
+
+            return JSONResponse(await _run_sync(_work))
         except Exception as exc:
             return _error_response(exc)
 
@@ -1592,12 +1735,14 @@ def create_app(
     async def api_admin_manage_submission(request: Request) -> Response:
         try:
             body = await _parse_json_body(request)
-            ctx = _req_ctx(request, admin_token=body.get("admin_token"))
-            sub_id = str(request.path_params["submission_id"])
-            action = str(body.get("action") or "")
-            return JSONResponse(
-                {"submission": eff_service.manage_flagged_submission(ctx, submission_id=sub_id, action=action)}
-            )
+
+            def _work() -> dict[str, Any]:
+                ctx = _req_ctx(request, admin_token=body.get("admin_token"))
+                sub_id = str(request.path_params["submission_id"])
+                action = str(body.get("action") or "")
+                return eff_service.manage_flagged_submission(ctx, submission_id=sub_id, action=action)
+
+            return JSONResponse({"submission": await _run_sync(_work)})
         except Exception as exc:
             return _error_response(exc)
 
@@ -1606,9 +1751,13 @@ def create_app(
     async def api_admin_publish_release(request: Request) -> Response:
         try:
             body = await _parse_json_body(request)
-            ctx = _req_ctx(request, admin_token=body.get("admin_token"))
-            slug = str(request.path_params["slug"])
-            return JSONResponse(eff_service.publish_release(ctx, book_slug=slug))
+
+            def _work() -> dict[str, Any]:
+                ctx = _req_ctx(request, admin_token=body.get("admin_token"))
+                slug = str(request.path_params["slug"])
+                return eff_service.publish_release(ctx, book_slug=slug)
+
+            return JSONResponse(await _run_sync(_work))
         except Exception as exc:
             return _error_response(exc)
 

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import secrets
+import threading
 import time
 from typing import Any, Optional
 
@@ -224,6 +226,9 @@ class CollabMcpService:
         self.review_client = review_client
         self.git_sync = git_sync
         self.rate_limiter = SlidingWindowRateLimiter()
+        self._seed_lock = threading.Lock()
+        self._active_seeds: set[str] = set()
+        self._seed_errors: dict[str, str] = {}
 
     def _check_read_rate(self, ctx: AuthContext) -> None:
         if ctx.tier == "ANONYMOUS":
@@ -385,6 +390,11 @@ class CollabMcpService:
         out["allowed_agent_count"] = len(allowed)
         if ctx.tier != "ADMIN":
             out.pop("allowed_agents", None)
+        with self._seed_lock:
+            out["seeding_in_progress"] = book_slug in self._active_seeds
+            last_seed_err = self._seed_errors.get(book_slug, "")
+        if ctx.tier == "ADMIN":
+            out["last_seed_error"] = last_seed_err
         out["chapters"] = chapters
         return out
 
@@ -1153,6 +1163,7 @@ class CollabMcpService:
         book_slug: str,
         auto_seed: bool = True,
         hold_for_review: bool = False,
+        background: bool = False,
     ) -> dict[str, Any]:
         assert_admin(ctx)
         book = self.store.get_book(book_slug)
@@ -1186,8 +1197,12 @@ class CollabMcpService:
                 )
 
         if auto_seed:
-            self.store.set_book_status(slug=book_slug, status="seeding")
-            return self.seed_book(ctx, book_slug=book_slug, hold_for_review=hold_for_review)
+            return self.seed_book(
+                ctx,
+                book_slug=book_slug,
+                hold_for_review=hold_for_review,
+                background=background,
+            )
         self.store.set_book_status(slug=book_slug, status="active")
         return self.get_book(ctx, book_slug=book_slug)
 
@@ -1208,37 +1223,32 @@ class CollabMcpService:
                 f"Cannot reject book '{book_slug}' in status '{book['status']}'",
                 status_code=409,
             )
+        with self._seed_lock:
+            if book_slug in self._active_seeds:
+                raise ServiceError(
+                    f"Book '{book_slug}' is currently seeding in the background; wait for it to finish before rejecting",
+                    status_code=409,
+                )
         updated = self.store.set_book_status(slug=book_slug, status="rejected")
         self.git_sync.cleanup_untracked_book_files(slug=book_slug)
+        with self._seed_lock:
+            self._seed_errors.pop(book_slug, None)
         out = dict(updated)
         out.pop("source_text", None)
         out.pop("proposed_chapters", None)
         out["rejection_reason"] = reason.strip()
         return out
 
-    def seed_book(
+    def _execute_seed_book(
         self,
         ctx: AuthContext,
         *,
-        book_slug: str,
-        hold_for_review: bool = False,
+        book: dict[str, Any],
+        ch01: dict[str, Any],
+        hold_for_review: bool,
     ) -> dict[str, Any]:
-        assert_admin(ctx)
-        book = self.store.get_book(book_slug)
-        if book is None:
-            raise ServiceError(f"Book '{book_slug}' not found", status_code=404)
-        ch01 = self.store.get_chapter(book_slug, "ch01")
-        if ch01 is None:
-            raise ServiceError(f"Book '{book_slug}' has no extracted ch01", status_code=400)
-        if ch01["status"] == "accepted":
-            return self.get_book(ctx, book_slug=book_slug)
-        existing_ch01_subs = self.store.list_submissions(book_slug=book_slug, chapter_id="ch01")
-        if any(s["status"] == "pending_admin_approval" for s in existing_ch01_subs):
-            raise ServiceError(
-                f"Book '{book_slug}' already has a ch01 seed awaiting admin review",
-                status_code=409,
-            )
-
+        """Run blocking ch01 review-server translation + review round, recording failures cleanly."""
+        book_slug = str(book["slug"])
         try:
             tr_out = self.review_client.translate_chapter(
                 book_slug=book_slug,
@@ -1261,26 +1271,96 @@ class CollabMcpService:
             if sub_payload["submission"]["status"] != expected_status:
                 raise RuntimeError("ch01 seed translation did not pass TRANSLATION_REVIEW")
         except Exception as exc:
-            self.store.upsert_book(
-                slug=book_slug,
-                title=book["title"],
-                author=book["author"],
-                source_lang=book["source_lang"],
-                target_lang=book["target_lang"],
-                genre=book["genre"],
-                license_id=book["license_id"],
-                license_url=book["license_url"],
-                status="seed_failed",
-                glossary_sha="",
-                book_record=book["book_record"],
-                manifest=book["manifest"],
-                proposed_by=book["proposed_by"],
-            )
+            logging.getLogger(__name__).exception("ch01 seed failed for '%s'", book_slug)
+            with self._seed_lock:
+                self._seed_errors[book_slug] = str(exc)
+            self.store.set_book_status(slug=book_slug, status="seed_failed")
             raise ServiceError(f"ch01 seed failed: {exc}", status_code=422) from exc
 
+        with self._seed_lock:
+            self._active_seeds.discard(book_slug)
+            self._seed_errors.pop(book_slug, None)
         res = self.get_book(ctx, book_slug=book_slug)
         res["seed_submission_id"] = sub_payload["submission"]["id"]
         res["seed_submission_status"] = sub_payload["submission"]["status"]
+        return res
+
+    def seed_book(
+        self,
+        ctx: AuthContext,
+        *,
+        book_slug: str,
+        hold_for_review: bool = False,
+        background: bool = False,
+    ) -> dict[str, Any]:
+        assert_admin(ctx)
+        book = self.store.get_book(book_slug)
+        if book is None:
+            raise ServiceError(f"Book '{book_slug}' not found", status_code=404)
+        ch01 = self.store.get_chapter(book_slug, "ch01")
+        if ch01 is None:
+            raise ServiceError(f"Book '{book_slug}' has no extracted ch01", status_code=400)
+        if ch01["status"] == "accepted":
+            return self.get_book(ctx, book_slug=book_slug)
+        existing_ch01_subs = self.store.list_submissions(book_slug=book_slug, chapter_id="ch01")
+        if any(s["status"] == "pending_admin_approval" for s in existing_ch01_subs):
+            raise ServiceError(
+                f"Book '{book_slug}' already has a ch01 seed awaiting admin review",
+                status_code=409,
+            )
+
+        with self._seed_lock:
+            if book_slug in self._active_seeds:
+                raise ServiceError(
+                    f"Book '{book_slug}' is already seeding in the background",
+                    status_code=409,
+                )
+            self._active_seeds.add(book_slug)
+            self._seed_errors.pop(book_slug, None)
+
+        try:
+            self.store.set_book_status(slug=book_slug, status="seeding")
+        except Exception:
+            with self._seed_lock:
+                self._active_seeds.discard(book_slug)
+            raise
+
+        if not background:
+            try:
+                return self._execute_seed_book(
+                    ctx,
+                    book=book,
+                    ch01=ch01,
+                    hold_for_review=hold_for_review,
+                )
+            finally:
+                with self._seed_lock:
+                    self._active_seeds.discard(book_slug)
+
+        def _bg_worker() -> None:
+            try:
+                self._execute_seed_book(
+                    ctx,
+                    book=book,
+                    ch01=ch01,
+                    hold_for_review=hold_for_review,
+                )
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Background ch01 seed failed for '%s': %s", book_slug, exc)
+            finally:
+                with self._seed_lock:
+                    self._active_seeds.discard(book_slug)
+
+        res = self.get_book(ctx, book_slug=book_slug)
+        res["seeding_started"] = True
+        res["hold_for_review"] = hold_for_review
+        worker = threading.Thread(target=_bg_worker, name=f"seed-{book_slug}", daemon=True)
+        try:
+            worker.start()
+        except Exception:
+            with self._seed_lock:
+                self._active_seeds.discard(book_slug)
+            raise
         return res
 
     def trigger_starved_fallback(

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 import subprocess
+import threading
+import time
 from unittest.mock import patch
 import httpx
 from starlette.testclient import TestClient
@@ -521,5 +524,228 @@ def test_git_sync_scopes_staging_to_target_slug_and_reject_cleans_untracked_dirs
         assert rej_res.status_code == 200
         assert not (cfg.books_repo_dir / "books" / "book-reject").exists()
         assert not (cfg.books_repo_dir / "runs" / "book-reject").exists()
+
+    store.close()
+
+
+def test_health_stays_responsive_during_slow_approve_route(tmp_path: Path):
+    cfg, store, rs_client, svc = _build_env(tmp_path)
+    app = create_app(cfg=cfg, service=svc)
+    adm_hdr = {"Authorization": f"Bearer {cfg.collab_admin_token}"}
+
+    md_book = "# Chapter 1: Dawn\n\nThe sun rose over the quiet river.\n"
+
+    def _slow_translate(**_kw):
+        time.sleep(0.40)
+        return {
+            "translationXml": (
+                '<segment id="S-0001" type="heading">\n<original>\n# Chapter 1: Dawn\n</original>\n'
+                '<translate>\n# Chương 1: Bình Minh\n</translate>\n</segment>\n'
+                '<segment id="S-0002" type="paragraph">\n<original>\nThe sun rose over the quiet river.\n</original>\n'
+                '<translate>\nMặt trời mọc trên dòng sông tĩnh lặng.\n</translate>\n</segment>\n'
+            ),
+            "additions": {"proposals": []},
+            "engineUsed": "gemini",
+        }
+
+    rs_client.translate_chapter = _slow_translate  # type: ignore[method-assign]
+
+    async def _run() -> tuple[httpx.Response, float, bool, httpx.Response]:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://testserver",
+        ) as client:
+            prop = await client.post(
+                "/api/v1/books/propose",
+                json={
+                    "slug": "slow-seed-book",
+                    "title": "Slow Seed Book",
+                    "author": "O. Writer",
+                    "source_lang": "en",
+                    "target_lang": "vi",
+                    "license": "public-domain",
+                    "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+                    "source_filename": "slow.md",
+                    "source_text": md_book,
+                },
+            )
+            assert prop.status_code == 201
+            t0 = time.monotonic()
+            approve_task = asyncio.create_task(
+                client.post(
+                    "/api/v1/admin/books/slow-seed-book/approve",
+                    headers=adm_hdr,
+                    json={"auto_seed": True, "hold_for_review": True},
+                )
+            )
+            await asyncio.sleep(0.05)
+            health_resp = await client.get("/api/health")
+            elapsed = time.monotonic() - t0
+            still_running = not approve_task.done()
+            approve_resp = await approve_task
+            return health_resp, elapsed, still_running, approve_resp
+
+    health_resp, elapsed, still_running, approve_resp = asyncio.run(_run())
+    assert health_resp.status_code == 200
+    assert elapsed < 0.25, f"/api/health blocked on event loop ({elapsed:.3f}s)"
+    assert still_running, "approve_task finished before health check returned (event loop blocked)"
+    assert approve_resp.status_code == 200
+    assert approve_resp.json()["book"]["seed_submission_status"] == "pending_admin_approval"
+    store.close()
+
+
+def test_background_approve_and_seed_returns_202_and_guards_duplicates(tmp_path: Path):
+    cfg, store, rs_client, svc = _build_env(tmp_path)
+    app = create_app(cfg=cfg, service=svc)
+    adm_hdr = {"Authorization": f"Bearer {cfg.collab_admin_token}"}
+    sso_hdr = {"x-auth-request-email": "admin@vinhthang.dev"}
+
+    md_book = "# Chapter 1: Dawn\n\nThe sun rose over the quiet river.\n"
+    ok_xml = (
+        '<segment id="S-0001" type="heading">\n<original>\n# Chapter 1: Dawn\n</original>\n'
+        '<translate>\n# Chương 1: Bình Minh\n</translate>\n</segment>\n'
+        '<segment id="S-0002" type="paragraph">\n<original>\nThe sun rose over the quiet river.\n</original>\n'
+        '<translate>\nMặt trời mọc trên dòng sông tĩnh lặng.\n</translate>\n</segment>\n'
+    )
+
+    with TestClient(app) as client:
+        assert client.post(
+            "/api/v1/books/propose",
+            json={
+                "slug": "bg-seed-book",
+                "title": "BG Seed Book",
+                "author": "O. Writer",
+                "source_lang": "en",
+                "target_lang": "vi",
+                "license": "public-domain",
+                "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+                "source_filename": "bg.md",
+                "source_text": md_book,
+            },
+        ).status_code == 201
+
+        entered = threading.Event()
+        gate = threading.Event()
+
+        def _gated_translate(**_kw):
+            entered.set()
+            assert gate.wait(timeout=5.0)
+            return {"translationXml": ok_xml, "additions": {"proposals": []}, "engineUsed": "gemini"}
+
+        rs_client.translate_chapter = _gated_translate  # type: ignore[method-assign]
+
+        r_bg = client.post(
+            "/api/v1/admin/books/bg-seed-book/approve",
+            headers=adm_hdr,
+            json={"auto_seed": True, "hold_for_review": True, "background": True},
+        )
+        assert r_bg.status_code == 202, r_bg.text
+        bk = r_bg.json()["book"]
+        assert bk["seeding_started"] is True
+        assert bk["seeding_in_progress"] is True
+        assert bk["status"] == "seeding"
+        assert entered.wait(timeout=2.0)
+
+        # While background seed runs: admin GET reflects in-progress; dup seed and reject both return 409
+        r_status = client.get("/admin/api/books/bg-seed-book", headers=sso_hdr)
+        assert r_status.status_code == 200
+        assert r_status.json()["seeding_in_progress"] is True
+
+        r_dup = client.post(
+            "/api/v1/admin/books/bg-seed-book/seed",
+            headers=adm_hdr,
+            json={"hold_for_review": True, "background": True},
+        )
+        assert r_dup.status_code == 409
+
+        r_rej_busy = client.post(
+            "/api/v1/admin/books/bg-seed-book/reject",
+            headers=adm_hdr,
+            json={"reason": "Should fail while active"},
+        )
+        assert r_rej_busy.status_code == 409
+
+        gate.set()
+        bk_done: dict[str, object] = {}
+        for _ in range(60):
+            cur = client.get("/admin/api/books/bg-seed-book", headers=sso_hdr).json()
+            if not cur["seeding_in_progress"]:
+                bk_done = cur
+                break
+            time.sleep(0.05)
+        assert bk_done.get("seeding_in_progress") is False
+        assert bk_done.get("status") == "seeding"
+
+        subs = client.get(
+            "/api/v1/admin/submissions",
+            params={"book_slug": "bg-seed-book"},
+            headers=adm_hdr,
+        ).json()["submissions"]
+        assert len(subs) == 1
+        assert subs[0]["status"] == "pending_admin_approval"
+
+        # Background failure transitions to seed_failed with last_seed_error, and allows clean retry
+        assert client.post(
+            "/api/v1/books/propose",
+            json={
+                "slug": "bg-seed-fail",
+                "title": "BG Seed Fail",
+                "author": "O. Writer",
+                "source_lang": "en",
+                "target_lang": "vi",
+                "license": "public-domain",
+                "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+                "source_filename": "bgf.md",
+                "source_text": md_book,
+            },
+        ).status_code == 201
+
+        def _failing_translate(**_kw):
+            raise RuntimeError("boom from review-server")
+
+        rs_client.translate_chapter = _failing_translate  # type: ignore[method-assign]
+        r_fail = client.post(
+            "/api/v1/admin/books/bg-seed-fail/approve",
+            headers=adm_hdr,
+            json={"auto_seed": True, "hold_for_review": True, "background": True},
+        )
+        assert r_fail.status_code == 202
+
+        bk_err: dict[str, object] = {}
+        for _ in range(60):
+            cur = client.get("/admin/api/books/bg-seed-fail", headers=sso_hdr).json()
+            if not cur["seeding_in_progress"] and cur["status"] == "seed_failed":
+                bk_err = cur
+                break
+            time.sleep(0.05)
+        assert bk_err.get("status") == "seed_failed"
+        assert "boom from review-server" in str(bk_err.get("last_seed_error") or "")
+
+        rs_client.translate_chapter = lambda **_kw: {  # type: ignore[method-assign]
+            "translationXml": ok_xml,
+            "additions": {"proposals": []},
+            "engineUsed": "gemini",
+        }
+        r_retry = client.post(
+            "/api/v1/admin/books/bg-seed-fail/seed",
+            headers=adm_hdr,
+            json={"hold_for_review": True, "background": True},
+        )
+        assert r_retry.status_code == 202
+        bk_retried: dict[str, object] = {}
+        for _ in range(60):
+            cur = client.get("/admin/api/books/bg-seed-fail", headers=sso_hdr).json()
+            if not cur["seeding_in_progress"] and cur.get("status") == "seeding":
+                s_chk = client.get(
+                    "/api/v1/admin/submissions",
+                    params={"book_slug": "bg-seed-fail"},
+                    headers=adm_hdr,
+                ).json()["submissions"]
+                if s_chk:
+                    bk_retried = cur
+                    break
+            time.sleep(0.05)
+        assert bk_retried.get("status") == "seeding"
+        assert bk_retried.get("last_seed_error") == ""
 
     store.close()
