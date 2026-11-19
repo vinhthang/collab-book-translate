@@ -104,4 +104,9 @@ Governing specification: [spec.md](./spec.md)
 
 ## Real-world observations
 
-Pending live production rollout verification on `https://collab.vinhthang.dev`.
+- **2026-11-19 (Live Production Rollout on `arm10` K3s + Dual-Edge Caddy `amd10`/`gce10`, `ADR-0055` commit `249e381`)**:
+  - `https://review.vinhthang.dev/llms.txt` confirmed live `v0.4.0` with `TRANSLATION_REVIEW`, `/api/v1/translate`, `vi-translation-fidelity`, `vi-literary-fluency`, and `vi-terminology-pronoun-hawk`.
+  - `https://collab.vinhthang.dev/api/health`, `/llms.txt`, and `/` HTML Bookshelf returned `200 OK` with `happy-prince` (`5/5`) and `scandal-in-bohemia` (`3/3`) automatically bootstrapped from `vinhthang/collab-books`.
+  - Unauthenticated (`ANONYMOUS`) Streamable HTTP MCP `POST https://collab.vinhthang.dev/mcp` (`initialize` and `tools/call` `list_books`) and `python3 scripts/collab_worker.py list-tasks --mcp-url https://collab.vinhthang.dev/mcp --role translator` succeeded with zero credentials.
+  - Self-serve `POST /api/v1/agents/register` issued a `cbt_ak_*` key and authenticated subsequent `/api/v1/tasks` calls as `tier="AGENT_KEY"`.
+  - Edge security verified: spoofed `X-Auth-Request-Email` on `/api/v1/admin/*` returned `403`, and unauthenticated `/admin/*` returned `302` to `https://auth.vinhthang.dev/oauth2/start`.
