@@ -50,6 +50,7 @@ SCHEMA_STATEMENTS_COMMON = (
         release_url TEXT NOT NULL DEFAULT '',
         access_mode TEXT NOT NULL DEFAULT 'public',
         allowed_agents_json TEXT NOT NULL DEFAULT '[]',
+        approval_mode TEXT NOT NULL DEFAULT 'auto',
         updated_at TEXT NOT NULL
     )
     """,
@@ -195,6 +196,7 @@ class CollabStore:
                         cur.execute("ALTER TABLE agents ADD COLUMN IF NOT EXISTS last_seen_at TEXT NOT NULL DEFAULT ''")
                         cur.execute("ALTER TABLE books ADD COLUMN IF NOT EXISTS access_mode TEXT NOT NULL DEFAULT 'public'")
                         cur.execute("ALTER TABLE books ADD COLUMN IF NOT EXISTS allowed_agents_json TEXT NOT NULL DEFAULT '[]'")
+                        cur.execute("ALTER TABLE books ADD COLUMN IF NOT EXISTS approval_mode TEXT NOT NULL DEFAULT 'auto'")
                         cur.execute("ALTER TABLE submissions ADD COLUMN IF NOT EXISTS author_ip_hash TEXT NOT NULL DEFAULT ''")
                     conn.commit()
             else:
@@ -211,6 +213,8 @@ class CollabStore:
                     conn.execute("ALTER TABLE books ADD COLUMN access_mode TEXT NOT NULL DEFAULT 'public'")
                 if "allowed_agents_json" not in book_cols:
                     conn.execute("ALTER TABLE books ADD COLUMN allowed_agents_json TEXT NOT NULL DEFAULT '[]'")
+                if "approval_mode" not in book_cols:
+                    conn.execute("ALTER TABLE books ADD COLUMN approval_mode TEXT NOT NULL DEFAULT 'auto'")
                 sub_cols = {r["name"] for r in conn.execute("PRAGMA table_info(submissions)").fetchall()}
                 if "author_ip_hash" not in sub_cols:
                     conn.execute("ALTER TABLE submissions ADD COLUMN author_ip_hash TEXT NOT NULL DEFAULT ''")
@@ -331,6 +335,7 @@ class CollabStore:
         access_mode: str,
         allowed_agents: list[str],
     ) -> dict[str, Any]:
+        """Persist book access_mode and canonical allowed_agents allowlist."""
         self._exec(
             """
             UPDATE books
@@ -338,6 +343,38 @@ class CollabStore:
             WHERE slug = ?
             """,
             (access_mode, json.dumps(allowed_agents, ensure_ascii=False), _utc_iso(), slug),
+        )
+        book = self.get_book(slug)
+        if book is None:
+            raise KeyError(f"Book '{slug}' not found")
+        return book
+
+    def set_book_approval_mode(
+        self,
+        *,
+        slug: str,
+        approval_mode: str,
+    ) -> dict[str, Any]:
+        """Persist per-book chapter approval policy ('auto' or 'manual')."""
+        self._exec(
+            "UPDATE books SET approval_mode = ?, updated_at = ? WHERE slug = ?",
+            (approval_mode, _utc_iso(), slug),
+        )
+        book = self.get_book(slug)
+        if book is None:
+            raise KeyError(f"Book '{slug}' not found")
+        return book
+
+    def set_book_status(
+        self,
+        *,
+        slug: str,
+        status: str,
+    ) -> dict[str, Any]:
+        """Persist book lifecycle status directly."""
+        self._exec(
+            "UPDATE books SET status = ?, updated_at = ? WHERE slug = ?",
+            (status, _utc_iso(), slug),
         )
         book = self.get_book(slug)
         if book is None:
@@ -424,6 +461,7 @@ class CollabStore:
         out["manifest"] = json.loads(out.pop("manifest_json") or "{}")
         out["access_mode"] = str(out.get("access_mode") or "public")
         out["allowed_agents"] = json.loads(out.pop("allowed_agents_json", "[]") or "[]")
+        out["approval_mode"] = str(out.get("approval_mode") or "auto")
         return out
 
     def get_book(self, slug: str) -> Optional[dict[str, Any]]:

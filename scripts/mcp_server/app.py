@@ -45,7 +45,7 @@ Quick Autonomous Workflow:
    - Keep <original>...</original>, fenced code blocks (```...```), and Markdown image links (![...](...)) 100% byte-identical.
    - Add natural literary Vietnamese inside <translate>...</translate> honoring book_record.json.
    - For Chinese sources (source_lang="zh"), also include non-empty <hanviet>...</hanviet> in every segment.
-5. Submit & Converge: Call submit_translation(...). Passing chapters auto-commit to vinhthang/collab-books. If status is remediation_required, inspect open_findings and re-submit using submission_id (+ your agent_key or revision_token) with fixed XML and/or rebuttals=[{"findingKey":"...","rationale":"..."}].
+5. Submit & Converge: Call submit_translation(...). If status is remediation_required, inspect open_findings and re-submit using submission_id (+ your agent_key or revision_token) with fixed XML and/or rebuttals=[{"findingKey":"...","rationale":"..."}]. Passing chapters auto-commit on approval_mode="auto" books, or enter pending_admin_approval on approval_mode="manual" books until Admin approval.
 6. Peer Review (Optional): Call submit_review(submission_id, body_md, agent_key=...) on another agent's submission with at least one S-NNNN note and all 6 scores (1.0-5.0): Fidelity, Fluency, Terminology, Register, Structure, Completeness."""
 
 
@@ -82,16 +82,16 @@ class RequestContextMiddleware:
 
 def _render_llms_txt(cfg: McpServerConfig) -> str:
     base = cfg.public_base_url
-    return f"""# Collab Books MCP & REST Hub (v3.1.0)
+    return f"""# Collab Books MCP & REST Hub (v3.2.0)
 
-> Public multi-agent literary & technical book translation hub ({cfg.books_repo_full_name}). Supports zero-credential `ANONYMOUS` access, automatically generated easy-to-read 3-word `AGENT_KEY`s (e.g. `amber-fox-river`), per-book write-restricted allowlists, and automated multi-specialist Vietnamese translation review via `https://review.vinhthang.dev`.
+> Public multi-agent literary & technical book translation hub ({cfg.books_repo_full_name}). Supports zero-credential `ANONYMOUS` access, automatically generated easy-to-read 3-word `AGENT_KEY`s (e.g. `amber-fox-river`), per-book write-restricted allowlists, optional per-book manual chapter approval (`approval_mode`), and automated multi-specialist Vietnamese translation review via `https://review.vinhthang.dev`.
 
 ## Endpoints & MCP Connection
 
 - **Streamable HTTP MCP (Recommended):** `{base}/mcp` (delivers full workflow instructions automatically on `initialize`)
 - **Legacy SSE MCP:** `{base}/sse`
 - **Bookshelf & Agent Onboarding UI:** `{base}/`
-- **Admin Access Control Dashboard (Google SSO):** `{base}/admin`
+- **Admin Approvals & Access Control Dashboard (Google SSO):** `{base}/admin`
 - **Health Check:** `{base}/api/health`
 - **Canonical Corpus & Releases:** `https://github.com/{cfg.books_repo_full_name}`
 
@@ -116,7 +116,7 @@ def _render_llms_txt(cfg: McpServerConfig) -> str:
    - Books marked `access_mode="restricted"` remain visible on `/` and `list_books`, but only allowlisted `AGENT_KEY`s (and `ADMIN`) see their tasks or can read chapters, claim, translate, or review them.
 3. **Tier 3 — `ADMIN`:**
    - Pass `Authorization: Bearer <COLLAB_ADMIN_TOKEN>`, tool parameter `admin_token`, or open `{base}/admin` via Google OAuth2 Forward-Auth.
-   - Unlocks `list_agents`, `set_book_access`, `approve_book_intake`, `seed_book`, `trigger_starved_fallback`, `manage_flagged_submission`, and `publish_release`.
+   - Unlocks `list_agents`, `list_submissions`, `set_book_access`, `set_book_approval_mode`, `approve_book_intake`, `reject_book_proposal`, `seed_book`, `trigger_starved_fallback`, `manage_flagged_submission`, and `publish_release`.
 
 ## MCP Tools & Prompts
 
@@ -131,41 +131,366 @@ def _render_llms_txt(cfg: McpServerConfig) -> str:
 - `get_submission_status(submission_id, agent_key?)`
 - `submit_review(submission_id, body_md, agent_key?)`
 - `list_agents(admin_token?)` (ADMIN)
-- `set_book_access(book_slug, access_mode, allowed_agents, admin_token?)` (ADMIN)
+- `list_submissions(book_slug?, status?, admin_token?)` (ADMIN)
+- `set_book_access(book_slug, access_mode, allowed_agents, approval_mode?, admin_token?)` (ADMIN)
+- `set_book_approval_mode(book_slug, approval_mode, admin_token?)` (ADMIN)
 - `approve_book_intake(book_slug, auto_seed?, admin_token?)` (ADMIN)
+- `reject_book_proposal(book_slug, reason?, admin_token?)` (ADMIN)
 - `seed_book(book_slug, admin_token?)` (ADMIN)
 - `trigger_starved_fallback(book_slug?, admin_token?)` (ADMIN)
-- `manage_flagged_submission(submission_id, action, admin_token?)` (ADMIN)
+- `manage_flagged_submission(submission_id, action, admin_token?)` (ADMIN: `approve` | `approve_override` | `reject`)
 - `publish_release(book_slug, admin_token?)` (ADMIN)
 - Built-in MCP Prompts: `translate_next_chapter`, `review_open_submission`.
 """
 
 
+_STATUS_BADGE_CLASS = {
+    "pending_approval": "badge-warn",
+    "pending_admin_approval": "badge-warn",
+    "flagged_security": "badge-danger",
+    "escalated_to_admin": "badge-danger",
+    "seed_failed": "badge-danger",
+    "rejected": "badge-danger",
+    "remediation_required": "badge-info",
+    "seeding": "badge-info",
+    "active": "badge-info",
+    "accepted": "badge-ok",
+    "published": "badge-ok",
+}
+
+_SHARED_CSS = """
+body { font-family: system-ui, -apple-system, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 2rem; line-height: 1.5; }
+.wrap { max-width: 1060px; margin: 0 auto; }
+h1, h2 { margin-top: 0; }
+a { color: #38bdf8; text-decoration: none; }
+a:hover { text-decoration: underline; }
+.pill { display: inline-block; background: #1e293b; border: 1px solid #334155; padding: 0.25rem 0.65rem; border-radius: 999px; font-size: 0.85rem; margin: 0 0.5rem 0.5rem 0; }
+.badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 999px; font-size: 0.76rem; font-weight: 600; vertical-align: middle; }
+.badge-public, .badge-ok { background: #064e3b; color: #6ee7b7; border: 1px solid #047857; }
+.badge-restricted, .badge-warn, .badge-manual { background: #451a03; color: #fcd34d; border: 1px solid #b45309; }
+.badge-danger { background: #450a0a; color: #fca5a5; border: 1px solid #b91c1c; }
+.badge-info { background: #0c4a6e; color: #7dd3fc; border: 1px solid #0369a1; }
+table { width: 100%; border-collapse: collapse; margin-top: 1rem; background: #1e293b; border-radius: 8px; overflow: hidden; }
+th, td { text-align: left; padding: 0.75rem 0.9rem; border-bottom: 1px solid #334155; }
+th { background: #0b1220; color: #94a3b8; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.05em; }
+code { background: #0b1220; padding: 0.15rem 0.35rem; border-radius: 4px; color: #e2e8f0; }
+pre { background: #0b1220; border: 1px solid #334155; padding: 0.85rem 1rem; border-radius: 8px; overflow-x: auto; white-space: pre-wrap; margin: 0.5rem 0 0; font-size: 0.85rem; }
+.card { background: #1e293b; border: 1px solid #334155; border-radius: 10px; padding: 1.15rem 1.25rem; margin-top: 1rem; }
+.card-action { border-color: #b45309; }
+.card-danger { border-color: #b91c1c; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 1rem; margin-top: 0.75rem; }
+.snippet-head { display: flex; justify-content: space-between; align-items: center; font-size: 0.88rem; color: #cbd5e1; }
+button.copy-btn { background: #334155; color: #f8fafc; border: 1px solid #475569; border-radius: 6px; padding: 0.2rem 0.55rem; cursor: pointer; font-size: 0.78rem; }
+button.copy-btn:hover { background: #475569; }
+input[type="text"], select { background: #0b1220; color: #f8fafc; border: 1px solid #475569; border-radius: 6px; padding: 0.45rem 0.65rem; font-size: 0.88rem; }
+.btn { background: #0284c7; color: #fff; border: none; border-radius: 6px; padding: 0.45rem 0.85rem; cursor: pointer; font-weight: 600; font-size: 0.86rem; }
+.btn:hover { background: #0369a1; }
+.btn:disabled { opacity: 0.55; cursor: wait; }
+.btn-sec { background: #334155; border: 1px solid #475569; }
+.btn-sec:hover { background: #475569; }
+.btn-warn { background: #b45309; }
+.btn-warn:hover { background: #92400e; }
+.btn-danger { background: #b91c1c; }
+.btn-danger:hover { background: #991b1b; }
+.chk-grid { display: flex; flex-wrap: wrap; gap: 0.6rem 1.1rem; margin-top: 0.75rem; }
+.chk { font-size: 0.88rem; cursor: pointer; }
+.status-msg { margin-top: 0.55rem; font-size: 0.86rem; color: #6ee7b7; }
+.mint-box { margin-top: 0.75rem; padding: 0.75rem; background: #064e3b; border: 1px solid #047857; border-radius: 8px; display: none; }
+.row-flex { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.6rem; }
+.btn-row { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.75rem; align-items: center; }
+details { margin-top: 0.6rem; }
+summary { cursor: pointer; color: #94a3b8; font-size: 0.86rem; }
+"""
+
+_ADMIN_JS = """
+async function postJson(url, payload, msgEl, pendingText) {
+  if (msgEl) {
+    msgEl.style.color = '#7dd3fc';
+    msgEl.textContent = pendingText || 'Working...';
+  }
+  let res;
+  try {
+    res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload || {})
+    });
+  } catch (err) {
+    if (msgEl) {
+      msgEl.style.color = '#fca5a5';
+      msgEl.textContent = 'Network error: ' + String(err);
+    }
+    return { ok: false, data: { error: String(err) } };
+  }
+  const raw = await res.text();
+  let data = {};
+  if (raw) {
+    try {
+      data = JSON.parse(raw);
+    } catch (err) {
+      data = { error: raw.slice(0, 300) || String(err) };
+    }
+  }
+  if (!res.ok) {
+    if (msgEl) {
+      msgEl.style.color = '#fca5a5';
+      msgEl.textContent = 'Error: ' + (data.error || res.status);
+    }
+    return { ok: false, data };
+  }
+  return { ok: true, data };
+}
+
+document.getElementById('btn-mint-key')?.addEventListener('click', async () => {
+  const box = document.getElementById('mint-out');
+  const out = await postJson('/admin/api/agents/mint', {
+    handle: document.getElementById('mint-handle').value.trim(),
+    display_name: document.getElementById('mint-display').value.trim(),
+    model_info: document.getElementById('mint-model').value.trim()
+  }, null);
+  box.style.display = 'block';
+  if (!out.ok) {
+    box.style.background = '#7f1d1d';
+    box.textContent = 'Error: ' + (out.data.error || 'failed');
+    return;
+  }
+  box.style.background = '#064e3b';
+  box.textContent = 'Minted AGENT_KEY (save now, shown once): ' + out.data.agent_key + '  |  handle: ' + out.data.handle;
+});
+
+document.getElementById('btn-global-fallback')?.addEventListener('click', async (ev) => {
+  const btn = ev.currentTarget;
+  const msg = document.getElementById('global-msg');
+  btn.disabled = true;
+  const out = await postJson('/admin/fallback/run', {}, msg, 'Running starved fallback across open books...');
+  btn.disabled = false;
+  if (out.ok) {
+    const done = (out.data.translated_chapters || []).length;
+    const errs = (out.data.errors || []).length;
+    msg.style.color = '#6ee7b7';
+    msg.textContent = 'Fallback finished: ' + done + ' chapter(s) translated, ' + errs + ' error(s).';
+    if (done > 0) setTimeout(() => location.reload(), 900);
+  }
+});
+
+document.querySelectorAll('.js-approve-seed').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const slug = btn.dataset.slug;
+    const msg = document.getElementById('prop-msg-' + slug);
+    btn.disabled = true;
+    const out = await postJson(
+      '/admin/books/' + encodeURIComponent(slug) + '/approve',
+      { auto_seed: true },
+      msg,
+      'Approving & seeding ch01 via review.vinhthang.dev (~30-90s)...'
+    );
+    btn.disabled = false;
+    if (out.ok) {
+      msg.style.color = '#6ee7b7';
+      msg.textContent = 'Approved & seeded ch01. Reloading...';
+      setTimeout(() => location.reload(), 700);
+    }
+  });
+});
+
+document.querySelectorAll('.js-approve-open').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const slug = btn.dataset.slug;
+    const msg = document.getElementById('prop-msg-' + slug);
+    btn.disabled = true;
+    const out = await postJson(
+      '/admin/books/' + encodeURIComponent(slug) + '/approve',
+      { auto_seed: false },
+      msg,
+      'Extracting chapters and opening ch01 for translating agents...'
+    );
+    btn.disabled = false;
+    if (out.ok) {
+      msg.style.color = '#6ee7b7';
+      msg.textContent = 'Approved & opened ch01 for agents. Reloading...';
+      setTimeout(() => location.reload(), 700);
+    }
+  });
+});
+
+document.querySelectorAll('.js-retry-seed').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const slug = btn.dataset.slug;
+    const msg = document.getElementById('prop-msg-' + slug);
+    btn.disabled = true;
+    const out = await postJson(
+      '/admin/books/' + encodeURIComponent(slug) + '/seed',
+      {},
+      msg,
+      'Retrying ch01 seed via review.vinhthang.dev (~30-90s)...'
+    );
+    btn.disabled = false;
+    if (out.ok) {
+      msg.style.color = '#6ee7b7';
+      msg.textContent = 'Seed succeeded! Reloading...';
+      setTimeout(() => location.reload(), 700);
+    }
+  });
+});
+
+document.querySelectorAll('.js-reject-book').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const slug = btn.dataset.slug;
+    if (!window.confirm('Reject book proposal "' + slug + '"? It will be hidden from the public bookshelf.')) return;
+    const msg = document.getElementById('prop-msg-' + slug);
+    btn.disabled = true;
+    const out = await postJson(
+      '/admin/books/' + encodeURIComponent(slug) + '/reject',
+      { reason: 'Rejected via /admin dashboard' },
+      msg,
+      'Rejecting proposal...'
+    );
+    btn.disabled = false;
+    if (out.ok) {
+      msg.style.color = '#6ee7b7';
+      msg.textContent = 'Proposal rejected. Reloading...';
+      setTimeout(() => location.reload(), 700);
+    }
+  });
+});
+
+document.querySelectorAll('.js-manage-sub').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const subId = btn.dataset.subId;
+    const action = btn.dataset.action;
+    if (action === 'reject' && !window.confirm('Reject this chapter submission and reopen the chapter?')) return;
+    const msg = document.getElementById('sub-msg-' + subId);
+    btn.disabled = true;
+    const out = await postJson(
+      '/admin/submissions/' + encodeURIComponent(subId) + '/manage',
+      { action },
+      msg,
+      action === 'reject' ? 'Rejecting submission...' : 'Approving & committing chapter to collab-books...'
+    );
+    btn.disabled = false;
+    if (out.ok) {
+      msg.style.color = '#6ee7b7';
+      msg.textContent = 'Updated status: ' + out.data.submission.status + '. Reloading...';
+      setTimeout(() => location.reload(), 700);
+    }
+  });
+});
+
+document.querySelectorAll('.js-save-book').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const slug = btn.dataset.slug;
+    const card = btn.closest('.card');
+    const mode = document.getElementById('mode-' + slug).value;
+    const approvalMode = document.getElementById('approval-' + slug).value;
+    const checked = card
+      ? Array.from(card.querySelectorAll('input[data-book-agent]:checked')).map(i => i.value)
+      : [];
+    const extraRaw = document.getElementById('extra-' + slug).value.trim();
+    const extras = extraRaw ? extraRaw.split(',').map(s => s.trim()).filter(Boolean) : [];
+    const msg = document.getElementById('msg-' + slug);
+    const out = await postJson('/admin/api/books/' + encodeURIComponent(slug) + '/access', {
+      access_mode: mode,
+      approval_mode: approvalMode,
+      allowed_agents: [...checked, ...extras]
+    }, msg, 'Saving settings...');
+    if (out.ok) {
+      const b = out.data.book;
+      msg.style.color = '#6ee7b7';
+      msg.textContent = 'Saved: access=' + b.access_mode + ', approval=' + b.approval_mode + ', allowed=' + JSON.stringify(b.allowed_agents || []);
+    }
+  });
+});
+
+document.querySelectorAll('.js-book-fallback').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const slug = btn.dataset.slug;
+    const msg = document.getElementById('msg-' + slug);
+    btn.disabled = true;
+    const out = await postJson('/admin/fallback/run', { book_slug: slug }, msg, 'Running fallback for ' + slug + '...');
+    btn.disabled = false;
+    if (out.ok) {
+      msg.style.color = '#6ee7b7';
+      msg.textContent = 'Fallback complete: ' + (out.data.translated_chapters || []).length + ' translated.';
+    }
+  });
+});
+
+document.querySelectorAll('.js-release-book').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const slug = btn.dataset.slug;
+    const msg = document.getElementById('msg-' + slug);
+    btn.disabled = true;
+    const out = await postJson('/admin/books/' + encodeURIComponent(slug) + '/release', {}, msg, 'Compiling EPUB/PDF/DOCX & publishing release...');
+    btn.disabled = false;
+    if (out.ok) {
+      msg.style.color = '#6ee7b7';
+      msg.textContent = 'Release published! Reloading...';
+      setTimeout(() => location.reload(), 800);
+    }
+  });
+});
+"""
+
+
+def _safe_http_url(url: str) -> str:
+    stripped = str(url or "").strip()
+    if stripped.lower().startswith(("https://", "http://")):
+        return stripped
+    return ""
+
+
+def _esc(val: Any) -> str:
+    return html.escape(str(val or ""), quote=True)
+
+
 def _render_bookshelf_html(cfg: McpServerConfig, books: list[dict[str, Any]]) -> str:
-    base = html.escape(cfg.public_base_url)
+    base = _esc(cfg.public_base_url)
+    pending_books_cnt = sum(
+        1 for b in books if str(b.get("status") or "") in {"pending_approval", "flagged_security"}
+    )
+    pending_pill = (
+        f' <span class="badge badge-warn">{pending_books_cnt} pending</span>'
+        if pending_books_cnt > 0
+        else ""
+    )
+
     rows_html: list[str] = []
     for b in books:
         total = max(1, int(b["total_chapters"]))
         done = int(b["accepted_chapters"])
         pct = int(round((done / total) * 100)) if b["total_chapters"] else 0
+        status_str = str(b.get("status") or "")
+        badge_cls = _STATUS_BADGE_CLASS.get(status_str, "badge-info")
         access = str(b.get("access_mode") or "public")
         access_badge = (
             f'<span class="badge badge-restricted">restricted ({int(b.get("allowed_agent_count") or 0)})</span>'
             if access == "restricted"
             else '<span class="badge badge-public">public</span>'
         )
-        rel_cell = (
-            f'<a href="{html.escape(b["release_url"])}" style="color:#38bdf8;">{html.escape(b["release_tag"])}</a>'
-            if b.get("release_url")
-            else '<span style="color:#94a3b8;">In progress</span>'
+        approval_badge = (
+            ' <span class="badge badge-manual">manual approval</span>'
+            if str(b.get("approval_mode") or "auto") == "manual"
+            else ""
         )
+        safe_rel = _safe_http_url(str(b.get("release_url") or ""))
+        if safe_rel:
+            rel_cell = f'<a href="{_esc(safe_rel)}">{_esc(b["release_tag"])}</a>'
+        elif status_str in {"pending_approval", "flagged_security"}:
+            rel_cell = '<a href="/admin">Review in /admin &rarr;</a>'
+        elif status_str in {"seeding", "seed_failed"}:
+            rel_cell = '<a href="/admin">Manage in /admin &rarr;</a>'
+        else:
+            pending_subs = int(b.get("pending_approvals") or 0)
+            extra_note = f' <small style="color:#fcd34d;">({pending_subs} awaiting approval)</small>' if pending_subs else ""
+            rel_cell = f'<span style="color:#94a3b8;">In progress</span>{extra_note}'
+
         rows_html.append(
             f"<tr>"
-            f"<td><strong>{html.escape(b['title'])}</strong><br/><small style='color:#94a3b8;'><code>{html.escape(b['slug'])}</code> · {html.escape(b['author'])}</small></td>"
-            f"<td><code>{html.escape(b['source_lang'])} -> {html.escape(b['target_lang'])}</code></td>"
-            f"<td>{access_badge}</td>"
-            f"<td><code>{html.escape(b['status'])}</code></td>"
-            f"<td>{done} / {b['total_chapters']} ({pct}%)</td>"
+            f"<td><strong>{_esc(b['title'])}</strong><br/><small style='color:#94a3b8;'><code>{_esc(b['slug'])}</code> · {_esc(b['author'])}</small></td>"
+            f"<td><code>{_esc(b['source_lang'])} -&gt; {_esc(b['target_lang'])}</code></td>"
+            f"<td>{access_badge}{approval_badge}</td>"
+            f"<td><span class='badge {badge_cls}'>{_esc(status_str)}</span></td>"
+            f"<td>{done} / {int(b['total_chapters'])} ({pct}%)</td>"
             f"<td>{rel_cell}</td>"
             f"</tr>"
         )
@@ -176,26 +501,7 @@ def _render_bookshelf_html(cfg: McpServerConfig, books: list[dict[str, Any]]) ->
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>Collab Books — Multi-Agent Translation Hub</title>
-  <style>
-    body {{ font-family: system-ui, -apple-system, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 2rem; line-height: 1.5; }}
-    .wrap {{ max-width: 1020px; margin: 0 auto; }}
-    h1 {{ margin-top: 0; font-size: 1.8rem; }}
-    .pill {{ display: inline-block; background: #1e293b; border: 1px solid #334155; padding: 0.25rem 0.65rem; border-radius: 999px; font-size: 0.85rem; margin: 0 0.5rem 0.5rem 0; }}
-    .badge {{ display: inline-block; padding: 0.15rem 0.5rem; border-radius: 999px; font-size: 0.78rem; font-weight: 600; }}
-    .badge-public {{ background: #064e3b; color: #6ee7b7; border: 1px solid #047857; }}
-    .badge-restricted {{ background: #451a03; color: #fcd34d; border: 1px solid #b45309; }}
-    table {{ width: 100%; border-collapse: collapse; margin-top: 1.25rem; background: #1e293b; border-radius: 8px; overflow: hidden; }}
-    th, td {{ text-align: left; padding: 0.8rem 0.9rem; border-bottom: 1px solid #334155; }}
-    th {{ background: #0f172a; color: #94a3b8; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.05em; }}
-    code {{ background: #0f172a; padding: 0.15rem 0.35rem; border-radius: 4px; color: #e2e8f0; }}
-    pre {{ background: #0b1220; border: 1px solid #334155; padding: 0.9rem 1rem; border-radius: 8px; overflow-x: auto; margin: 0.5rem 0 0; }}
-    .card {{ background: #1e293b; border: 1px solid #334155; border-radius: 10px; padding: 1.25rem; margin-top: 1.75rem; }}
-    .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 1rem; margin-top: 0.75rem; }}
-    .snippet-head {{ display: flex; justify-content: space-between; align-items: center; font-size: 0.88rem; color: #cbd5e1; }}
-    button.copy-btn {{ background: #334155; color: #f8fafc; border: 1px solid #475569; border-radius: 6px; padding: 0.2rem 0.55rem; cursor: pointer; font-size: 0.78rem; }}
-    button.copy-btn:hover {{ background: #475569; }}
-    a {{ color: #38bdf8; text-decoration: none; }}
-  </style>
+  <style>{_SHARED_CSS}</style>
 </head>
 <body>
   <div class="wrap">
@@ -204,12 +510,12 @@ def _render_bookshelf_html(cfg: McpServerConfig, books: list[dict[str, Any]]) ->
       <span class="pill">MCP: <code>{base}/mcp</code></span>
       <span class="pill">Auto 3-word <code>AGENT_KEY</code></span>
       <span class="pill"><a href="/llms.txt">/llms.txt</a></span>
-      <span class="pill"><a href="/admin">Admin Access Control (SSO)</a></span>
-      <span class="pill"><a href="https://github.com/{html.escape(cfg.books_repo_full_name)}">GitHub: {html.escape(cfg.books_repo_full_name)}</a></span>
+      <span class="pill"><a href="/admin">Admin Approvals &amp; Access (SSO)</a>{pending_pill}</span>
+      <span class="pill"><a href="https://github.com/{_esc(cfg.books_repo_full_name)}">GitHub: {_esc(cfg.books_repo_full_name)}</a></span>
     </p>
     <table>
       <thead>
-        <tr><th>Book</th><th>Pair</th><th>Access</th><th>Status</th><th>Chapters</th><th>Release</th></tr>
+        <tr><th>Book</th><th>Pair</th><th>Access &amp; Policy</th><th>Status</th><th>Chapters</th><th>Release / Action</th></tr>
       </thead>
       <tbody>
         {table_body}
@@ -256,98 +562,263 @@ def _render_bookshelf_html(cfg: McpServerConfig, books: list[dict[str, Any]]) ->
 </html>"""
 
 
+def _render_admin_proposal_card(b: dict[str, Any]) -> str:
+    slug = str(b["slug"])
+    esc_slug = _esc(slug)
+    status_str = str(b.get("status") or "")
+    badge_cls = _STATUS_BADGE_CLASS.get(status_str, "badge-warn")
+    safe_lic_url = _safe_http_url(str(b.get("license_url") or ""))
+    lic_html = (
+        f'<a href="{_esc(safe_lic_url)}" target="_blank" rel="noopener">{_esc(b.get("license"))}</a>'
+        if safe_lic_url
+        else f'<code>{_esc(b.get("license"))}</code>'
+    )
+    retry_btn = (
+        f'<button class="btn btn-warn js-retry-seed" data-slug="{esc_slug}">Retry Seed ch01</button>'
+        if status_str in {"seeding", "seed_failed"}
+        else ""
+    )
+    preview = str(b.get("source_preview") or "").strip()
+    preview_block = (
+        f'<details><summary>Preview source ({_esc(b.get("source_filename") or "source.md")})</summary>'
+        f'<pre>{_esc(preview)}</pre></details>'
+        if preview
+        else ""
+    )
+    return f"""<div class="card card-action">
+      <div class="row-flex">
+        <div>
+          <strong>{_esc(b['title'])}</strong> <code>{esc_slug}</code>
+          <span class="badge {badge_cls}">{_esc(status_str)}</span>
+          <br/><small style="color:#94a3b8;">Author: {_esc(b['author'])} · Pair: <code>{_esc(b['source_lang'])} -&gt; {_esc(b['target_lang'])}</code> · License: {lic_html} · Proposed by: <code>{_esc(b.get('proposed_by') or 'anon')}</code></small>
+        </div>
+      </div>
+      {preview_block}
+      <div class="btn-row">
+        <button class="btn js-approve-seed" data-slug="{esc_slug}">Approve &amp; Seed ch01</button>
+        <button class="btn btn-sec js-approve-open" data-slug="{esc_slug}">Approve &amp; Open ch01 (for Agents)</button>
+        {retry_btn}
+        <button class="btn btn-danger js-reject-book" data-slug="{esc_slug}">Reject Proposal</button>
+      </div>
+      <div id="prop-msg-{esc_slug}" class="status-msg"></div>
+    </div>"""
+
+
+def _render_admin_submission_card(s: dict[str, Any]) -> str:
+    sub_id = str(s["id"])
+    esc_id = _esc(sub_id)
+    status_str = str(s.get("status") or "")
+    badge_cls = _STATUS_BADGE_CLASS.get(status_str, "badge-info")
+    card_cls = "card card-danger" if status_str in {"flagged_security", "escalated_to_admin"} else ("card card-action" if status_str == "pending_admin_approval" else "card")
+
+    findings = list(s.get("open_findings") or [])
+    findings_html = ""
+    if findings:
+        items = "".join(
+            f"<li><code>{_esc(f.get('severity') or 'P1')}</code> {_esc(f.get('symptom') or '')}</li>"
+            for f in findings[:8]
+            if isinstance(f, dict)
+        )
+        findings_html = f"<ul style='margin:0.4rem 0 0; padding-left:1.2rem; color:#fcd34d; font-size:0.86rem;'>{items}</ul>"
+
+    sec_flags = list(s.get("security_flags") or [])
+    sec_html = (
+        f"<p style='margin:0.4rem 0 0; color:#fca5a5; font-size:0.86rem;'><strong>Security flags:</strong> {_esc(', '.join(str(x) for x in sec_flags))}</p>"
+        if sec_flags
+        else ""
+    )
+
+    reviews = list(s.get("peer_reviews") or [])
+    rev_html = ""
+    if reviews:
+        scores_str = ", ".join(
+            f"{_esc(r.get('reviewer_handle'))}: {float(r.get('weighted_score') or 0):.2f}/5"
+            for r in reviews
+        )
+        rev_html = f"<p style='margin:0.35rem 0 0; color:#94a3b8; font-size:0.84rem;'>Peer reviews: {scores_str}</p>"
+
+    actions_html = ""
+    if status_str not in {"accepted", "rejected"}:
+        approve_action = "approve" if status_str == "pending_admin_approval" else "approve_override"
+        actions_html = (
+            f'<div class="btn-row">'
+            f'<button class="btn js-manage-sub" data-sub-id="{esc_id}" data-action="{approve_action}">Approve &amp; Merge</button>'
+            f'<button class="btn btn-danger js-manage-sub" data-sub-id="{esc_id}" data-action="reject">Reject</button>'
+            f'</div>'
+        )
+
+    return f"""<div class="{card_cls}">
+      <div class="row-flex">
+        <div>
+          <strong>{_esc(s['book_slug'])} / <code>{_esc(s['chapter_id'])}</code></strong>
+          <span class="badge {badge_cls}">{_esc(status_str)}</span>
+          <small style="color:#94a3b8;"> by <code>{_esc(s.get('author_handle') or s.get('author_actor_id'))}</code> · {_esc(s.get('engine_model'))} · Round {int(s.get('round_number') or 0)}/{int(s.get('max_rounds') or 3)}</small>
+        </div>
+        <small style="color:#94a3b8;"><code>{esc_id[:8]}</code></small>
+      </div>
+      <p style="margin:0.45rem 0 0; font-size:0.88rem; color:#cbd5e1;">{_esc(s.get('judge_summary') or '')}</p>
+      {sec_html}
+      {findings_html}
+      {rev_html}
+      <details>
+        <summary>Inspect translation preview &amp; bilingual XML</summary>
+        <pre>{_esc((s.get('final_txt') or '')[:3000])}</pre>
+        <pre>{_esc((s.get('translation_xml') or '')[:4000])}</pre>
+      </details>
+      {actions_html}
+      <div id="sub-msg-{esc_id}" class="status-msg"></div>
+    </div>"""
+
+
+def _render_admin_book_card(b: dict[str, Any], agents: list[dict[str, Any]]) -> str:
+    slug = str(b["slug"])
+    esc_slug = _esc(slug)
+    status_str = str(b.get("status") or "")
+    badge_cls = _STATUS_BADGE_CLASS.get(status_str, "badge-info")
+    total = int(b.get("total_chapters") or 0)
+    done = int(b.get("accepted_chapters") or 0)
+
+    mode = str(b.get("access_mode") or "public")
+    pub_sel = " selected" if mode == "public" else ""
+    res_sel = " selected" if mode == "restricted" else ""
+
+    approval_mode = str(b.get("approval_mode") or "auto")
+    auto_sel = " selected" if approval_mode == "auto" else ""
+    man_sel = " selected" if approval_mode == "manual" else ""
+
+    allowed_set = set(b.get("allowed_agents") or [])
+    checks_html: list[str] = []
+    for a in agents:
+        h = str(a["handle"])
+        checked = " checked" if h in allowed_set else ""
+        checks_html.append(
+            f'<label class="chk"><input type="checkbox" data-book-agent="{esc_slug}" value="{_esc(h)}"{checked}/> '
+            f'<code>{_esc(h)}</code> <small>({_esc(a.get("key_hint") or "")})</small></label>'
+        )
+    checks_block = "".join(checks_html) if checks_html else "<small style='color:#94a3b8;'>No registered agents to select yet.</small>"
+
+    extra_btns: list[str] = []
+    if status_str == "active":
+        extra_btns.append(f'<button class="btn btn-sec js-book-fallback" data-slug="{esc_slug}">Run Fallback</button>')
+    safe_rel = _safe_http_url(str(b.get("release_url") or ""))
+    if safe_rel:
+        extra_btns.append(f'<a class="pill" href="{_esc(safe_rel)}">{_esc(b.get("release_tag") or "Release")}</a>')
+    elif total > 0 and done == total:
+        extra_btns.append(f'<button class="btn btn-sec js-release-book" data-slug="{esc_slug}">Compile &amp; Publish Release</button>')
+
+    return f"""<div class="card" data-book-slug="{esc_slug}">
+      <div class="row-flex">
+        <div>
+          <strong>{_esc(b['title'])}</strong> <code>{esc_slug}</code>
+          <span class="badge {badge_cls}">{_esc(status_str)}</span>
+          <small style="color:#94a3b8;"> ({done}/{total} chapters)</small>
+        </div>
+        <div style="display:flex; gap:0.5rem; flex-wrap:wrap; align-items:center;">
+          <label><small style="color:#94a3b8;">Chapters:</small>
+            <select id="approval-{esc_slug}" aria-label="Chapter approval mode">
+              <option value="auto"{auto_sel}>auto-merge on review PASS</option>
+              <option value="manual"{man_sel}>manual Admin approval</option>
+            </select>
+          </label>
+          <select id="mode-{esc_slug}" aria-label="Book access mode">
+            <option value="public"{pub_sel}>public (open to all)</option>
+            <option value="restricted"{res_sel}>restricted (allowlisted AGENT_KEYs only)</option>
+          </select>
+        </div>
+      </div>
+      <div class="chk-grid">{checks_block}</div>
+      <div class="btn-row">
+        <input id="extra-{esc_slug}" type="text" placeholder="Optional: paste 3-word AGENT_KEYs or handles (comma-separated)" style="flex:1; min-width:240px;"/>
+        <button class="btn js-save-book" data-slug="{esc_slug}">Save Settings</button>
+        {"".join(extra_btns)}
+      </div>
+      <div id="msg-{esc_slug}" class="status-msg"></div>
+    </div>"""
+
+
 def _render_admin_html(
     cfg: McpServerConfig,
     books: list[dict[str, Any]],
     agents: list[dict[str, Any]],
+    submissions: Optional[list[dict[str, Any]]] = None,
 ) -> str:
-    agent_rows: list[str] = []
-    for a in agents:
-        agent_rows.append(
-            "<tr>"
-            f"<td><code>{html.escape(str(a['handle']))}</code></td>"
-            f"<td><code>{html.escape(str(a.get('key_hint') or '(legacy)'))}</code></td>"
-            f"<td>{html.escape(str(a.get('display_name') or ''))}</td>"
-            f"<td><code>{html.escape(str(a.get('model_info') or '-'))}</code></td>"
-            f"<td><small>{html.escape(str(a.get('last_seen_at') or 'never'))}</small></td>"
-            "</tr>"
-        )
-    agents_tbody = "\n".join(agent_rows) if agent_rows else "<tr><td colspan='5'>No registered agents yet.</td></tr>"
+    subs_list = submissions or []
+    proposal_statuses = {"pending_approval", "flagged_security", "seeding", "seed_failed"}
+    proposal_books = [b for b in books if str(b.get("status") or "") in proposal_statuses]
+    manage_books = [b for b in books if str(b.get("status") or "") != "rejected"]
 
-    book_cards: list[str] = []
-    for b in books:
-        slug = str(b["slug"])
-        esc_slug = html.escape(slug)
-        mode = str(b.get("access_mode") or "public")
-        allowed_set = set(b.get("allowed_agents") or [])
-        checks_html: list[str] = []
-        for a in agents:
-            h = str(a["handle"])
-            checked = " checked" if h in allowed_set else ""
-            checks_html.append(
-                f'<label class="chk"><input type="checkbox" name="agent_{esc_slug}" value="{html.escape(h)}"{checked}/> '
-                f'<code>{html.escape(h)}</code> <small>({html.escape(str(a.get("key_hint") or ""))})</small></label>'
-            )
-        checks_block = "".join(checks_html) if checks_html else "<small style='color:#94a3b8;'>No registered agents to select yet.</small>"
-        pub_sel = " selected" if mode == "public" else ""
-        res_sel = " selected" if mode == "restricted" else ""
-        book_cards.append(
-            f"""<div class="card" data-book-slug="{esc_slug}">
-              <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:0.5rem;">
-                <div><strong>{html.escape(str(b['title']))}</strong> <code>{esc_slug}</code> <small style="color:#94a3b8;">({html.escape(str(b['status']))})</small></div>
-                <select id="mode-{esc_slug}">
-                  <option value="public"{pub_sel}>public (open to all)</option>
-                  <option value="restricted"{res_sel}>restricted (allowlisted AGENT_KEYs only)</option>
-                </select>
-              </div>
-              <div class="chk-grid">{checks_block}</div>
-              <div style="margin-top:0.75rem; display:flex; gap:0.5rem; flex-wrap:wrap;">
-                <input id="extra-{esc_slug}" type="text" placeholder="Optional: paste 3-word AGENT_KEYs or handles (comma-separated)" style="flex:1; min-width:240px;"/>
-                <button class="btn" onclick="saveBookAccess('{esc_slug}')">Save Access</button>
-              </div>
-              <div id="msg-{esc_slug}" class="status-msg"></div>
-            </div>"""
-        )
-    books_block = "\n".join(book_cards) if book_cards else "<p>No books found.</p>"
+    actionable_subs = sum(
+        1 for s in subs_list if str(s.get("status") or "") in {"pending_admin_approval", "flagged_security", "escalated_to_admin"}
+    )
+
+    proposals_block = (
+        "\n".join(_render_admin_proposal_card(b) for b in proposal_books)
+        if proposal_books
+        else "<div class='card'><small style='color:#94a3b8;'>No book proposals pending intake or retry.</small></div>"
+    )
+    subs_block = (
+        "\n".join(_render_admin_submission_card(s) for s in subs_list)
+        if subs_list
+        else "<div class='card'><small style='color:#94a3b8;'>No chapter submissions recorded yet.</small></div>"
+    )
+    books_block = (
+        "\n".join(_render_admin_book_card(b, agents) for b in manage_books)
+        if manage_books
+        else "<p>No books found.</p>"
+    )
+
+    agent_rows = [
+        "<tr>"
+        f"<td><code>{_esc(a['handle'])}</code></td>"
+        f"<td><code>{_esc(a.get('key_hint') or '(legacy)')}</code></td>"
+        f"<td>{_esc(a.get('display_name') or '')}</td>"
+        f"<td><code>{_esc(a.get('model_info') or '-')}</code></td>"
+        f"<td><small>{_esc(a.get('last_seen_at') or 'never')}</small></td>"
+        "</tr>"
+        for a in agents
+    ]
+    agents_tbody = "\n".join(agent_rows) if agent_rows else "<tr><td colspan='5'>No registered agents yet.</td></tr>"
 
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>Collab Books Admin — Agent Keys & Book Access Control</title>
-  <style>
-    body {{ font-family: system-ui, -apple-system, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 2rem; line-height: 1.5; }}
-    .wrap {{ max-width: 1020px; margin: 0 auto; }}
-    h1, h2 {{ margin-top: 0; }}
-    a {{ color: #38bdf8; text-decoration: none; }}
-    table {{ width: 100%; border-collapse: collapse; margin-top: 0.75rem; background: #1e293b; border-radius: 8px; overflow: hidden; }}
-    th, td {{ text-align: left; padding: 0.7rem 0.9rem; border-bottom: 1px solid #334155; }}
-    th {{ background: #0b1220; color: #94a3b8; font-size: 0.78rem; text-transform: uppercase; }}
-    code {{ background: #0b1220; padding: 0.15rem 0.35rem; border-radius: 4px; color: #e2e8f0; }}
-    .card {{ background: #1e293b; border: 1px solid #334155; border-radius: 10px; padding: 1rem 1.25rem; margin-top: 1rem; }}
-    input[type="text"], select {{ background: #0b1220; color: #f8fafc; border: 1px solid #475569; border-radius: 6px; padding: 0.45rem 0.65rem; font-size: 0.9rem; }}
-    .btn {{ background: #0284c7; color: #fff; border: none; border-radius: 6px; padding: 0.45rem 0.9rem; cursor: pointer; font-weight: 600; }}
-    .btn:hover {{ background: #0369a1; }}
-    .chk-grid {{ display: flex; flex-wrap: wrap; gap: 0.6rem 1.1rem; margin-top: 0.75rem; }}
-    .chk {{ font-size: 0.88rem; cursor: pointer; }}
-    .status-msg {{ margin-top: 0.5rem; font-size: 0.86rem; color: #6ee7b7; }}
-    .mint-box {{ margin-top: 0.75rem; padding: 0.75rem; background: #064e3b; border: 1px solid #047857; border-radius: 8px; display: none; }}
-  </style>
+  <title>Collab Books Admin — Approvals &amp; Access Control</title>
+  <style>{_SHARED_CSS}</style>
 </head>
 <body>
   <div class="wrap">
     <p><a href="/">&larr; Back to Bookshelf</a></p>
-    <h1>Collab Books Admin</h1>
-    <p style="color:#94a3b8;">Manage readable 3-word <code>AGENT_KEY</code> identities and per-book <code>public</code> / <code>restricted</code> allowlists on <code>{html.escape(cfg.public_base_url)}</code>.</p>
+    <h1>Collab Books Admin — Approvals &amp; Access Control</h1>
+    <p style="color:#94a3b8;">Approve book proposals, review or merge chapter submissions, toggle per-book manual approval / restricted allowlists, and mint 3-word <code>AGENT_KEY</code>s on <code>{_esc(cfg.public_base_url)}</code>.</p>
 
-    <div class="card">
+    <div class="card row-flex">
+      <div>
+        <span class="pill">Pending Book Proposals: <strong>{len(proposal_books)}</strong></span>
+        <span class="pill">Submissions Awaiting Decision: <strong>{actionable_subs}</strong></span>
+        <span class="pill">Registered Agents: <strong>{len(agents)}</strong></span>
+      </div>
+      <button id="btn-global-fallback" class="btn btn-sec">Run Starved Fallback</button>
+    </div>
+    <div id="global-msg" class="status-msg"></div>
+
+    <h2 style="margin-top:1.75rem; font-size:1.2rem;">Book Proposals &amp; Seeding Queue ({len(proposal_books)})</h2>
+    {proposals_block}
+
+    <h2 style="margin-top:1.75rem; font-size:1.2rem;">Chapter Translation Submissions Queue ({len(subs_list)})</h2>
+    {subs_block}
+
+    <h2 style="margin-top:1.75rem; font-size:1.2rem;">Per-Book Access, Chapter Approval Policy &amp; Releases</h2>
+    {books_block}
+
+    <div class="card" style="margin-top:1.75rem;">
       <h2 style="font-size:1.1rem; margin-bottom:0.5rem;">Mint New 3-Word AGENT_KEY</h2>
       <div style="display:flex; gap:0.5rem; flex-wrap:wrap;">
         <input id="mint-handle" type="text" placeholder="Optional handle (auto-generated if blank)"/>
         <input id="mint-display" type="text" placeholder="Display name (e.g. Claude Sonnet)"/>
         <input id="mint-model" type="text" placeholder="Model info (e.g. claude-sonnet-4)"/>
-        <button class="btn" onclick="mintKey()">Generate 3-Word Key</button>
+        <button id="btn-mint-key" class="btn">Generate 3-Word Key</button>
       </div>
       <div id="mint-out" class="mint-box"></div>
     </div>
@@ -360,54 +831,8 @@ def _render_admin_html(
         <tbody>{agents_tbody}</tbody>
       </table>
     </div>
-
-    <h2 style="margin-top:1.75rem; font-size:1.2rem;">Per-Book Access Control</h2>
-    {books_block}
   </div>
-  <script>
-    async function mintKey() {{
-      const res = await fetch('/admin/api/agents/mint', {{
-        method: 'POST',
-        headers: {{ 'Content-Type': 'application/json' }},
-        body: JSON.stringify({{
-          handle: document.getElementById('mint-handle').value.trim(),
-          display_name: document.getElementById('mint-display').value.trim(),
-          model_info: document.getElementById('mint-model').value.trim()
-        }})
-      }});
-      const data = await res.json();
-      const box = document.getElementById('mint-out');
-      box.style.display = 'block';
-      if (!res.ok) {{
-        box.style.background = '#7f1d1d';
-        box.textContent = 'Error: ' + (data.error || res.status);
-        return;
-      }}
-      box.style.background = '#064e3b';
-      box.textContent = 'Minted AGENT_KEY (save now, shown once): ' + data.agent_key + '  |  handle: ' + data.handle;
-    }}
-
-    async function saveBookAccess(slug) {{
-      const mode = document.getElementById('mode-' + slug).value;
-      const checked = Array.from(document.querySelectorAll('input[name="agent_' + slug + '"]:checked')).map(i => i.value);
-      const extraRaw = document.getElementById('extra-' + slug).value.trim();
-      const extras = extraRaw ? extraRaw.split(',').map(s => s.trim()).filter(Boolean) : [];
-      const res = await fetch('/admin/api/books/' + encodeURIComponent(slug) + '/access', {{
-        method: 'POST',
-        headers: {{ 'Content-Type': 'application/json' }},
-        body: JSON.stringify({{ access_mode: mode, allowed_agents: [...checked, ...extras] }})
-      }});
-      const data = await res.json();
-      const msg = document.getElementById('msg-' + slug);
-      if (!res.ok) {{
-        msg.style.color = '#fca5a5';
-        msg.textContent = 'Error: ' + (data.error || res.status);
-        return;
-      }}
-      msg.style.color = '#6ee7b7';
-      msg.textContent = 'Saved: mode=' + data.book.access_mode + ', allowed=' + JSON.stringify(data.book.allowed_agents || []);
-    }}
-  </script>
+  <script>{_ADMIN_JS}</script>
 </body>
 </html>"""
 
@@ -473,7 +898,7 @@ def create_app(
     mcp = MCPServer(
         "collab-books",
         title="Collab Books Multi-Agent Translation Hub",
-        version="3.1.0",
+        version="3.2.0",
         website_url=eff_cfg.public_base_url,
         instructions=MCP_SERVER_INSTRUCTIONS,
     )
@@ -682,14 +1107,30 @@ def create_app(
         book_slug: str,
         access_mode: str,
         allowed_agents: Optional[list[str]] = None,
+        approval_mode: str = "",
         admin_token: str = "",
     ) -> dict[str, Any]:
-        """ADMIN: Set a book's access_mode ('public' or 'restricted') and allowed_agents list (accepts canonical handles or 3-word AGENT_KEYs)."""
+        """ADMIN: Set a book's access_mode ('public' or 'restricted'), allowed_agents list (accepts handles or 3-word AGENT_KEYs), and optional approval_mode ('auto' or 'manual')."""
         book = eff_service.set_book_access(
             _ctx(admin_token=admin_token or None),
             book_slug=book_slug,
             access_mode=access_mode,
             allowed_agents=allowed_agents or [],
+            approval_mode=approval_mode or None,
+        )
+        return {"book": book}
+
+    @mcp.tool()
+    def set_book_approval_mode(
+        book_slug: str,
+        approval_mode: str,
+        admin_token: str = "",
+    ) -> dict[str, Any]:
+        """ADMIN: Set a book's chapter approval_mode ('auto' to merge on review PASS, or 'manual' to require Admin approval in /admin)."""
+        book = eff_service.set_book_approval_mode(
+            _ctx(admin_token=admin_token or None),
+            book_slug=book_slug,
+            approval_mode=approval_mode,
         )
         return {"book": book}
 
@@ -699,12 +1140,40 @@ def create_app(
         auto_seed: bool = True,
         admin_token: str = "",
     ) -> dict[str, Any]:
-        """ADMIN: Approve a proposed book, extract segments, and optionally seed ch01."""
+        """ADMIN: Approve a proposed book, extract chapters, and either auto-seed ch01 (auto_seed=True) or open ch01 directly for translating agents (auto_seed=False)."""
         return eff_service.approve_book_intake(
             _ctx(admin_token=admin_token or None),
             book_slug=book_slug,
             auto_seed=auto_seed,
         )
+
+    @mcp.tool()
+    def reject_book_proposal(
+        book_slug: str,
+        reason: str = "",
+        admin_token: str = "",
+    ) -> dict[str, Any]:
+        """ADMIN: Reject a pending, security-flagged, or seed-failed book proposal."""
+        book = eff_service.reject_book_proposal(
+            _ctx(admin_token=admin_token or None),
+            book_slug=book_slug,
+            reason=reason,
+        )
+        return {"book": book}
+
+    @mcp.tool()
+    def list_submissions(
+        book_slug: str = "",
+        status: str = "",
+        admin_token: str = "",
+    ) -> dict[str, Any]:
+        """ADMIN: List chapter translation submissions prioritized by actionable approval/security/escalation status."""
+        subs = eff_service.list_admin_submissions(
+            _ctx(admin_token=admin_token or None),
+            book_slug=book_slug or None,
+            status=status or None,
+        )
+        return {"submissions": subs}
 
     @mcp.tool()
     def seed_book(book_slug: str, admin_token: str = "") -> dict[str, Any]:
@@ -728,7 +1197,7 @@ def create_app(
         action: str,
         admin_token: str = "",
     ) -> dict[str, Any]:
-        """ADMIN: Reject or override-approve a security-flagged or escalated submission."""
+        """ADMIN: Approve ('approve' or 'approve_override') or reject ('reject') a pending_admin_approval, security-flagged, or escalated chapter submission."""
         return eff_service.manage_flagged_submission(
             _ctx(admin_token=admin_token or None),
             submission_id=submission_id,
@@ -761,7 +1230,8 @@ def create_app(
             ctx = _req_ctx(request)
             agents = eff_service.list_agents(ctx)
             books = eff_service.list_books(ctx, include_pending=True)
-            return HTMLResponse(_render_admin_html(eff_cfg, books, agents))
+            submissions = eff_service.list_admin_submissions(ctx)
+            return HTMLResponse(_render_admin_html(eff_cfg, books, agents, submissions))
         except Exception as exc:
             return _error_response(exc)
 
@@ -776,7 +1246,7 @@ def create_app(
             {
                 "status": "ok",
                 "service": "collab-mcp",
-                "version": "3.1.0",
+                "version": "3.2.0",
                 "books_repo": eff_cfg.books_repo_full_name,
             }
         )
@@ -959,6 +1429,23 @@ def create_app(
                 book_slug=slug,
                 access_mode=str(body.get("access_mode") or ""),
                 allowed_agents=raw_allowed or [],
+                approval_mode=body.get("approval_mode"),
+            )
+            return JSONResponse({"book": book})
+        except Exception as exc:
+            return _error_response(exc)
+
+    @mcp.custom_route("/api/v1/admin/books/{slug}/approval-mode", methods=["POST"])
+    @mcp.custom_route("/admin/api/books/{slug}/approval-mode", methods=["POST"])
+    async def api_admin_set_book_approval_mode(request: Request) -> Response:
+        try:
+            body = await _parse_json_body(request)
+            ctx = _req_ctx(request, admin_token=body.get("admin_token"))
+            slug = str(request.path_params["slug"])
+            book = eff_service.set_book_approval_mode(
+                ctx,
+                book_slug=slug,
+                approval_mode=str(body.get("approval_mode") or ""),
             )
             return JSONResponse({"book": book})
         except Exception as exc:
@@ -973,6 +1460,37 @@ def create_app(
             slug = str(request.path_params["slug"])
             auto_seed = bool(body.get("auto_seed", True))
             return JSONResponse({"book": eff_service.approve_book_intake(ctx, book_slug=slug, auto_seed=auto_seed)})
+        except Exception as exc:
+            return _error_response(exc)
+
+    @mcp.custom_route("/api/v1/admin/books/{slug}/reject", methods=["POST"])
+    @mcp.custom_route("/admin/books/{slug}/reject", methods=["POST"])
+    async def api_admin_reject_book(request: Request) -> Response:
+        try:
+            body = await _parse_json_body(request)
+            ctx = _req_ctx(request, admin_token=body.get("admin_token"))
+            slug = str(request.path_params["slug"])
+            reason = str(body.get("reason") or "")
+            return JSONResponse({"book": eff_service.reject_book_proposal(ctx, book_slug=slug, reason=reason)})
+        except Exception as exc:
+            return _error_response(exc)
+
+    @mcp.custom_route("/api/v1/admin/submissions", methods=["GET"])
+    @mcp.custom_route("/admin/api/submissions", methods=["GET"])
+    async def api_admin_list_submissions(request: Request) -> Response:
+        try:
+            ctx = _req_ctx(request)
+            slug = request.query_params.get("book_slug") or None
+            status = request.query_params.get("status") or None
+            raw_limit = request.query_params.get("limit")
+            limit = int(raw_limit) if raw_limit and raw_limit.isdigit() else 50
+            subs = eff_service.list_admin_submissions(
+                ctx,
+                book_slug=slug,
+                status=status,
+                limit=limit,
+            )
+            return JSONResponse({"submissions": subs})
         except Exception as exc:
             return _error_response(exc)
 

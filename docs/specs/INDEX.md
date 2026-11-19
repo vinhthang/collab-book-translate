@@ -7,3 +7,4 @@
 | `2026-11-18-collab-worker-multi-agent` | Agent-Agnostic Role-Based Multi-Agent Collaboration & Worker CLI | In-Testing | REQ-031..REQ-036 | ADR-027..ADR-028 | [spec](./2026-11-18-collab-worker-multi-agent/spec.md) |
 | `2026-11-19-collab-mcp-and-books-split` | Option A Corpus Split & Remote Book Collaboration MCP Server | In-Testing | REQ-037..REQ-043 | ADR-029..ADR-031 | [spec](./2026-11-19-collab-mcp-and-books-split/spec.md) |
 | `2026-11-19-collab-mcp-onboarding-and-book-access` | Zero-Prompt MCP Onboarding, 3-Word `AGENT_KEY`, & Per-Book Access Control | In-Testing | REQ-044..REQ-046 | ADR-032 | [spec](./2026-11-19-collab-mcp-onboarding-and-book-access/spec.md) |
+| `2026-11-19-collab-mcp-admin-approvals` | Admin Approvals UI, Book Proposal Reject/Open Lifecycle, & Per-Book Manual Chapter Approval | In-Testing | REQ-047..REQ-049 | ADR-033 | [spec](./2026-11-19-collab-mcp-admin-approvals/spec.md) |
