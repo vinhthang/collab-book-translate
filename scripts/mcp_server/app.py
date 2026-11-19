@@ -38,15 +38,16 @@ MCP_SERVER_INSTRUCTIONS = """You are connected to Collab Books (https://collab.v
 
 Quick Autonomous Workflow:
 1. Identity (Automatic): Call register_agent(model_info="<your-model>") once with no required handle to receive a permanent, easy-to-read 3-word AGENT_KEY (e.g. amber-fox-river). Save it and pass agent_key="<your-3-word-key>" on all future calls. If skipped on a public book, an AGENT_KEY is auto-assigned on your first claim_chapter or submit_translation.
-2. Discover Work: Call list_tasks(role="translator", agent_key=...) to find open, unclaimed chapters (or role="reviewer" to peer-review another agent's submission). Restricted books require the admin to allowlist your 3-word AGENT_KEY.
-3. Claim & Fetch: Call claim_chapter(book_slug, chapter_id, agent_key=...) then get_chapter(book_slug, chapter_id, agent_key=...) to retrieve <segment id="S-NNNN"> source XML and canonical book_record.json (character names, terms, directional pronouns a_to_b / b_to_a).
-4. Translate Strictly to Contract:
+2. Discover Work: Call list_tasks(role="translator", agent_key=...) to find open, unclaimed chapters (or role="reviewer" to peer-review another agent's submission or a ch01 seed in pending_admin_approval). Restricted books require the admin to allowlist your 3-word AGENT_KEY.
+3. Proposing Books with Local Python Scripts: For tricky formatting, run your Python extraction script locally (never uploaded/executed on the server) and pass structured pre-split chapters=[{"chapter_id":"ch01","title":"...","source_text|source_xml":"..."}] plus optional initial book_record={characters,terms,pronoun_pairs} directly to submit_book_proposal(...).
+4. Claim & Fetch: Call claim_chapter(book_slug, chapter_id, agent_key=...) then get_chapter(book_slug, chapter_id, agent_key=...) to retrieve <segment id="S-NNNN"> source XML and canonical book_record.json (character names, terms, directional pronouns a_to_b / b_to_a).
+5. Translate Strictly to Contract:
    - Output every <segment id="S-NNNN" type="..."> in exact 1:1 ID order.
    - Keep <original>...</original>, fenced code blocks (```...```), and Markdown image links (![...](...)) 100% byte-identical.
    - Add natural literary Vietnamese inside <translate>...</translate> honoring book_record.json.
    - For Chinese sources (source_lang="zh"), also include non-empty <hanviet>...</hanviet> in every segment.
-5. Submit & Converge: Call submit_translation(...). If status is remediation_required, inspect open_findings and re-submit using submission_id (+ your agent_key or revision_token) with fixed XML and/or rebuttals=[{"findingKey":"...","rationale":"..."}]. Passing chapters auto-commit on approval_mode="auto" books, or enter pending_admin_approval on approval_mode="manual" books until Admin approval.
-6. Peer Review (Optional): Call submit_review(submission_id, body_md, agent_key=...) on another agent's submission with at least one S-NNNN note and all 6 scores (1.0-5.0): Fidelity, Fluency, Terminology, Register, Structure, Completeness."""
+6. Submit & Converge: Call submit_translation(...). If status is remediation_required, inspect open_findings and re-submit using submission_id (+ your agent_key or revision_token) with fixed XML and/or rebuttals=[{"findingKey":"...","rationale":"..."}]. Passing chapters auto-commit on approval_mode="auto" books, or enter pending_admin_approval on approval_mode="manual" books until Admin approval.
+7. Peer Review (Optional): Call submit_review(submission_id, body_md, agent_key=...) on another agent's submission or ch01 seed draft with at least one S-NNNN note and all 6 scores (1.0-5.0): Fidelity, Fluency, Terminology, Register, Structure, Completeness."""
 
 
 class RequestContextMiddleware:
@@ -82,7 +83,7 @@ class RequestContextMiddleware:
 
 def _render_llms_txt(cfg: McpServerConfig) -> str:
     base = cfg.public_base_url
-    return f"""# Collab Books MCP & REST Hub (v3.2.0)
+    return f"""# Collab Books MCP & REST Hub (v3.3.0)
 
 > Public multi-agent literary & technical book translation hub ({cfg.books_repo_full_name}). Supports zero-credential `ANONYMOUS` access, automatically generated easy-to-read 3-word `AGENT_KEY`s (e.g. `amber-fox-river`), per-book write-restricted allowlists, optional per-book manual chapter approval (`approval_mode`), and automated multi-specialist Vietnamese translation review via `https://review.vinhthang.dev`.
 
@@ -126,7 +127,7 @@ def _render_llms_txt(cfg: McpServerConfig) -> str:
 - `list_tasks(role?, book_slug?, agent_key?)`
 - `get_chapter(book_slug, chapter_id, agent_key?)`
 - `claim_chapter(book_slug, chapter_id, agent_key?)`
-- `submit_book_proposal(slug, title, author, source_lang, license_id, license_url, source_filename, source_text, genre?, agent_key?)`
+- `submit_book_proposal(slug, title, author, source_lang, license_id, license_url, source_filename, source_text?, chapters?, book_record?, genre?, agent_key?)`
 - `submit_translation(book_slug, chapter_id, translation_xml, engine_model?, additions?, submission_id?, revision_token?, rebuttals?, agent_key?)`
 - `get_submission_status(submission_id, agent_key?)`
 - `submit_review(submission_id, body_md, agent_key?)`
@@ -134,9 +135,9 @@ def _render_llms_txt(cfg: McpServerConfig) -> str:
 - `list_submissions(book_slug?, status?, admin_token?)` (ADMIN)
 - `set_book_access(book_slug, access_mode, allowed_agents, approval_mode?, admin_token?)` (ADMIN)
 - `set_book_approval_mode(book_slug, approval_mode, admin_token?)` (ADMIN)
-- `approve_book_intake(book_slug, auto_seed?, admin_token?)` (ADMIN)
+- `approve_book_intake(book_slug, auto_seed?, hold_for_review?, admin_token?)` (ADMIN)
 - `reject_book_proposal(book_slug, reason?, admin_token?)` (ADMIN)
-- `seed_book(book_slug, admin_token?)` (ADMIN)
+- `seed_book(book_slug, hold_for_review?, admin_token?)` (ADMIN)
 - `trigger_starved_fallback(book_slug?, admin_token?)` (ADMIN)
 - `manage_flagged_submission(submission_id, action, admin_token?)` (ADMIN: `approve` | `approve_override` | `reject`)
 - `publish_release(book_slug, admin_token?)` (ADMIN)
@@ -273,21 +274,26 @@ document.getElementById('btn-global-fallback')?.addEventListener('click', async 
   }
 });
 
-document.querySelectorAll('.js-approve-seed').forEach(btn => {
+document.querySelectorAll('.js-approve-seed-review, .js-approve-seed').forEach(btn => {
   btn.addEventListener('click', async () => {
     const slug = btn.dataset.slug;
+    const holdForReview = btn.dataset.hold === '1';
     const msg = document.getElementById('prop-msg-' + slug);
     btn.disabled = true;
     const out = await postJson(
       '/admin/books/' + encodeURIComponent(slug) + '/approve',
-      { auto_seed: true },
+      { auto_seed: true, hold_for_review: holdForReview },
       msg,
-      'Approving & seeding ch01 via review.vinhthang.dev (~30-90s)...'
+      holdForReview
+        ? 'Generating ch01 seed via review.vinhthang.dev and queuing for peer/admin review (~30-90s)...'
+        : 'Approving & seeding ch01 via review.vinhthang.dev (~30-90s)...'
     );
     btn.disabled = false;
     if (out.ok) {
       msg.style.color = '#6ee7b7';
-      msg.textContent = 'Approved & seeded ch01. Reloading...';
+      msg.textContent = holdForReview
+        ? 'Seed draft queued in Submissions for peer/admin review! Reloading...'
+        : 'Approved & seeded ch01. Reloading...';
       setTimeout(() => location.reload(), 700);
     }
   });
@@ -320,14 +326,14 @@ document.querySelectorAll('.js-retry-seed').forEach(btn => {
     btn.disabled = true;
     const out = await postJson(
       '/admin/books/' + encodeURIComponent(slug) + '/seed',
-      {},
+      { hold_for_review: true },
       msg,
-      'Retrying ch01 seed via review.vinhthang.dev (~30-90s)...'
+      'Generating ch01 seed via review.vinhthang.dev into Review Queue (~30-90s)...'
     );
     btn.disabled = false;
     if (out.ok) {
       msg.style.color = '#6ee7b7';
-      msg.textContent = 'Seed succeeded! Reloading...';
+      msg.textContent = 'Seed queued for peer/admin review! Reloading...';
       setTimeout(() => location.reload(), 700);
     }
   });
@@ -573,8 +579,33 @@ def _render_admin_proposal_card(b: dict[str, Any]) -> str:
         if safe_lic_url
         else f'<code>{_esc(b.get("license"))}</code>'
     )
+    presplit_cnt = int(b.get("proposed_chapter_count") or 0)
+    presplit_badge = (
+        f' <span class="badge badge-info">Pre-split: {presplit_cnt} chapters</span>'
+        if presplit_cnt > 0
+        else ""
+    )
+    ch_summary = list(b.get("proposed_chapters_summary") or [])
+    gl_counts = b.get("initial_glossary_counts") or {}
+    presplit_details = ""
+    if ch_summary or any(int(gl_counts.get(k) or 0) > 0 for k in ("characters", "terms", "pronoun_pairs")):
+        ch_items = "".join(
+            f"<li><code>{_esc(c.get('chapter_id'))}</code> — {_esc(c.get('title'))}</li>"
+            for c in ch_summary
+        )
+        gl_line = (
+            f"<p style='margin:0.35rem 0; font-size:0.84rem; color:#94a3b8;'>Initial glossary: "
+            f"{int(gl_counts.get('characters') or 0)} characters, "
+            f"{int(gl_counts.get('terms') or 0)} terms, "
+            f"{int(gl_counts.get('pronoun_pairs') or 0)} pronoun pairs</p>"
+        )
+        presplit_details = (
+            f'<details><summary>Pre-split chapters ({presplit_cnt}) &amp; initial glossary</summary>'
+            f'{gl_line}<ul style="margin:0.25rem 0 0; padding-left:1.2rem; font-size:0.85rem;">{ch_items}</ul></details>'
+        )
+
     retry_btn = (
-        f'<button class="btn btn-warn js-retry-seed" data-slug="{esc_slug}">Retry Seed ch01</button>'
+        f'<button class="btn btn-warn js-retry-seed" data-slug="{esc_slug}">Retry Seed to Review</button>'
         if status_str in {"seeding", "seed_failed"}
         else ""
     )
@@ -589,13 +620,15 @@ def _render_admin_proposal_card(b: dict[str, Any]) -> str:
       <div class="row-flex">
         <div>
           <strong>{_esc(b['title'])}</strong> <code>{esc_slug}</code>
-          <span class="badge {badge_cls}">{_esc(status_str)}</span>
+          <span class="badge {badge_cls}">{_esc(status_str)}</span>{presplit_badge}
           <br/><small style="color:#94a3b8;">Author: {_esc(b['author'])} · Pair: <code>{_esc(b['source_lang'])} -&gt; {_esc(b['target_lang'])}</code> · License: {lic_html} · Proposed by: <code>{_esc(b.get('proposed_by') or 'anon')}</code></small>
         </div>
       </div>
+      {presplit_details}
       {preview_block}
       <div class="btn-row">
-        <button class="btn js-approve-seed" data-slug="{esc_slug}">Approve &amp; Seed ch01</button>
+        <button class="btn js-approve-seed-review" data-hold="1" data-slug="{esc_slug}">Approve &amp; Seed to Review</button>
+        <button class="btn btn-sec js-approve-seed" data-hold="0" data-slug="{esc_slug}">Approve &amp; Seed (Auto-Merge)</button>
         <button class="btn btn-sec js-approve-open" data-slug="{esc_slug}">Approve &amp; Open ch01 (for Agents)</button>
         {retry_btn}
         <button class="btn btn-danger js-reject-book" data-slug="{esc_slug}">Reject Proposal</button>
@@ -635,7 +668,15 @@ def _render_admin_submission_card(s: dict[str, Any]) -> str:
             f"{_esc(r.get('reviewer_handle'))}: {float(r.get('weighted_score') or 0):.2f}/5"
             for r in reviews
         )
-        rev_html = f"<p style='margin:0.35rem 0 0; color:#94a3b8; font-size:0.84rem;'>Peer reviews: {scores_str}</p>"
+        rev_notes = "".join(
+            f"<div style='margin-top:0.4rem;'><strong>{_esc(r.get('reviewer_handle'))}</strong> ({float(r.get('weighted_score') or 0):.2f}/5)"
+            f"<pre>{_esc(str(r.get('body_md') or '')[:2000])}</pre></div>"
+            for r in reviews
+        )
+        rev_html = (
+            f"<p style='margin:0.35rem 0 0; color:#94a3b8; font-size:0.84rem;'>Peer reviews: {scores_str}</p>"
+            f"<details><summary>Read agent peer-review critiques ({len(reviews)})</summary>{rev_notes}</details>"
+        )
 
     actions_html = ""
     if status_str not in {"accepted", "rejected"}:
@@ -898,7 +939,7 @@ def create_app(
     mcp = MCPServer(
         "collab-books",
         title="Collab Books Multi-Agent Translation Hub",
-        version="3.2.0",
+        version="3.3.0",
         website_url=eff_cfg.public_base_url,
         instructions=MCP_SERVER_INSTRUCTIONS,
     )
@@ -923,13 +964,16 @@ def create_app(
         admin_token: Optional[str] = None,
     ) -> AuthContext:
         client_ip = request.client.host if request.client else "127.0.0.1"
+        eff_agent_key = agent_key
+        if not eff_agent_key and request.method == "GET":
+            eff_agent_key = request.query_params.get("agent_key") or None
         return resolve_auth(
             store=eff_service.store,
             cfg=eff_cfg,
             headers=dict(request.headers),
             request_path=request.url.path,
             client_ip=client_ip,
-            agent_key_arg=agent_key,
+            agent_key_arg=eff_agent_key,
             admin_token_arg=admin_token,
         )
 
@@ -1035,11 +1079,13 @@ def create_app(
         license_id: str,
         license_url: str,
         source_filename: str,
-        source_text: str,
+        source_text: str = "",
+        chapters: Optional[list[dict[str, Any]]] = None,
+        book_record: Optional[dict[str, Any]] = None,
         genre: str = "fiction",
         agent_key: str = "",
     ) -> dict[str, Any]:
-        """Propose a public-domain or permissively licensed book (held in pending_approval until Admin approves & seeds ch01)."""
+        """Propose a public-domain or permissively licensed book (held in pending_approval until Admin approves). Supports flat source_text OR pre-split chapters=[{'chapter_id','title','source_text'|'source_xml'}] plus optional initial book_record JSON produced by a local preprocessing script."""
         return eff_service.submit_book_proposal(
             _ctx(agent_key or None),
             slug=slug,
@@ -1051,6 +1097,8 @@ def create_app(
             license_url=license_url,
             source_filename=source_filename,
             source_text=source_text,
+            chapters=chapters,
+            book_record=book_record,
         )
 
     @mcp.tool()
@@ -1138,13 +1186,15 @@ def create_app(
     def approve_book_intake(
         book_slug: str,
         auto_seed: bool = True,
+        hold_for_review: bool = False,
         admin_token: str = "",
     ) -> dict[str, Any]:
-        """ADMIN: Approve a proposed book, extract chapters, and either auto-seed ch01 (auto_seed=True) or open ch01 directly for translating agents (auto_seed=False)."""
+        """ADMIN: Approve a proposed book, extract chapters, and auto-seed ch01 (auto_seed=True; pass hold_for_review=True to queue seed for peer/admin review) or open ch01 directly for translating agents (auto_seed=False)."""
         return eff_service.approve_book_intake(
             _ctx(admin_token=admin_token or None),
             book_slug=book_slug,
             auto_seed=auto_seed,
+            hold_for_review=hold_for_review,
         )
 
     @mcp.tool()
@@ -1176,11 +1226,16 @@ def create_app(
         return {"submissions": subs}
 
     @mcp.tool()
-    def seed_book(book_slug: str, admin_token: str = "") -> dict[str, Any]:
-        """ADMIN: Seed ch01 via review.vinhthang.dev /api/v1/translate + TRANSLATION_REVIEW."""
+    def seed_book(
+        book_slug: str,
+        hold_for_review: bool = False,
+        admin_token: str = "",
+    ) -> dict[str, Any]:
+        """ADMIN: Seed ch01 via review.vinhthang.dev /api/v1/translate + TRANSLATION_REVIEW (set hold_for_review=True to queue for peer/admin review)."""
         return eff_service.seed_book(
             _ctx(admin_token=admin_token or None),
             book_slug=book_slug,
+            hold_for_review=hold_for_review,
         )
 
     @mcp.tool()
@@ -1246,7 +1301,7 @@ def create_app(
             {
                 "status": "ok",
                 "service": "collab-mcp",
-                "version": "3.2.0",
+                "version": "3.3.0",
                 "books_repo": eff_cfg.books_repo_full_name,
             }
         )
@@ -1292,6 +1347,8 @@ def create_app(
                 license_url=str(body.get("license_url") or ""),
                 source_filename=str(body.get("source_filename") or "source.md"),
                 source_text=str(body.get("source_text") or ""),
+                chapters=body.get("chapters"),
+                book_record=body.get("book_record"),
             )
             return JSONResponse({"book": book}, status_code=201)
         except Exception as exc:
@@ -1360,6 +1417,7 @@ def create_app(
                 submission_id=body.get("submission_id"),
                 revision_token=body.get("revision_token"),
                 rebuttals=body.get("rebuttals"),
+                hold_for_review=bool(body.get("hold_for_review", False)),
             )
             return JSONResponse(out, status_code=code)
         except Exception as exc:
@@ -1459,7 +1517,17 @@ def create_app(
             ctx = _req_ctx(request, admin_token=body.get("admin_token"))
             slug = str(request.path_params["slug"])
             auto_seed = bool(body.get("auto_seed", True))
-            return JSONResponse({"book": eff_service.approve_book_intake(ctx, book_slug=slug, auto_seed=auto_seed)})
+            hold_for_review = bool(body.get("hold_for_review", False))
+            return JSONResponse(
+                {
+                    "book": eff_service.approve_book_intake(
+                        ctx,
+                        book_slug=slug,
+                        auto_seed=auto_seed,
+                        hold_for_review=hold_for_review,
+                    )
+                }
+            )
         except Exception as exc:
             return _error_response(exc)
 
@@ -1501,7 +1569,10 @@ def create_app(
             body = await _parse_json_body(request)
             ctx = _req_ctx(request, admin_token=body.get("admin_token"))
             slug = str(request.path_params["slug"])
-            return JSONResponse({"book": eff_service.seed_book(ctx, book_slug=slug)})
+            hold_for_review = bool(body.get("hold_for_review", False))
+            return JSONResponse(
+                {"book": eff_service.seed_book(ctx, book_slug=slug, hold_for_review=hold_for_review)}
+            )
         except Exception as exc:
             return _error_response(exc)
 

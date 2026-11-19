@@ -15,6 +15,7 @@ import httpx
 from scripts.collab_ledger import append_ledger_entry
 from scripts.compile_book import compile_book_formats
 from scripts.extract import extract_document
+from scripts.extractors.base import BaseExtractor
 from scripts.helper import atomic_write_json
 from scripts.mcp_server.config import McpServerConfig
 
@@ -77,8 +78,10 @@ class CollabBooksGitSync:
         manifest: dict[str, Any],
         source_filename: str,
         source_text: str,
+        proposed_chapters: Optional[list[dict[str, Any]]] = None,
+        initial_book_record: Optional[dict[str, Any]] = None,
     ) -> list[dict[str, Any]]:
-        """Write books/<slug> source & manifest and extract ch01..chNN/source.txt."""
+        """Write books/<slug> source & manifest and extract (or ingest pre-split) ch01..chNN/source.txt."""
         with self._lock:
             repo_dir = self.ensure_cloned()
             book_dir = repo_dir / "books" / slug
@@ -86,35 +89,66 @@ class CollabBooksGitSync:
             src_dir.mkdir(parents=True, exist_ok=True)
             safe_name = Path(source_filename).name or "source.md"
             src_file = src_dir / safe_name
-            src_file.write_text(source_text, encoding="utf-8")
-            atomic_write_json(book_dir / "manifest.json", manifest)
 
             run_dir = repo_dir / "runs" / slug
             run_dir.mkdir(parents=True, exist_ok=True)
             source_lang = str(manifest.get("source_lang") or "en")
-            extract_document(
-                input_path=src_file,
-                output_dir=run_dir,
-                slug=slug,
-                xml_segments=True,
-                source_lang=source_lang,
-            )
 
-            ch_dirs = sorted(p for p in run_dir.glob("ch[0-9]*") if p.is_dir())
             chapters_out: list[dict[str, Any]] = []
-            for idx, ch_dir in enumerate(ch_dirs, start=1):
-                src_txt_path = ch_dir / "source.txt"
-                src_xml = src_txt_path.read_text(encoding="utf-8") if src_txt_path.is_file() else ""
-                chapters_out.append(
-                    {
-                        "chapter_id": ch_dir.name,
-                        "chapter_num": idx,
-                        "title": f"Chapter {idx}",
-                        "source_xml": src_xml,
-                    }
+            if proposed_chapters:
+                archive_text = source_text
+                if not archive_text.strip():
+                    archive_parts = [
+                        f"# {c.get('title') or c.get('chapter_id')}\n\n{c.get('source_text') or c.get('source_xml') or ''}"
+                        for c in proposed_chapters
+                    ]
+                    archive_text = "\n\n".join(archive_parts)
+                src_file.write_text(archive_text, encoding="utf-8")
+                atomic_write_json(book_dir / "manifest.json", manifest)
+
+                for idx, item in enumerate(proposed_chapters, start=1):
+                    ch_id = str(item["chapter_id"])
+                    title = str(item.get("title") or f"Chapter {idx}")
+                    if item.get("source_xml"):
+                        src_xml = str(item["source_xml"])
+                    else:
+                        src_xml = BaseExtractor.segment_chapter_content(str(item.get("source_text") or ""))
+                    ch_dir = run_dir / ch_id
+                    ch_dir.mkdir(parents=True, exist_ok=True)
+                    (ch_dir / "source.txt").write_text(src_xml, encoding="utf-8")
+                    chapters_out.append(
+                        {
+                            "chapter_id": ch_id,
+                            "chapter_num": idx,
+                            "title": title,
+                            "source_xml": src_xml,
+                        }
+                    )
+            else:
+                src_file.write_text(source_text, encoding="utf-8")
+                atomic_write_json(book_dir / "manifest.json", manifest)
+                extract_document(
+                    input_path=src_file,
+                    output_dir=run_dir,
+                    slug=slug,
+                    xml_segments=True,
+                    source_lang=source_lang,
                 )
 
-            initial_record = {
+                ch_dirs = sorted(p for p in run_dir.glob("ch[0-9]*") if p.is_dir())
+                for idx, ch_dir in enumerate(ch_dirs, start=1):
+                    src_txt_path = ch_dir / "source.txt"
+                    src_xml = src_txt_path.read_text(encoding="utf-8") if src_txt_path.is_file() else ""
+                    chapters_out.append(
+                        {
+                            "chapter_id": ch_dir.name,
+                            "chapter_num": idx,
+                            "title": f"Chapter {idx}",
+                            "source_xml": src_xml,
+                        }
+                    )
+
+            initial_record: dict[str, Any] = {
                 "title": manifest.get("title", slug),
                 "author": manifest.get("author", "Unknown"),
                 "source_lang": source_lang,
@@ -124,6 +158,10 @@ class CollabBooksGitSync:
                 "terms": {},
                 "pronoun_pairs": [],
             }
+            if isinstance(initial_book_record, dict):
+                for key in ("characters", "terms", "pronoun_pairs", "style_notes"):
+                    if key in initial_book_record and initial_book_record[key]:
+                        initial_record[key] = initial_book_record[key]
             if not (run_dir / "book_record.json").is_file():
                 atomic_write_json(run_dir / "book_record.json", initial_record)
             return chapters_out
@@ -180,13 +218,14 @@ class CollabBooksGitSync:
 
             head_before = self._current_head_sha() or ("0" * 40)
             eff_reviewers = sorted({r for r in reviewer_handles if r}) or ["review-vinhthang-dev"]
+            peer_only = sorted({r for r in reviewer_handles if r and r != "review-vinhthang-dev"})
             ledger_entry = {
                 "chapter": chapter_id,
                 "issue_number": 0 if chapter_id == "ch01" else chapter_num,
                 "selected_pr": chapter_num,
                 "rejected_prs": [],
                 "translator_login": translator_handle or "anon-agent",
-                "reviewer_logins": [] if chapter_id == "ch01" else eff_reviewers,
+                "reviewer_logins": peer_only if chapter_id == "ch01" else eff_reviewers,
                 "reviewer_score": float(score_of_record),
                 "score_of_record": float(score_of_record),
                 "verdict": "PASS",

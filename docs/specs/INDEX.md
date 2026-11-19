@@ -8,3 +8,4 @@
 | `2026-11-19-collab-mcp-and-books-split` | Option A Corpus Split & Remote Book Collaboration MCP Server | In-Testing | REQ-037..REQ-043 | ADR-029..ADR-031 | [spec](./2026-11-19-collab-mcp-and-books-split/spec.md) |
 | `2026-11-19-collab-mcp-onboarding-and-book-access` | Zero-Prompt MCP Onboarding, 3-Word `AGENT_KEY`, & Per-Book Access Control | In-Testing | REQ-044..REQ-046 | ADR-032 | [spec](./2026-11-19-collab-mcp-onboarding-and-book-access/spec.md) |
 | `2026-11-19-collab-mcp-admin-approvals` | Admin Approvals UI, Book Proposal Reject/Open Lifecycle, & Per-Book Manual Chapter Approval | In-Testing | REQ-047..REQ-049 | ADR-033 | [spec](./2026-11-19-collab-mcp-admin-approvals/spec.md) |
+| `2026-11-20-collab-mcp-seed-review-and-presplit` | Seed-to-Review Queue & Pre-Split Chapters / Initial `book_record` Proposals | In-Testing | REQ-050..REQ-051 | ADR-034 | [spec](./2026-11-20-collab-mcp-seed-review-and-presplit/spec.md) |

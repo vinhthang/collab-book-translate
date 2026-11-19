@@ -521,7 +521,8 @@ def test_ac_049_admin_approvals_ui_bookshelf_links_and_xss_safety(tmp_path: Path
         for expected in (
             "Book Proposals &amp; Seeding Queue",
             "Chapter Translation Submissions Queue",
-            "Approve &amp; Seed ch01",
+            "Approve &amp; Seed to Review",
+            "Approve &amp; Seed (Auto-Merge)",
             "Approve &amp; Open ch01",
             "Reject Proposal",
             "Approve &amp; Merge",

@@ -51,6 +51,7 @@ SCHEMA_STATEMENTS_COMMON = (
         access_mode TEXT NOT NULL DEFAULT 'public',
         allowed_agents_json TEXT NOT NULL DEFAULT '[]',
         approval_mode TEXT NOT NULL DEFAULT 'auto',
+        proposed_chapters_json TEXT NOT NULL DEFAULT '[]',
         updated_at TEXT NOT NULL
     )
     """,
@@ -197,6 +198,7 @@ class CollabStore:
                         cur.execute("ALTER TABLE books ADD COLUMN IF NOT EXISTS access_mode TEXT NOT NULL DEFAULT 'public'")
                         cur.execute("ALTER TABLE books ADD COLUMN IF NOT EXISTS allowed_agents_json TEXT NOT NULL DEFAULT '[]'")
                         cur.execute("ALTER TABLE books ADD COLUMN IF NOT EXISTS approval_mode TEXT NOT NULL DEFAULT 'auto'")
+                        cur.execute("ALTER TABLE books ADD COLUMN IF NOT EXISTS proposed_chapters_json TEXT NOT NULL DEFAULT '[]'")
                         cur.execute("ALTER TABLE submissions ADD COLUMN IF NOT EXISTS author_ip_hash TEXT NOT NULL DEFAULT ''")
                     conn.commit()
             else:
@@ -215,6 +217,8 @@ class CollabStore:
                     conn.execute("ALTER TABLE books ADD COLUMN allowed_agents_json TEXT NOT NULL DEFAULT '[]'")
                 if "approval_mode" not in book_cols:
                     conn.execute("ALTER TABLE books ADD COLUMN approval_mode TEXT NOT NULL DEFAULT 'auto'")
+                if "proposed_chapters_json" not in book_cols:
+                    conn.execute("ALTER TABLE books ADD COLUMN proposed_chapters_json TEXT NOT NULL DEFAULT '[]'")
                 sub_cols = {r["name"] for r in conn.execute("PRAGMA table_info(submissions)").fetchall()}
                 if "author_ip_hash" not in sub_cols:
                     conn.execute("ALTER TABLE submissions ADD COLUMN author_ip_hash TEXT NOT NULL DEFAULT ''")
@@ -401,16 +405,18 @@ class CollabStore:
         source_filename: str = "source.md",
         release_tag: str = "",
         release_url: str = "",
+        proposed_chapters: Optional[list[dict[str, Any]]] = None,
     ) -> dict[str, Any]:
         now = _utc_iso()
+        ch_json = json.dumps(proposed_chapters or [], ensure_ascii=False)
         self._exec(
             """
             INSERT INTO books (
                 slug, title, author, source_lang, target_lang, genre,
                 license_id, license_url, status, glossary_sha, book_record_json,
                 manifest_json, source_text, source_filename, proposed_by,
-                release_tag, release_url, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                release_tag, release_url, proposed_chapters_json, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(slug) DO UPDATE SET
                 title = excluded.title,
                 author = excluded.author,
@@ -427,6 +433,7 @@ class CollabStore:
                 source_filename = excluded.source_filename,
                 release_tag = CASE WHEN excluded.release_tag != '' THEN excluded.release_tag ELSE books.release_tag END,
                 release_url = CASE WHEN excluded.release_url != '' THEN excluded.release_url ELSE books.release_url END,
+                proposed_chapters_json = CASE WHEN excluded.proposed_chapters_json != '[]' THEN excluded.proposed_chapters_json ELSE books.proposed_chapters_json END,
                 updated_at = excluded.updated_at
             """,
             (
@@ -447,6 +454,7 @@ class CollabStore:
                 proposed_by,
                 release_tag,
                 release_url,
+                ch_json,
                 now,
             ),
         )
@@ -462,6 +470,7 @@ class CollabStore:
         out["access_mode"] = str(out.get("access_mode") or "public")
         out["allowed_agents"] = json.loads(out.pop("allowed_agents_json", "[]") or "[]")
         out["approval_mode"] = str(out.get("approval_mode") or "auto")
+        out["proposed_chapters"] = json.loads(out.pop("proposed_chapters_json", "[]") or "[]")
         return out
 
     def get_book(self, slug: str) -> Optional[dict[str, Any]]:

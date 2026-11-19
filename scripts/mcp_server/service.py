@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import secrets
 import time
 from typing import Any, Optional
@@ -34,6 +35,9 @@ from scripts.mcp_server.db import CollabStore
 from scripts.mcp_server.git_sync import CollabBooksGitSync
 
 MAX_MCP_XML_BYTES = 524_288  # 512 KB cap per REQ-040
+MAX_PROPOSED_CHAPTERS = 200
+MAX_BOOK_PROPOSAL_BYTES = 5_242_880  # 5 MiB cap
+_PROPOSED_CHAPTER_ID_RE = re.compile(r"^ch\d{2,4}$")
 ALLOWED_LICENSES = frozenset(
     {"public-domain", "CC0-1.0", "CC-BY-4.0", "CC-BY-SA-4.0", "owner-permission"}
 )
@@ -57,6 +61,103 @@ def _normalize_approval_mode(approval_mode: str) -> str:
     if mode not in VALID_APPROVAL_MODES:
         raise ServiceError("approval_mode must be 'auto' or 'manual'", status_code=400)
     return mode
+
+
+def _normalize_proposed_chapters(
+    chapters: Any,
+) -> tuple[list[dict[str, str]], int, str]:
+    """Validate and normalize pre-split chapters submitted from local agent preprocessing."""
+    if chapters is None:
+        return [], 0, ""
+    if not isinstance(chapters, list):
+        raise ServiceError("chapters must be a list of chapter objects", status_code=400)
+    if len(chapters) > MAX_PROPOSED_CHAPTERS:
+        raise ServiceError(f"chapters exceeds maximum of {MAX_PROPOSED_CHAPTERS}", status_code=400)
+
+    normalized: list[dict[str, str]] = []
+    seen_ids: set[str] = set()
+    total_bytes = 0
+    scan_chunks: list[str] = []
+
+    for idx, raw in enumerate(chapters, start=1):
+        if not isinstance(raw, dict):
+            raise ServiceError(f"chapters[{idx - 1}] must be an object", status_code=400)
+        ch_id = str(raw.get("chapter_id") or f"ch{idx:02d}").strip().lower()
+        if not _PROPOSED_CHAPTER_ID_RE.match(ch_id) or ch_id in seen_ids:
+            raise ServiceError(
+                f"Invalid or duplicate chapter_id '{ch_id}' (expected unique ch01..ch9999)",
+                status_code=400,
+            )
+        seen_ids.add(ch_id)
+
+        title = str(raw.get("title") or f"Chapter {idx}").strip() or f"Chapter {idx}"
+        src_text = str(raw.get("source_text") or "")
+        src_xml = str(raw.get("source_xml") or "")
+        if not src_text.strip() and not src_xml.strip():
+            raise ServiceError(
+                f"Chapter '{ch_id}' must supply non-empty source_text or source_xml",
+                status_code=400,
+            )
+        if src_xml.strip():
+            segs = parse_segments(src_xml)
+            seg_ids = [s.get("id", "") for s in segs]
+            if (
+                not segs
+                or len(set(seg_ids)) != len(seg_ids)
+                or any(not str(s.get("original") or "").strip() for s in segs)
+            ):
+                raise ServiceError(
+                    f"Chapter '{ch_id}' source_xml contains invalid, duplicate, or empty <segment> blocks",
+                    status_code=422,
+                )
+
+        total_bytes += len(src_text.encode("utf-8")) + len(src_xml.encode("utf-8"))
+        scan_chunks.append(f"{title}\n{src_text[:4000]}\n{src_xml[:4000]}")
+        normalized.append(
+            {
+                "chapter_id": ch_id,
+                "title": title,
+                "source_text": src_text,
+                "source_xml": src_xml,
+            }
+        )
+
+    return normalized, total_bytes, "\n".join(scan_chunks)
+
+
+def _merge_initial_book_record(
+    base: dict[str, Any],
+    supplied: Any,
+) -> tuple[dict[str, Any], list[str]]:
+    """Validate optional agent-provided book_record and scan it for prompt injections."""
+    if supplied is None:
+        return base, []
+    if not isinstance(supplied, dict):
+        raise ServiceError("book_record must be a JSON object", status_code=400)
+
+    merged = json.loads(json.dumps(base))
+    chars = supplied.get("characters")
+    if isinstance(chars, dict):
+        merged["characters"] = {
+            str(k).strip(): str(v).strip()
+            for k, v in chars.items()
+            if str(k).strip() and str(v).strip()
+        }
+    terms = supplied.get("terms")
+    if isinstance(terms, dict):
+        merged["terms"] = {
+            str(k).strip(): str(v).strip()
+            for k, v in terms.items()
+            if str(k).strip() and str(v).strip()
+        }
+    pairs = supplied.get("pronoun_pairs")
+    if isinstance(pairs, list):
+        merged["pronoun_pairs"] = [p for p in pairs if isinstance(p, dict)]
+    if isinstance(supplied.get("style_notes"), str) and supplied["style_notes"].strip():
+        merged["style_notes"] = supplied["style_notes"].strip()
+
+    inj = detect_prompt_injection(json.dumps(merged, ensure_ascii=False)[:16000])
+    return merged, inj
 
 
 class ServiceError(RuntimeError):
@@ -216,6 +317,7 @@ class CollabMcpService:
                 1 for s in subs if s["status"] in ACTIONABLE_SUBMISSION_STATUSES
             )
             allowed = list(b.get("allowed_agents") or [])
+            proposed_ch = list(b.get("proposed_chapters") or [])
             item: dict[str, Any] = {
                 "slug": b["slug"],
                 "title": b["title"],
@@ -229,6 +331,7 @@ class CollabMcpService:
                 "approval_mode": str(b.get("approval_mode") or "auto"),
                 "allowed_agent_count": len(allowed),
                 "pending_approvals": pending_approvals,
+                "proposed_chapter_count": len(proposed_ch),
                 "glossary_sha": b["glossary_sha"],
                 "total_chapters": len(chapters),
                 "accepted_chapters": done_cnt,
@@ -237,11 +340,24 @@ class CollabMcpService:
                 "release_url": b["release_url"],
             }
             if ctx.tier == "ADMIN":
+                br = b.get("book_record") or {}
                 item["allowed_agents"] = allowed
                 item["proposed_by"] = b["proposed_by"]
                 item["license_url"] = b["license_url"]
                 item["source_filename"] = b.get("source_filename") or ""
                 item["source_preview"] = (b.get("source_text") or "")[:2000]
+                item["proposed_chapters_summary"] = [
+                    {
+                        "chapter_id": str(c.get("chapter_id") or ""),
+                        "title": str(c.get("title") or ""),
+                    }
+                    for c in proposed_ch[:25]
+                ]
+                item["initial_glossary_counts"] = {
+                    "characters": len(br.get("characters") or {}),
+                    "terms": len(br.get("terms") or {}),
+                    "pronoun_pairs": len(br.get("pronoun_pairs") or []),
+                }
             summary.append(item)
         return summary
 
@@ -263,6 +379,8 @@ class CollabMcpService:
         ]
         out = dict(book)
         out.pop("source_text", None)
+        proposed_ch = list(out.pop("proposed_chapters", None) or [])
+        out["proposed_chapter_count"] = len(proposed_ch)
         allowed = list(out.get("allowed_agents") or [])
         out["allowed_agent_count"] = len(allowed)
         if ctx.tier != "ADMIN":
@@ -285,7 +403,7 @@ class CollabMcpService:
         revisions_needed: list[dict[str, Any]] = []
 
         for b in books:
-            if not b or b["status"] not in {"active", "published"}:
+            if not b or b["status"] not in {"active", "published", "seeding"}:
                 continue
             if not self._can_access_book_work(ctx, b):
                 continue
@@ -294,7 +412,7 @@ class CollabMcpService:
             pending_admin_chapters = {
                 s["chapter_id"] for s in subs if s["status"] == "pending_admin_approval"
             }
-            if role in {"all", "translator"}:
+            if b["status"] in {"active", "published"} and role in {"all", "translator"}:
                 for c in self.store.list_chapters(slug):
                     if c["status"] != "open" or c["chapter_id"] in pending_admin_chapters:
                         continue
@@ -315,7 +433,8 @@ class CollabMcpService:
                     )
             for sub in subs:
                 if (
-                    role in {"all", "translator"}
+                    b["status"] in {"active", "published"}
+                    and role in {"all", "translator"}
                     and sub["author_actor_id"] == ctx.actor_id
                     and sub["status"] == "remediation_required"
                 ):
@@ -412,7 +531,9 @@ class CollabMcpService:
         license_id: str,
         license_url: str,
         source_filename: str,
-        source_text: str,
+        source_text: str = "",
+        chapters: Optional[list[dict[str, Any]]] = None,
+        book_record: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         self._check_write_rate(ctx)
         clean_slug = slug.strip().lower()
@@ -424,13 +545,29 @@ class CollabMcpService:
             raise ServiceError(f"Disallowed license '{license_id}'", status_code=400)
         if not license_url.strip().startswith("https://"):
             raise ServiceError("license_url must be a valid https:// URL", status_code=400)
+
+        norm_chapters, ch_bytes, ch_scan_text = _normalize_proposed_chapters(chapters)
         raw_bytes = len(source_text.encode("utf-8"))
-        if raw_bytes == 0 or raw_bytes > 5_242_880:
-            raise ServiceError("source_text must be non-empty and <= 5 MiB via MCP", status_code=413)
+        total_bytes = raw_bytes + ch_bytes
+        if total_bytes == 0:
+            raise ServiceError("Either source_text or non-empty chapters is required", status_code=400)
+        if total_bytes > MAX_BOOK_PROPOSAL_BYTES:
+            raise ServiceError("Book proposal payload exceeds 5 MiB cap via MCP", status_code=413)
         if self.store.get_book(clean_slug) is not None:
             raise ServiceError(f"Book '{clean_slug}' already exists", status_code=409)
 
-        inj = detect_prompt_injection(f"{title}\n{author}\n{source_text[:32000]}")
+        base_record = {
+            "title": title.strip(),
+            "author": author.strip(),
+            "source_lang": source_lang,
+            "target_lang": target_lang,
+            "genre": genre.strip() or "fiction",
+            "characters": {},
+            "terms": {},
+            "pronoun_pairs": [],
+        }
+        merged_record, rec_inj = _merge_initial_book_record(base_record, book_record)
+        inj = detect_prompt_injection(f"{title}\n{author}\n{source_text[:32000]}\n{ch_scan_text}") + rec_inj
         init_status = "flagged_security" if inj else "pending_approval"
         manifest = {
             "slug": clean_slug,
@@ -453,23 +590,17 @@ class CollabMcpService:
             license_url=license_url.strip(),
             status=init_status,
             glossary_sha="",
-            book_record={
-                "title": title.strip(),
-                "author": author.strip(),
-                "source_lang": source_lang,
-                "target_lang": target_lang,
-                "genre": genre.strip() or "fiction",
-                "characters": {},
-                "terms": {},
-                "pronoun_pairs": [],
-            },
+            book_record=merged_record,
             manifest=manifest,
             proposed_by=ctx.handle,
             source_text=source_text,
             source_filename=source_filename.strip() or f"{clean_slug}.md",
+            proposed_chapters=norm_chapters,
         )
         out = dict(book)
         out.pop("source_text", None)
+        out.pop("proposed_chapters", None)
+        out["proposed_chapter_count"] = len(norm_chapters)
         return out
 
     def submit_translation(
@@ -484,6 +615,7 @@ class CollabMcpService:
         submission_id: Optional[str] = None,
         revision_token: Optional[str] = None,
         rebuttals: Optional[list[dict[str, str]]] = None,
+        hold_for_review: bool = False,
     ) -> tuple[int, dict[str, Any]]:
         """Validate, scan, run review.vinhthang.dev round, and auto-sync on PASS."""
         self._check_write_rate(ctx)
@@ -683,7 +815,9 @@ class CollabMcpService:
         final_txt = _render_final_txt(translation_xml)
 
         if verdict == "PASS":
-            if str(book.get("approval_mode") or "auto") == "manual" and ctx.tier != "ADMIN":
+            hold_manual = str(book.get("approval_mode") or "auto") == "manual" and ctx.tier != "ADMIN"
+            hold_admin_seed = bool(hold_for_review) and ctx.tier == "ADMIN"
+            if hold_manual or hold_admin_seed:
                 sub_status = "pending_admin_approval"
             else:
                 self.review_client.approve_workstream(workstream_id=ws_id)
@@ -859,6 +993,9 @@ class CollabMcpService:
         sub = self.store.get_submission(submission_id)
         if sub is None:
             raise ServiceError(f"Submission '{submission_id}' not found", status_code=404)
+        book = self.store.get_book(sub["book_slug"])
+        if book is not None:
+            self._assert_book_work_access(ctx, book)
         reviews = self.store.list_peer_reviews(submission_id)
         return {
             "submission": _sanitize_submission_public(sub),
@@ -1015,6 +1152,7 @@ class CollabMcpService:
         *,
         book_slug: str,
         auto_seed: bool = True,
+        hold_for_review: bool = False,
     ) -> dict[str, Any]:
         assert_admin(ctx)
         book = self.store.get_book(book_slug)
@@ -1030,6 +1168,8 @@ class CollabMcpService:
                 manifest=book["manifest"],
                 source_filename=book.get("source_filename") or f"{book_slug}.md",
                 source_text=book.get("source_text") or "",
+                proposed_chapters=book.get("proposed_chapters") or None,
+                initial_book_record=book.get("book_record") or None,
             )
             if not extracted:
                 raise ServiceError(f"Zero chapters extracted for '{book_slug}'", status_code=422)
@@ -1047,7 +1187,7 @@ class CollabMcpService:
 
         if auto_seed:
             self.store.set_book_status(slug=book_slug, status="seeding")
-            return self.seed_book(ctx, book_slug=book_slug)
+            return self.seed_book(ctx, book_slug=book_slug, hold_for_review=hold_for_review)
         self.store.set_book_status(slug=book_slug, status="active")
         return self.get_book(ctx, book_slug=book_slug)
 
@@ -1071,10 +1211,17 @@ class CollabMcpService:
         updated = self.store.set_book_status(slug=book_slug, status="rejected")
         out = dict(updated)
         out.pop("source_text", None)
+        out.pop("proposed_chapters", None)
         out["rejection_reason"] = reason.strip()
         return out
 
-    def seed_book(self, ctx: AuthContext, *, book_slug: str) -> dict[str, Any]:
+    def seed_book(
+        self,
+        ctx: AuthContext,
+        *,
+        book_slug: str,
+        hold_for_review: bool = False,
+    ) -> dict[str, Any]:
         assert_admin(ctx)
         book = self.store.get_book(book_slug)
         if book is None:
@@ -1084,6 +1231,12 @@ class CollabMcpService:
             raise ServiceError(f"Book '{book_slug}' has no extracted ch01", status_code=400)
         if ch01["status"] == "accepted":
             return self.get_book(ctx, book_slug=book_slug)
+        existing_ch01_subs = self.store.list_submissions(book_slug=book_slug, chapter_id="ch01")
+        if any(s["status"] == "pending_admin_approval" for s in existing_ch01_subs):
+            raise ServiceError(
+                f"Book '{book_slug}' already has a ch01 seed awaiting admin review",
+                status_code=409,
+            )
 
         try:
             tr_out = self.review_client.translate_chapter(
@@ -1101,8 +1254,10 @@ class CollabMcpService:
                 translation_xml=str(tr_out["translationXml"]),
                 engine_model=f"seed:{tr_out.get('engineUsed', 'gemini')}",
                 additions=tr_out.get("additions") or {"proposals": []},
+                hold_for_review=hold_for_review,
             )
-            if sub_payload["submission"]["status"] != "accepted":
+            expected_status = "pending_admin_approval" if hold_for_review else "accepted"
+            if sub_payload["submission"]["status"] != expected_status:
                 raise RuntimeError("ch01 seed translation did not pass TRANSLATION_REVIEW")
         except Exception as exc:
             self.store.upsert_book(
@@ -1122,7 +1277,10 @@ class CollabMcpService:
             )
             raise ServiceError(f"ch01 seed failed: {exc}", status_code=422) from exc
 
-        return self.get_book(ctx, book_slug=book_slug)
+        res = self.get_book(ctx, book_slug=book_slug)
+        res["seed_submission_id"] = sub_payload["submission"]["id"]
+        res["seed_submission_status"] = sub_payload["submission"]["status"]
+        return res
 
     def trigger_starved_fallback(
         self,
