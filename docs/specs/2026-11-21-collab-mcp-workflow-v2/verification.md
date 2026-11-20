@@ -72,11 +72,15 @@ Governing specification: [spec.md](./spec.md)
 - Command: `uv run pytest -q`, `node --check`, `mutation_runner.py` on `scripts/mcp_server/{auth,service,app}.py`, and `prepare_code_review.py` (exit code: `0`)
 - Output excerpt:
   ```text
-  337 passed, 6 warnings in 29.29s
+  338 passed, 6 warnings
   [Mutation Guard] scripts/mcp_server/auth.py -> Mutation Score: 93.3% (14/15 killed)
   [Mutation Guard] scripts/mcp_server/service.py -> Mutation Score: 80.0% (12/15 killed)
   [Mutation Guard] scripts/mcp_server/app.py -> Mutation Score: 93.3% (14/15 killed)
   ```
-- Result: AC-052-1 `PASS`, AC-052-2 `PASS`, AC-053-1 `PASS`, AC-053-2 `PASS`, AC-054-1 `PASS`, AC-054-2 `PASS`, AC-055-1 `PASS`, AC-055-2 `PASS`, AC-056-1 `PASS`, AC-056-2 `PASS` — Full suite (`337 passed`), `_ADMIN_JS` syntax check, mutation testing (`80.0%`–`93.3%`), and single-agent `code-review` (`Approved`, `0 P0`, `0 P1`) all passed.
+- Result: AC-052-1 `PASS`, AC-052-2 `PASS`, AC-053-1 `PASS`, AC-053-2 `PASS`, AC-054-1 `PASS`, AC-054-2 `PASS`, AC-055-1 `PASS`, AC-055-2 `PASS`, AC-056-1 `PASS`, AC-056-2 `PASS` — Full suite (`338 passed`), `_ADMIN_JS` syntax check, mutation testing (`80.0%`–`93.3%`), and single-agent `code-review` (`Approved`, `0 P0`, `0 P1`) all passed.
 
 ## Real-world observations
+
+- **2026-11-21 Live E2E (`collab-mcp:v0.2.0` -> `v0.2.1` on `https://collab.vinhthang.dev` + `https://review.vinhthang.dev`)**:
+  - Initial `v0.2.0` live run surfaced that `review-server:v1.0.0` defaults `vi-literary-fluency` and `vi-terminology-pronoun-hawk` to `deepseek-v3` (while cluster secrets only enable the warm `agy` `gemini` supervisor). Resolved in `v0.2.1` (`e5afe74`) by adding `McpServerConfig.review_engine` (`default="gemini"`) mapped to `engineOverrides` across all 4 `TRANSLATION_REVIEW` agents plus `background=True` (`202 evaluating` + `get_submission_status` polling) on `submit_translation`.
+  - Full 12-step live E2E (`verify_live_v020.py`, Helm `fleet` revision `220741`) passed `12/12` checks cleanly: `GET /api/health` (`version=4.0.0`), MCP `initialize` / `tools/list` (`25` tools) / `prompts/list` (`3` prompts), `set_agent_role` `agent_admin` promotion & `403` authority boundaries, `approve_book_intake(queue_for_parse=True)` -> `approved_pending_parse`, `get_book_source` + `submit_book_parse` -> `seeding`, Round-1 `submit_translation(background=True)` settling in `65.3s` -> `pending_review`, `get_submission_status(include_context=True, include_workstream=True)` + `query_submissions` with zero secret leaks, Peer Reviewer `verdict="CHANGES_REQUESTED"` -> `remediation_required`, Round-2 revision settling in `57.6s` -> `pending_review` (`rounds_history=3`), and clean rejection leaving `collab-mcp-755f68c49d-n46bs` at `1/1 Running` (`0` restarts) with zero leftover disk directories and the public bookshelf untouched.
