@@ -81,6 +81,8 @@ class CollabBooksGitSync:
         source_text: str,
         proposed_chapters: Optional[list[dict[str, Any]]] = None,
         initial_book_record: Optional[dict[str, Any]] = None,
+        initial_brief: Optional[dict[str, Any]] = None,
+        overwrite_record: bool = False,
     ) -> list[dict[str, Any]]:
         """Write books/<slug> source & manifest and extract (or ingest pre-split) ch01..chNN/source.txt."""
         with self._lock:
@@ -106,6 +108,11 @@ class CollabBooksGitSync:
                     archive_text = "\n\n".join(archive_parts)
                 src_file.write_text(archive_text, encoding="utf-8")
                 atomic_write_json(book_dir / "manifest.json", manifest)
+
+                keep_ids = {str(item["chapter_id"]) for item in proposed_chapters}
+                for stale_dir in run_dir.glob("ch[0-9]*"):
+                    if stale_dir.is_dir() and stale_dir.name not in keep_ids:
+                        shutil.rmtree(stale_dir)
 
                 for idx, item in enumerate(proposed_chapters, start=1):
                     ch_id = str(item["chapter_id"])
@@ -160,12 +167,45 @@ class CollabBooksGitSync:
                 "pronoun_pairs": [],
             }
             if isinstance(initial_book_record, dict):
-                for key in ("characters", "terms", "pronoun_pairs", "style_notes"):
+                for key in ("characters", "terms", "pronoun_pairs", "names", "pronouns", "style_notes"):
                     if key in initial_book_record and initial_book_record[key]:
                         initial_record[key] = initial_book_record[key]
-            if not (run_dir / "book_record.json").is_file():
+            if overwrite_record or not (run_dir / "book_record.json").is_file():
                 atomic_write_json(run_dir / "book_record.json", initial_record)
+            if initial_brief is not None and (overwrite_record or not (run_dir / "brief.json").is_file()):
+                atomic_write_json(run_dir / "brief.json", initial_brief)
             return chapters_out
+
+    def write_brief_and_record(
+        self,
+        *,
+        slug: str,
+        brief: Optional[dict[str, Any]] = None,
+        book_record: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """Persist runs/<slug>/brief.json and/or runs/<slug>/book_record.json on disk."""
+        with self._lock:
+            repo_dir = self.ensure_cloned()
+            run_dir = repo_dir / "runs" / slug
+            run_dir.mkdir(parents=True, exist_ok=True)
+            if brief is not None:
+                atomic_write_json(run_dir / "brief.json", brief)
+            if book_record is not None:
+                atomic_write_json(run_dir / "book_record.json", book_record)
+
+    def read_ledger(self, slug: str) -> dict[str, Any]:
+        """Read runs/<slug>/collab_ledger.json if present."""
+        if not slug or "/" in slug or "\\" in slug or slug in {".", ".."}:
+            return {}
+        with self._lock:
+            ledger_path = self._cfg.books_repo_dir / "runs" / slug / "collab_ledger.json"
+            if not ledger_path.is_file():
+                return {}
+            try:
+                data = json.loads(ledger_path.read_text(encoding="utf-8"))
+                return data if isinstance(data, dict) else {}
+            except Exception:
+                return {}
 
     def sync_accepted_chapter(
         self,
@@ -182,6 +222,7 @@ class CollabBooksGitSync:
         reviewer_handles: list[str],
         score_of_record: float,
         all_chapters_status: list[dict[str, Any]],
+        brief: Optional[dict[str, Any]] = None,
     ) -> str:
         """Write chapter files, book_record, checklist, and collab_ledger, then commit & push."""
         with self._lock:
@@ -199,6 +240,8 @@ class CollabBooksGitSync:
             (ch_dir / "translation.xml").write_text(translation_xml, encoding="utf-8")
             (ch_dir / "final.txt").write_text(final_txt, encoding="utf-8")
             atomic_write_json(run_dir / "book_record.json", book_record)
+            if brief:
+                atomic_write_json(run_dir / "brief.json", brief)
 
             checklist_payload = {
                 "book_slug": slug,

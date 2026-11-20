@@ -78,6 +78,7 @@ def run_mcp_command(
     license_name: str = "public-domain",
     license_url: str = "",
     genre: str = "fiction",
+    parse_file: str = "",
     translation_file: str = "",
     additions_file: Optional[str] = None,
     engine_model: str = "mcp-agent",
@@ -85,6 +86,10 @@ def run_mcp_command(
     revision_token: Optional[str] = None,
     rebuttals_file: Optional[str] = None,
     review_file: str = "",
+    verdict: str = "COMMENT",
+    issues_file: Optional[str] = None,
+    status: str = "",
+    author_handle: str = "",
     output_file: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Execute worker subcommands over HTTP against collab-mcp (ANONYMOUS or AGENT_KEY)."""
@@ -112,6 +117,36 @@ def run_mcp_command(
             resp = client.get(
                 f"{base}/api/v1/books/{book_slug}/chapters/{chapter}",
                 headers=headers,
+            )
+        elif subcommand == "get-book-source":
+            resp = client.get(
+                f"{base}/api/v1/books/{book_slug}/source",
+                headers=headers,
+            )
+        elif subcommand == "submit-book-parse":
+            pf = Path(parse_file)
+            if not pf.is_file():
+                return {"success": False, "error": f"Parse package file not found: {parse_file}"}
+            parse_payload = json.loads(pf.read_text(encoding="utf-8"))
+            resp = client.post(
+                f"{base}/api/v1/books/{book_slug}/parse",
+                headers=headers,
+                json=parse_payload,
+            )
+        elif subcommand == "query-submissions":
+            q_params: Dict[str, str] = {}
+            if book_slug:
+                q_params["book_slug"] = book_slug
+            if chapter:
+                q_params["chapter_id"] = chapter
+            if status:
+                q_params["status"] = status
+            if author_handle or author:
+                q_params["author_handle"] = author_handle or author
+            resp = client.get(
+                f"{base}/api/v1/submissions",
+                headers=headers,
+                params=q_params,
             )
         elif subcommand == "submit-book":
             sf = Path(source_file)
@@ -156,10 +191,19 @@ def run_mcp_command(
             rf = Path(review_file)
             if not rf.is_file():
                 return {"success": False, "error": f"Review file not found: {review_file}"}
+            eff_verdict = (verdict or "COMMENT").strip().upper()
+            if eff_verdict == "REQUEST_CHANGES":
+                eff_verdict = "CHANGES_REQUESTED"
+            rev_payload: Dict[str, Any] = {
+                "body_md": rf.read_text(encoding="utf-8"),
+                "verdict": eff_verdict,
+            }
+            if issues_file:
+                rev_payload["issues"] = json.loads(Path(issues_file).read_text(encoding="utf-8"))
             resp = client.post(
                 f"{base}/api/v1/submissions/{submission_id}/reviews",
                 headers=headers,
-                json={"body_md": rf.read_text(encoding="utf-8")},
+                json=rev_payload,
             )
         else:
             return {"success": False, "error": f"Unsupported MCP subcommand: {subcommand}"}
@@ -173,6 +217,8 @@ def run_mcp_command(
             }
         if subcommand == "get-chapter" and output_file and "source_xml" in data:
             Path(output_file).write_text(str(data["source_xml"]), encoding="utf-8")
+        if subcommand == "get-book-source" and output_file and "source_text" in data:
+            Path(output_file).write_text(str(data["source_text"]), encoding="utf-8")
         return {"success": True, **data}
     finally:
         if close_after:
@@ -870,9 +916,32 @@ def main() -> None:
     p_getc.add_argument("--chapter", required=True)
     p_getc.add_argument("--output-file")
 
+    # get-book-source (MCP mode)
+    p_gets = subparsers.add_parser("get-book-source", help="Fetch full raw manuscript source from collab-mcp.")
+    p_gets.add_argument("--mcp-url", default="")
+    p_gets.add_argument("--agent-key", default="")
+    p_gets.add_argument("--book-slug", required=True)
+    p_gets.add_argument("--output-file")
+
+    # submit-book-parse (MCP mode, agent_admin / ADMIN)
+    p_parse = subparsers.add_parser("submit-book-parse", help="Upload parsed chapters, brief, and book_record to collab-mcp.")
+    p_parse.add_argument("--mcp-url", default="")
+    p_parse.add_argument("--agent-key", default="")
+    p_parse.add_argument("--book-slug", required=True)
+    p_parse.add_argument("--parse-file", required=True)
+
+    # query-submissions (MCP mode)
+    p_qsub = subparsers.add_parser("query-submissions", help="Query chapter submissions across books/chapters/statuses.")
+    p_qsub.add_argument("--mcp-url", default="")
+    p_qsub.add_argument("--agent-key", default="")
+    p_qsub.add_argument("--book-slug")
+    p_qsub.add_argument("--chapter")
+    p_qsub.add_argument("--status", default="")
+    p_qsub.add_argument("--author-handle", default="")
+
     # list-tasks
     p_list = subparsers.add_parser("list-tasks", help="List tasks filtered by role.")
-    p_list.add_argument("--role", choices=["translator", "reviewer", "all"], default="all")
+    p_list.add_argument("--role", choices=["translator", "reviewer", "agent_admin", "all"], default="all")
     p_list.add_argument("--gh-user")
     p_list.add_argument("--mcp-url", default="")
     p_list.add_argument("--agent-key", default="")
@@ -930,11 +999,13 @@ def main() -> None:
     p_rev.add_argument("--submission-id")
     p_rev.add_argument("--review-file", required=True)
     p_rev.add_argument("--event", choices=["COMMENT", "APPROVE", "REQUEST_CHANGES"], default="COMMENT")
+    p_rev.add_argument("--verdict", choices=["", "COMMENT", "APPROVE", "CHANGES_REQUESTED", "REQUEST_CHANGES"], default="")
+    p_rev.add_argument("--issues-file")
     p_rev.add_argument("--config")
 
     args = parser.parse_args()
 
-    if args.subcommand in ("register-agent", "get-chapter"):
+    if args.subcommand in ("register-agent", "get-chapter", "get-book-source", "submit-book-parse", "query-submissions"):
         mode_info = resolve_worker_mode(None, args.mcp_url)
         if mode_info["mode"] != "mcp":
             print(json.dumps({"success": False, "error": mode_info["error"]}, indent=2))
@@ -948,6 +1019,9 @@ def main() -> None:
             handle=getattr(args, "handle", ""),
             display_name=getattr(args, "display_name", ""),
             model_info=getattr(args, "model_info", ""),
+            parse_file=getattr(args, "parse_file", ""),
+            status=getattr(args, "status", ""),
+            author_handle=getattr(args, "author_handle", ""),
             output_file=getattr(args, "output_file", None),
         )
         print(json.dumps(res, indent=2, ensure_ascii=False))
@@ -961,6 +1035,7 @@ def main() -> None:
             print(json.dumps({"success": False, "error": mode_info["error"]}, indent=2))
             sys.exit(1)
         if mode_info["mode"] == "mcp":
+            eff_verdict = getattr(args, "verdict", "") or getattr(args, "event", "COMMENT")
             res = run_mcp_command(
                 subcommand=args.subcommand,
                 mcp_url=mode_info["target"],
@@ -984,6 +1059,8 @@ def main() -> None:
                 revision_token=getattr(args, "revision_token", None),
                 rebuttals_file=getattr(args, "rebuttals_file", None),
                 review_file=getattr(args, "review_file", ""),
+                verdict=eff_verdict,
+                issues_file=getattr(args, "issues_file", None),
             )
             print(json.dumps(res, indent=2, ensure_ascii=False))
             if not res.get("success"):

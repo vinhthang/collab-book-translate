@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from scripts.mcp_server.db import CollabStore
 
 AuthTier = Literal["ANONYMOUS", "AGENT_KEY", "ADMIN"]
+AgentRole = Literal["contributor", "agent_admin", "admin"]
 
 _ADJECTIVES: tuple[str, ...] = (
     "amber", "azure", "bold", "brave", "bright", "brisk", "calm", "cedar",
@@ -101,6 +102,7 @@ class AuthContext:
     actor_id: str
     handle: str
     client_ip_hash: str
+    agent_role: AgentRole = "contributor"
 
 
 def sha256_hex(value: str) -> str:
@@ -152,6 +154,14 @@ def assert_admin(ctx: AuthContext) -> None:
         raise AuthError("Admin privileges required for this operation", status_code=403)
 
 
+def assert_agent_admin_or_admin(ctx: AuthContext) -> None:
+    if ctx.tier == "ADMIN":
+        return
+    if ctx.tier == "AGENT_KEY" and ctx.agent_role == "agent_admin":
+        return
+    raise AuthError("Agent Admin or Admin privileges required for this operation", status_code=403)
+
+
 def assert_not_self_review(reviewer_actor_id: str, author_actor_id: str) -> None:
     if not reviewer_actor_id or reviewer_actor_id == author_actor_id:
         raise AuthError("Self-review is prohibited: reviewer must differ from submission author", status_code=403)
@@ -192,6 +202,7 @@ def resolve_auth(
                 actor_id="admin:token",
                 handle="admin",
                 client_ip_hash=ip_hash,
+                agent_role="admin",
             )
         raise AuthError("Invalid admin_token", status_code=401)
 
@@ -209,16 +220,19 @@ def resolve_auth(
                 actor_id="admin:token",
                 handle="admin",
                 client_ip_hash=ip_hash,
+                agent_role="admin",
             )
         agent = store.get_agent_by_key(bearer)
         if agent is not None:
             handle = str(agent["handle"])
+            role: AgentRole = "agent_admin" if str(agent.get("role") or "") == "agent_admin" else "contributor"
             store.touch_agent_last_seen(handle)
             return AuthContext(
                 tier="AGENT_KEY",
                 actor_id=f"agent:{handle}",
                 handle=handle,
                 client_ip_hash=ip_hash,
+                agent_role=role,
             )
         raise AuthError("Invalid or unknown Bearer token", status_code=401)
 
@@ -228,12 +242,14 @@ def resolve_auth(
         agent = store.get_agent_by_key(raw_ak)
         if agent is not None:
             handle = str(agent["handle"])
+            role_arg: AgentRole = "agent_admin" if str(agent.get("role") or "") == "agent_admin" else "contributor"
             store.touch_agent_last_seen(handle)
             return AuthContext(
                 tier="AGENT_KEY",
                 actor_id=f"agent:{handle}",
                 handle=handle,
                 client_ip_hash=ip_hash,
+                agent_role=role_arg,
             )
         raise AuthError("Invalid or unknown agent_key", status_code=401)
 
@@ -246,6 +262,7 @@ def resolve_auth(
                 actor_id=f"admin:{sso_email}",
                 handle=sso_email.split("@")[0],
                 client_ip_hash=ip_hash,
+                agent_role="admin",
             )
 
     # 5. Default public ANONYMOUS tier
@@ -254,6 +271,7 @@ def resolve_auth(
         actor_id=f"anon:{ip_hash}",
         handle=f"anon-{ip_hash[:8]}",
         client_ip_hash=ip_hash,
+        agent_role="contributor",
     )
 
 

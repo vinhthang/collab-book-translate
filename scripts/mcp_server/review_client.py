@@ -30,6 +30,21 @@ class ReviewServerClient:
             hdrs["Authorization"] = f"Bearer {self._token}"
         return hdrs
 
+    def _get(self, path: str) -> dict[str, Any]:
+        url = f"{self._base_url}{path}"
+        with httpx.Client(timeout=self._timeout) as client:
+            resp = client.get(url, headers=self._headers())
+        if resp.status_code >= 400:
+            try:
+                err_msg = resp.json().get("error") or resp.text
+            except Exception:
+                err_msg = resp.text
+            raise ReviewServerError(
+                f"review-server GET {path} failed ({resp.status_code}): {err_msg}",
+                status_code=resp.status_code,
+            )
+        return resp.json()
+
     def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         url = f"{self._base_url}{path}"
         with httpx.Client(timeout=self._timeout) as client:
@@ -98,6 +113,10 @@ class ReviewServerClient:
             "judgeSummary": str(rnd.get("judgeSummary") or ""),
             "openFindings": open_findings,
         }
+
+    def get_workstream(self, *, workstream_id: str) -> dict[str, Any]:
+        """Fetch full workstream details, rounds, specialist critiques, and ledger items."""
+        return self._get(f"/api/v1/workstreams/{workstream_id}")
 
     def approve_workstream(
         self,

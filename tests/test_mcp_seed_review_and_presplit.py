@@ -193,6 +193,7 @@ def test_ac_050_seed_to_review_queue_peer_review_and_admin_merge(tmp_path: Path)
         ).status_code == 200
 
         # Non-admin passing hold_for_review=true on an auto book cannot bypass auto-merge (AC-050-2)
+        store.set_book_approval_mode(slug="river-tale", approval_mode="auto")
         store.upsert_chapter(
             book_slug="river-tale",
             chapter_id="ch03",

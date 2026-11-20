@@ -25,6 +25,7 @@ SCHEMA_STATEMENTS_COMMON = (
         model_info TEXT NOT NULL,
         key_sha256 TEXT NOT NULL UNIQUE,
         key_hint TEXT NOT NULL DEFAULT '',
+        role TEXT NOT NULL DEFAULT 'contributor',
         created_at TEXT NOT NULL,
         last_seen_at TEXT NOT NULL DEFAULT ''
     )
@@ -42,6 +43,7 @@ SCHEMA_STATEMENTS_COMMON = (
         status TEXT NOT NULL,
         glossary_sha TEXT NOT NULL,
         book_record_json TEXT NOT NULL,
+        brief_json TEXT NOT NULL DEFAULT '{}',
         manifest_json TEXT NOT NULL,
         source_text TEXT NOT NULL DEFAULT '',
         source_filename TEXT NOT NULL DEFAULT 'source.md',
@@ -93,6 +95,7 @@ SCHEMA_STATEMENTS_COMMON = (
         additions_json TEXT NOT NULL,
         open_findings_json TEXT NOT NULL,
         security_flags_json TEXT NOT NULL,
+        rounds_history_json TEXT NOT NULL DEFAULT '[]',
         judge_summary TEXT NOT NULL DEFAULT '',
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
@@ -104,6 +107,8 @@ SCHEMA_STATEMENTS_COMMON = (
         submission_id TEXT NOT NULL,
         reviewer_actor_id TEXT NOT NULL,
         reviewer_handle TEXT NOT NULL,
+        reviewer_role TEXT NOT NULL DEFAULT 'contributor',
+        verdict TEXT NOT NULL DEFAULT 'COMMENT',
         scores_json TEXT NOT NULL,
         weighted_score REAL NOT NULL,
         issues_json TEXT NOT NULL,
@@ -194,12 +199,17 @@ class CollabStore:
                         for stmt in SCHEMA_STATEMENTS_COMMON:
                             cur.execute(stmt.replace("REAL", "DOUBLE PRECISION"))
                         cur.execute("ALTER TABLE agents ADD COLUMN IF NOT EXISTS key_hint TEXT NOT NULL DEFAULT ''")
+                        cur.execute("ALTER TABLE agents ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'contributor'")
                         cur.execute("ALTER TABLE agents ADD COLUMN IF NOT EXISTS last_seen_at TEXT NOT NULL DEFAULT ''")
+                        cur.execute("ALTER TABLE books ADD COLUMN IF NOT EXISTS brief_json TEXT NOT NULL DEFAULT '{}'")
                         cur.execute("ALTER TABLE books ADD COLUMN IF NOT EXISTS access_mode TEXT NOT NULL DEFAULT 'public'")
                         cur.execute("ALTER TABLE books ADD COLUMN IF NOT EXISTS allowed_agents_json TEXT NOT NULL DEFAULT '[]'")
                         cur.execute("ALTER TABLE books ADD COLUMN IF NOT EXISTS approval_mode TEXT NOT NULL DEFAULT 'auto'")
                         cur.execute("ALTER TABLE books ADD COLUMN IF NOT EXISTS proposed_chapters_json TEXT NOT NULL DEFAULT '[]'")
                         cur.execute("ALTER TABLE submissions ADD COLUMN IF NOT EXISTS author_ip_hash TEXT NOT NULL DEFAULT ''")
+                        cur.execute("ALTER TABLE submissions ADD COLUMN IF NOT EXISTS rounds_history_json TEXT NOT NULL DEFAULT '[]'")
+                        cur.execute("ALTER TABLE peer_reviews ADD COLUMN IF NOT EXISTS reviewer_role TEXT NOT NULL DEFAULT 'contributor'")
+                        cur.execute("ALTER TABLE peer_reviews ADD COLUMN IF NOT EXISTS verdict TEXT NOT NULL DEFAULT 'COMMENT'")
                     conn.commit()
             else:
                 conn = self._get_sqlite()
@@ -208,9 +218,13 @@ class CollabStore:
                 agent_cols = {r["name"] for r in conn.execute("PRAGMA table_info(agents)").fetchall()}
                 if "key_hint" not in agent_cols:
                     conn.execute("ALTER TABLE agents ADD COLUMN key_hint TEXT NOT NULL DEFAULT ''")
+                if "role" not in agent_cols:
+                    conn.execute("ALTER TABLE agents ADD COLUMN role TEXT NOT NULL DEFAULT 'contributor'")
                 if "last_seen_at" not in agent_cols:
                     conn.execute("ALTER TABLE agents ADD COLUMN last_seen_at TEXT NOT NULL DEFAULT ''")
                 book_cols = {r["name"] for r in conn.execute("PRAGMA table_info(books)").fetchall()}
+                if "brief_json" not in book_cols:
+                    conn.execute("ALTER TABLE books ADD COLUMN brief_json TEXT NOT NULL DEFAULT '{}'")
                 if "access_mode" not in book_cols:
                     conn.execute("ALTER TABLE books ADD COLUMN access_mode TEXT NOT NULL DEFAULT 'public'")
                 if "allowed_agents_json" not in book_cols:
@@ -222,6 +236,13 @@ class CollabStore:
                 sub_cols = {r["name"] for r in conn.execute("PRAGMA table_info(submissions)").fetchall()}
                 if "author_ip_hash" not in sub_cols:
                     conn.execute("ALTER TABLE submissions ADD COLUMN author_ip_hash TEXT NOT NULL DEFAULT ''")
+                if "rounds_history_json" not in sub_cols:
+                    conn.execute("ALTER TABLE submissions ADD COLUMN rounds_history_json TEXT NOT NULL DEFAULT '[]'")
+                pr_cols = {r["name"] for r in conn.execute("PRAGMA table_info(peer_reviews)").fetchall()}
+                if "reviewer_role" not in pr_cols:
+                    conn.execute("ALTER TABLE peer_reviews ADD COLUMN reviewer_role TEXT NOT NULL DEFAULT 'contributor'")
+                if "verdict" not in pr_cols:
+                    conn.execute("ALTER TABLE peer_reviews ADD COLUMN verdict TEXT NOT NULL DEFAULT 'COMMENT'")
                 conn.commit()
 
     def close(self) -> None:
@@ -281,10 +302,10 @@ class CollabStore:
             mod = model_info.strip()
             self._exec(
                 """
-                INSERT INTO agents (handle, display_name, model_info, key_sha256, key_hint, created_at, last_seen_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO agents (handle, display_name, model_info, key_sha256, key_hint, role, created_at, last_seen_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (clean, disp, mod, key_sha, key_hint, now, ""),
+                (clean, disp, mod, key_sha, key_hint, "contributor", now, ""),
             )
             return {
                 "handle": clean,
@@ -292,16 +313,32 @@ class CollabStore:
                 "model_info": mod,
                 "agent_key": raw_key,
                 "key_hint": key_hint,
+                "role": "contributor",
                 "created_at": now,
             }
 
     def get_agent_by_key(self, raw_key: str) -> Optional[dict[str, Any]]:
         digest = sha256_hex(raw_key.strip())
         return self._exec(
-            "SELECT handle, display_name, model_info, key_hint, created_at, last_seen_at FROM agents WHERE key_sha256 = ?",
+            "SELECT handle, display_name, model_info, key_hint, role, created_at, last_seen_at FROM agents WHERE key_sha256 = ?",
             (digest,),
             fetchone=True,
         )
+
+    def get_agent(self, handle: str) -> Optional[dict[str, Any]]:
+        return self._exec(
+            "SELECT handle, display_name, model_info, key_hint, role, created_at, last_seen_at FROM agents WHERE handle = ?",
+            (handle.strip().lower(),),
+            fetchone=True,
+        )
+
+    def set_agent_role(self, *, handle: str, role: str) -> dict[str, Any]:
+        clean = handle.strip().lower()
+        self._exec("UPDATE agents SET role = ? WHERE handle = ?", (role, clean))
+        agent = self.get_agent(clean)
+        if agent is None:
+            raise KeyError(f"Agent '{clean}' not found")
+        return agent
 
     def touch_agent_last_seen(self, handle: str) -> None:
         self._exec(
@@ -311,7 +348,7 @@ class CollabStore:
 
     def list_agents(self) -> list[dict[str, Any]]:
         return self._exec(
-            "SELECT handle, display_name, model_info, key_hint, created_at, last_seen_at FROM agents ORDER BY created_at DESC",
+            "SELECT handle, display_name, model_info, key_hint, role, created_at, last_seen_at FROM agents ORDER BY created_at DESC",
             fetchall=True,
         )
 
@@ -385,6 +422,41 @@ class CollabStore:
             raise KeyError(f"Book '{slug}' not found")
         return book
 
+    def set_book_brief_and_record(
+        self,
+        *,
+        slug: str,
+        brief: Optional[dict[str, Any]] = None,
+        book_record: Optional[dict[str, Any]] = None,
+        glossary_sha: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Update brief_json, book_record_json, and optional glossary_sha atomically."""
+        with self._lock:
+            cur = self.get_book(slug)
+            if cur is None:
+                raise KeyError(f"Book '{slug}' not found")
+            eff_brief = brief if brief is not None else cur.get("brief") or {}
+            eff_rec = book_record if book_record is not None else cur.get("book_record") or {}
+            eff_sha = glossary_sha if glossary_sha is not None else cur.get("glossary_sha") or ""
+            self._exec(
+                """
+                UPDATE books
+                SET brief_json = ?, book_record_json = ?, glossary_sha = ?, updated_at = ?
+                WHERE slug = ?
+                """,
+                (
+                    json.dumps(eff_brief, ensure_ascii=False),
+                    json.dumps(eff_rec, ensure_ascii=False),
+                    eff_sha,
+                    _utc_iso(),
+                    slug,
+                ),
+            )
+            updated = self.get_book(slug)
+            if updated is None:
+                raise RuntimeError(f"Failed to update book '{slug}'")
+            return updated
+
     def upsert_book(
         self,
         *,
@@ -406,17 +478,23 @@ class CollabStore:
         release_tag: str = "",
         release_url: str = "",
         proposed_chapters: Optional[list[dict[str, Any]]] = None,
+        brief: Optional[dict[str, Any]] = None,
+        approval_mode: Optional[str] = None,
     ) -> dict[str, Any]:
         now = _utc_iso()
         ch_json = json.dumps(proposed_chapters or [], ensure_ascii=False)
+        brief_str = json.dumps(brief, ensure_ascii=False) if brief is not None else "{}"
+        has_brief = 1 if brief is not None else 0
+        eff_approval = approval_mode or "auto"
+        has_approval = 1 if approval_mode is not None else 0
         self._exec(
             """
             INSERT INTO books (
                 slug, title, author, source_lang, target_lang, genre,
-                license_id, license_url, status, glossary_sha, book_record_json,
+                license_id, license_url, status, glossary_sha, book_record_json, brief_json,
                 manifest_json, source_text, source_filename, proposed_by,
-                release_tag, release_url, proposed_chapters_json, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                release_tag, release_url, approval_mode, proposed_chapters_json, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(slug) DO UPDATE SET
                 title = excluded.title,
                 author = excluded.author,
@@ -428,11 +506,13 @@ class CollabStore:
                 status = excluded.status,
                 glossary_sha = excluded.glossary_sha,
                 book_record_json = excluded.book_record_json,
+                brief_json = CASE WHEN ? = 1 THEN excluded.brief_json ELSE books.brief_json END,
                 manifest_json = excluded.manifest_json,
                 source_text = CASE WHEN excluded.source_text != '' THEN excluded.source_text ELSE books.source_text END,
                 source_filename = excluded.source_filename,
                 release_tag = CASE WHEN excluded.release_tag != '' THEN excluded.release_tag ELSE books.release_tag END,
                 release_url = CASE WHEN excluded.release_url != '' THEN excluded.release_url ELSE books.release_url END,
+                approval_mode = CASE WHEN ? = 1 THEN excluded.approval_mode ELSE books.approval_mode END,
                 proposed_chapters_json = CASE WHEN excluded.proposed_chapters_json != '[]' THEN excluded.proposed_chapters_json ELSE books.proposed_chapters_json END,
                 updated_at = excluded.updated_at
             """,
@@ -448,14 +528,18 @@ class CollabStore:
                 status,
                 glossary_sha,
                 json.dumps(book_record, ensure_ascii=False),
+                brief_str,
                 json.dumps(manifest, ensure_ascii=False),
                 source_text,
                 source_filename,
                 proposed_by,
                 release_tag,
                 release_url,
+                eff_approval,
                 ch_json,
                 now,
+                has_brief,
+                has_approval,
             ),
         )
         book = self.get_book(slug)
@@ -466,6 +550,7 @@ class CollabStore:
     def _hydrate_book(self, row: dict[str, Any]) -> dict[str, Any]:
         out = dict(row)
         out["book_record"] = json.loads(out.pop("book_record_json") or "{}")
+        out["brief"] = json.loads(out.pop("brief_json", "{}") or "{}")
         out["manifest"] = json.loads(out.pop("manifest_json") or "{}")
         out["access_mode"] = str(out.get("access_mode") or "public")
         out["allowed_agents"] = json.loads(out.pop("allowed_agents_json", "[]") or "[]")
@@ -545,6 +630,29 @@ class CollabStore:
             fetchall=True,
         )
 
+    def replace_unaccepted_chapters(
+        self,
+        *,
+        book_slug: str,
+        chapters: list[dict[str, Any]],
+    ) -> None:
+        """Replace chapter rows for a book prior to any chapter being accepted."""
+        with self._lock:
+            existing = self.list_chapters(book_slug)
+            if any(c["status"] == "accepted" for c in existing):
+                raise ValueError(f"Cannot replace chapters on '{book_slug}': at least one chapter is already accepted")
+            self._exec("DELETE FROM chapters WHERE book_slug = ?", (book_slug,))
+            for item in chapters:
+                st = "open" if item["chapter_id"] == "ch01" else "locked_seed"
+                self.upsert_chapter(
+                    book_slug=book_slug,
+                    chapter_id=str(item["chapter_id"]),
+                    chapter_num=int(item["chapter_num"]),
+                    title=str(item["title"]),
+                    source_xml=str(item["source_xml"]),
+                    status=st,
+                )
+
     def claim_chapter(
         self,
         *,
@@ -599,6 +707,7 @@ class CollabStore:
         open_findings: list[dict[str, Any]],
         security_flags: list[str],
         judge_summary: str = "",
+        rounds_history: Optional[list[dict[str, Any]]] = None,
     ) -> dict[str, Any]:
         sub_id = str(uuid.uuid4())
         now = _utc_iso()
@@ -608,8 +717,8 @@ class CollabStore:
                 id, book_slug, chapter_id, author_actor_id, author_handle, author_ip_hash,
                 engine_model, status, round_number, max_rounds, workstream_id,
                 revision_token_sha256, translation_xml, final_txt, additions_json,
-                open_findings_json, security_flags_json, judge_summary, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                open_findings_json, security_flags_json, rounds_history_json, judge_summary, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 sub_id,
@@ -629,6 +738,7 @@ class CollabStore:
                 json.dumps(additions, ensure_ascii=False),
                 json.dumps(open_findings, ensure_ascii=False),
                 json.dumps(security_flags, ensure_ascii=False),
+                json.dumps(rounds_history or [], ensure_ascii=False),
                 judge_summary,
                 now,
                 now,
@@ -652,6 +762,7 @@ class CollabStore:
         open_findings: Optional[list[dict[str, Any]]] = None,
         security_flags: Optional[list[str]] = None,
         judge_summary: Optional[str] = None,
+        rounds_history: Optional[list[dict[str, Any]]] = None,
     ) -> dict[str, Any]:
         current = self.get_submission(submission_id)
         if current is None:
@@ -668,6 +779,7 @@ class CollabStore:
                 additions_json = ?,
                 open_findings_json = ?,
                 security_flags_json = ?,
+                rounds_history_json = ?,
                 judge_summary = ?,
                 updated_at = ?
             WHERE id = ?
@@ -681,6 +793,7 @@ class CollabStore:
                 json.dumps(additions if additions is not None else current["additions"], ensure_ascii=False),
                 json.dumps(open_findings if open_findings is not None else current["open_findings"], ensure_ascii=False),
                 json.dumps(security_flags if security_flags is not None else current["security_flags"], ensure_ascii=False),
+                json.dumps(rounds_history if rounds_history is not None else current.get("rounds_history", []), ensure_ascii=False),
                 judge_summary if judge_summary is not None else current["judge_summary"],
                 now,
                 submission_id,
@@ -696,6 +809,7 @@ class CollabStore:
         out["additions"] = json.loads(out.pop("additions_json") or '{"proposals":[]}')
         out["open_findings"] = json.loads(out.pop("open_findings_json") or "[]")
         out["security_flags"] = json.loads(out.pop("security_flags_json") or "[]")
+        out["rounds_history"] = json.loads(out.pop("rounds_history_json", "[]") or "[]")
         return out
 
     def get_submission(self, submission_id: str) -> Optional[dict[str, Any]]:
@@ -763,6 +877,8 @@ class CollabStore:
         weighted_score: float,
         issues: list[dict[str, Any]],
         body_md: str,
+        verdict: str = "COMMENT",
+        reviewer_role: str = "contributor",
     ) -> dict[str, Any]:
         rev_id = str(uuid.uuid4())
         now = _utc_iso()
@@ -770,14 +886,16 @@ class CollabStore:
             """
             INSERT INTO peer_reviews (
                 id, submission_id, reviewer_actor_id, reviewer_handle,
-                scores_json, weighted_score, issues_json, body_md, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                reviewer_role, verdict, scores_json, weighted_score, issues_json, body_md, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 rev_id,
                 submission_id,
                 reviewer_actor_id,
                 reviewer_handle,
+                reviewer_role,
+                verdict,
                 json.dumps(scores, ensure_ascii=False),
                 weighted_score,
                 json.dumps(issues, ensure_ascii=False),
@@ -790,6 +908,8 @@ class CollabStore:
             "submission_id": submission_id,
             "reviewer_actor_id": reviewer_actor_id,
             "reviewer_handle": reviewer_handle,
+            "reviewer_role": reviewer_role,
+            "verdict": verdict,
             "scores": scores,
             "weighted_score": weighted_score,
             "issues": issues,
@@ -806,6 +926,8 @@ class CollabStore:
         out: list[dict[str, Any]] = []
         for r in rows:
             item = dict(r)
+            item["reviewer_role"] = str(item.get("reviewer_role") or "contributor")
+            item["verdict"] = str(item.get("verdict") or "COMMENT")
             item["scores"] = json.loads(item.pop("scores_json") or "{}")
             item["issues"] = json.loads(item.pop("issues_json") or "[]")
             out.append(item)

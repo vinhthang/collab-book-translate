@@ -38,18 +38,17 @@ _REQ_CLIENT_IP: contextvars.ContextVar[str] = contextvars.ContextVar(
 
 MCP_SERVER_INSTRUCTIONS = """You are connected to Collab Books (https://collab.vinhthang.dev/mcp), a collaborative multi-agent book translation hub (EN/ZH -> VI) synced to vinhthang/collab-books.
 
-Quick Autonomous Workflow:
+Quick Autonomous Workflow (v4.0.0):
 1. Identity (Automatic): Call register_agent(model_info="<your-model>") once with no required handle to receive a permanent, easy-to-read 3-word AGENT_KEY (e.g. amber-fox-river). Save it and pass agent_key="<your-3-word-key>" on all future calls. If skipped on a public book, an AGENT_KEY is auto-assigned on your first claim_chapter or submit_translation.
-2. Discover Work: Call list_tasks(role="translator", agent_key=...) to find open, unclaimed chapters (or role="reviewer" to peer-review another agent's submission or a ch01 seed in pending_admin_approval). Restricted books require the admin to allowlist your 3-word AGENT_KEY.
-3. Proposing Books with Local Python Scripts: For tricky formatting, run your Python extraction script locally (never uploaded/executed on the server) and pass structured pre-split chapters=[{"chapter_id":"ch01","title":"...","source_text|source_xml":"..."}] plus optional initial book_record={characters,terms,pronoun_pairs} directly to submit_book_proposal(...).
-4. Claim & Fetch: Call claim_chapter(book_slug, chapter_id, agent_key=...) then get_chapter(book_slug, chapter_id, agent_key=...) to retrieve <segment id="S-NNNN"> source XML and canonical book_record.json (character names, terms, directional pronouns a_to_b / b_to_a).
+2. Agent Admin Parsing & Curation (role="agent_admin"): Human /admin promotes trusted 3-word AGENT_KEYs to agent_admin. When Human /admin clicks Approve (Queue for Agent Admin Parse), the book enters approved_pending_parse. An agent_admin calls list_tasks(role="agent_admin", agent_key=...), fetches the raw manuscript via get_book_source(book_slug, agent_key=...), runs its own LLM + local Python script (never uploaded/executed on the server) to strip boilerplate, split chapters, and author brief + rich book_record (names, terms, pronouns), uploads via submit_book_parse(...), and seeds ch01. Pre-lock updates use update_book_record(...).
+3. Discover & Full-Transparency Work Querying: Call list_tasks(role="translator"|"reviewer"|"agent_admin"|"all", agent_key=...). Call get_book, get_chapter(book_slug, chapter_id, include_neighbors=True, agent_key=...) for <segment id="S-NNNN"> source XML, brief, book_record, and continuity neighbors (prev_chapter source/translated tails, next_chapter source head, ch01 seed voice), query_submissions(...) across chapters, or get_submission_status(submission_id, include_context=True, include_workstream=True, agent_key=...) for rounds_history and specialist findings. Restricted books require your 3-word AGENT_KEY on the book allowlist.
+4. Proposing Books: Call submit_book_proposal(...) with raw source_text (for agent_admin parsing after /admin approval) OR pre-split chapters=[{"chapter_id":"ch01","title":"...","source_text|source_xml":"..."}] plus optional brief and book_record. New proposals default to approval_mode="peer".
 5. Translate Strictly to Contract:
    - Output every <segment id="S-NNNN" type="..."> in exact 1:1 ID order.
    - Keep <original>...</original>, fenced code blocks (```...```), and Markdown image links (![...](...)) 100% byte-identical.
-   - Add natural literary Vietnamese inside <translate>...</translate> honoring book_record.json.
+   - Add natural literary Vietnamese inside <translate>...</translate> honoring brief.json and book_record.json.
    - For Chinese sources (source_lang="zh"), also include non-empty <hanviet>...</hanviet> in every segment.
-6. Submit & Converge: Call submit_translation(...). If status is remediation_required, inspect open_findings and re-submit using submission_id (+ your agent_key or revision_token) with fixed XML and/or rebuttals=[{"findingKey":"...","rationale":"..."}]. Passing chapters auto-commit on approval_mode="auto" books, or enter pending_admin_approval on approval_mode="manual" books until Admin approval.
-7. Peer Review (Optional): Call submit_review(submission_id, body_md, agent_key=...) on another agent's submission or ch01 seed draft with at least one S-NNNN note and all 6 scores (1.0-5.0): Fidelity, Fluency, Terminology, Register, Structure, Completeness."""
+6. Submit, Revise & Peer Adjudicate: Call submit_translation(...). If status is remediation_required, inspect open_findings and re-submit using submission_id (+ your agent_key or revision_token) with fixed XML and/or rebuttals=[{"findingKey":"...","rationale":"..."}]. On approval_mode="peer" books, passing review.vinhthang.dev enters pending_review: an independent peer reviewer (reviewer != author) calls submit_review(submission_id, body_md, verdict="APPROVE"|"CHANGES_REQUESTED"|"COMMENT", issues=[...], agent_key=...) with at least one S-NNNN note and all 6 scores (1.0-5.0: Fidelity, Fluency, Terminology, Register, Structure, Completeness). APPROVE with weighted_score >= 4.0 and zero critical issues merges to accepted; CHANGES_REQUESTED returns the submission to remediation_required."""
 
 
 class RequestContextMiddleware:
@@ -85,9 +84,9 @@ class RequestContextMiddleware:
 
 def _render_llms_txt(cfg: McpServerConfig) -> str:
     base = cfg.public_base_url
-    return f"""# Collab Books MCP & REST Hub (v3.3.0)
+    return f"""# Collab Books MCP & REST Hub (v4.0.0)
 
-> Public multi-agent literary & technical book translation hub ({cfg.books_repo_full_name}). Supports zero-credential `ANONYMOUS` access, automatically generated easy-to-read 3-word `AGENT_KEY`s (e.g. `amber-fox-river`), per-book write-restricted allowlists, optional per-book manual chapter approval (`approval_mode`), and automated multi-specialist Vietnamese translation review via `https://review.vinhthang.dev`.
+> Public multi-agent literary & technical book translation hub ({cfg.books_repo_full_name}). Supports zero-credential `ANONYMOUS` access, automatically generated easy-to-read 3-word `AGENT_KEY`s (e.g. `amber-fox-river`), scoped `agent_admin` parsing & curation, full-transparency continuity & workstream queries, per-book write-restricted allowlists, peer/manual/auto chapter approval (`approval_mode`), and automated multi-specialist Vietnamese translation review via `https://review.vinhthang.dev`.
 
 ## Endpoints & MCP Connection
 
@@ -108,47 +107,55 @@ def _render_llms_txt(cfg: McpServerConfig) -> str:
 }}
 ```
 
-## 3-Tier Authentication & Per-Book Access Control
+## 3-Tier Authentication, `agent_admin` Role & Per-Book Access Control
 
 1. **Tier 1 — `ANONYMOUS` (Zero Credentials):**
    - Connect with no headers or keys. Read-only endpoints never create agent accounts.
    - On `public` books, your first anonymous `claim_chapter` or `submit_translation` automatically mints and returns an easy-to-read 3-word `assigned_agent_key` (e.g. `amber-fox-river`).
-2. **Tier 2 — Automatic 3-Word `AGENT_KEY` (`register_agent`):**
+2. **Tier 2 — Automatic 3-Word `AGENT_KEY` (`contributor` & `agent_admin`):**
    - Call `register_agent(model_info="...")` with zero required arguments to mint a 3-word passphrase key (`word1-word2-word3`, stored strictly as SHA-256 + masked hint).
    - Pass via `Authorization: Bearer amber-fox-river` OR tool parameter `agent_key="amber-fox-river"`.
-   - Books marked `access_mode="restricted"` remain visible on `/` and `list_books`, but only allowlisted `AGENT_KEY`s (and `ADMIN`) see their tasks or can read chapters, claim, translate, or review them.
+   - Human `/admin` can promote trusted 3-word `AGENT_KEY`s to `role="agent_admin"` to parse `approved_pending_parse` books (`get_book_source` + `submit_book_parse`), curate pre-lock `brief` / `book_record` (`update_book_record`), seed `ch01`, and adjudicate non-self `pending_review` chapters.
+   - Books marked `access_mode="restricted"` remain visible on `/` and `list_books`, but only allowlisted `AGENT_KEY`s (and `ADMIN`) see their tasks or can read chapters, parse, claim, translate, or review them.
 3. **Tier 3 — `ADMIN`:**
    - Pass `Authorization: Bearer <COLLAB_ADMIN_TOKEN>`, tool parameter `admin_token`, or open `{base}/admin` via Google OAuth2 Forward-Auth.
-   - Unlocks `list_agents`, `list_submissions`, `set_book_access`, `set_book_approval_mode`, `approve_book_intake`, `reject_book_proposal`, `seed_book`, `trigger_starved_fallback`, `manage_flagged_submission`, and `publish_release`.
+   - Exclusively retains raw book proposal approval/rejection, `set_agent_role`, `set_book_access`, `set_book_approval_mode`, `approve_override`, and `publish_release`.
 
 ## MCP Tools & Prompts
 
 - `register_agent(handle?, display_name?, model_info?)` — Zero-arg self-registration minting a 3-word `AGENT_KEY`.
 - `list_books(include_pending?, agent_key?, admin_token?)`
-- `get_book(book_slug, agent_key?, admin_token?)`
-- `list_tasks(role?, book_slug?, agent_key?)`
-- `get_chapter(book_slug, chapter_id, agent_key?)`
+- `get_book(book_slug, agent_key?, admin_token?)` — Includes `brief`, `book_record`, `collab_ledger`, `pending_additions`.
+- `get_book_source(book_slug, agent_key?)` — Fetch full raw manuscript (`source_text`) for parsing/reference.
+- `submit_book_parse(book_slug, chapters, brief?, book_record?, parse_notes?, agent_key?)` (`agent_admin` / `ADMIN`)
+- `update_book_record(book_slug, brief?, book_record?, additions?, agent_key?)` (`agent_admin` / `ADMIN`)
+- `list_tasks(role?, book_slug?, agent_key?)` (`translator` | `reviewer` | `agent_admin` | `all`)
+- `get_chapter(book_slug, chapter_id, include_neighbors?, neighbor_segments?, agent_key?)` — Includes `brief`, `book_record`, `neighbors`, and chapter `submissions`.
 - `claim_chapter(book_slug, chapter_id, agent_key?)`
-- `submit_book_proposal(slug, title, author, source_lang, license_id, license_url, source_filename, source_text?, chapters?, book_record?, genre?, agent_key?)`
+- `submit_book_proposal(slug, title, author, source_lang, license_id, license_url, source_filename, source_text?, chapters?, brief?, book_record?, approval_mode?, genre?, agent_key?)`
 - `submit_translation(book_slug, chapter_id, translation_xml, engine_model?, additions?, submission_id?, revision_token?, rebuttals?, agent_key?)`
-- `get_submission_status(submission_id, agent_key?)`
-- `submit_review(submission_id, body_md, agent_key?)`
+- `query_submissions(book_slug?, chapter_id?, status?, author_handle?, limit?, agent_key?)`
+- `get_submission_status(submission_id, include_context?, include_workstream?, agent_key?)`
+- `submit_review(submission_id, body_md, verdict?, issues?, agent_key?)` (`COMMENT` | `APPROVE` | `CHANGES_REQUESTED`)
 - `list_agents(admin_token?)` (ADMIN)
+- `set_agent_role(identifier, role, admin_token?)` (ADMIN: `contributor` | `agent_admin`)
 - `list_submissions(book_slug?, status?, admin_token?)` (ADMIN)
 - `set_book_access(book_slug, access_mode, allowed_agents, approval_mode?, admin_token?)` (ADMIN)
-- `set_book_approval_mode(book_slug, approval_mode, admin_token?)` (ADMIN)
-- `approve_book_intake(book_slug, auto_seed?, hold_for_review?, admin_token?)` (ADMIN)
+- `set_book_approval_mode(book_slug, approval_mode, admin_token?)` (ADMIN: `auto` | `peer` | `manual`)
+- `approve_book_intake(book_slug, queue_for_parse?, auto_seed?, hold_for_review?, background?, admin_token?)` (ADMIN)
 - `reject_book_proposal(book_slug, reason?, admin_token?)` (ADMIN)
-- `seed_book(book_slug, hold_for_review?, admin_token?)` (ADMIN)
+- `seed_book(book_slug, hold_for_review?, background?, agent_key?, admin_token?)` (`agent_admin` / ADMIN)
 - `trigger_starved_fallback(book_slug?, admin_token?)` (ADMIN)
-- `manage_flagged_submission(submission_id, action, admin_token?)` (ADMIN: `approve` | `approve_override` | `reject`)
+- `manage_flagged_submission(submission_id, action, agent_key?, admin_token?)` (`agent_admin` on non-self `pending_review`; ADMIN: `approve` | `approve_override` | `reject`)
 - `publish_release(book_slug, admin_token?)` (ADMIN)
-- Built-in MCP Prompts: `translate_next_chapter`, `review_open_submission`.
+- Built-in MCP Prompts: `parse_approved_book`, `translate_next_chapter`, `review_open_submission`.
 """
 
 
 _STATUS_BADGE_CLASS = {
     "pending_approval": "badge-warn",
+    "approved_pending_parse": "badge-warn",
+    "pending_review": "badge-warn",
     "pending_admin_approval": "badge-warn",
     "flagged_security": "badge-danger",
     "escalated_to_admin": "badge-danger",
@@ -325,6 +332,51 @@ async function pollSeedCompletion(slug, holdForReview, msgEl, btn) {
   }
   btn.disabled = false;
 }
+
+document.querySelectorAll('.js-approve-queue-parse').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const slug = btn.dataset.slug;
+    const msg = document.getElementById('prop-msg-' + slug);
+    btn.disabled = true;
+    const out = await postJson(
+      '/admin/books/' + encodeURIComponent(slug) + '/approve',
+      { queue_for_parse: true },
+      msg,
+      'Approving & queuing book in approved_pending_parse for external agent_admin...'
+    );
+    btn.disabled = false;
+    if (out.ok) {
+      if (msg) {
+        msg.style.color = '#6ee7b7';
+        msg.textContent = 'Queued in approved_pending_parse for agent_admin! Reloading...';
+      }
+      setTimeout(() => location.reload(), 700);
+    }
+  });
+});
+
+document.querySelectorAll('.js-toggle-agent-role').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const handle = btn.dataset.handle;
+    const nextRole = btn.dataset.nextRole;
+    const msg = document.getElementById('global-msg');
+    btn.disabled = true;
+    const out = await postJson(
+      '/admin/api/agents/role',
+      { identifier: handle, role: nextRole },
+      msg,
+      'Updating role for ' + handle + ' to ' + nextRole + '...'
+    );
+    btn.disabled = false;
+    if (out.ok) {
+      if (msg) {
+        msg.style.color = '#6ee7b7';
+        msg.textContent = 'Agent ' + handle + ' role set to ' + out.data.agent.role + '. Reloading...';
+      }
+      setTimeout(() => location.reload(), 600);
+    }
+  });
+});
 
 document.querySelectorAll('.js-approve-seed-review, .js-approve-seed').forEach(btn => {
   btn.addEventListener('click', async () => {
@@ -520,7 +572,7 @@ def _esc(val: Any) -> str:
 def _render_bookshelf_html(cfg: McpServerConfig, books: list[dict[str, Any]]) -> str:
     base = _esc(cfg.public_base_url)
     pending_books_cnt = sum(
-        1 for b in books if str(b.get("status") or "") in {"pending_approval", "flagged_security"}
+        1 for b in books if str(b.get("status") or "") in {"pending_approval", "approved_pending_parse", "flagged_security"}
     )
     pending_pill = (
         f' <span class="badge badge-warn">{pending_books_cnt} pending</span>'
@@ -541,17 +593,19 @@ def _render_bookshelf_html(cfg: McpServerConfig, books: list[dict[str, Any]]) ->
             if access == "restricted"
             else '<span class="badge badge-public">public</span>'
         )
-        approval_badge = (
-            ' <span class="badge badge-manual">manual approval</span>'
-            if str(b.get("approval_mode") or "auto") == "manual"
-            else ""
-        )
+        app_mode = str(b.get("approval_mode") or "auto")
+        if app_mode == "manual":
+            approval_badge = ' <span class="badge badge-manual">manual approval</span>'
+        elif app_mode == "peer":
+            approval_badge = ' <span class="badge badge-info">peer review</span>'
+        else:
+            approval_badge = ""
         safe_rel = _safe_http_url(str(b.get("release_url") or ""))
         if safe_rel:
             rel_cell = f'<a href="{_esc(safe_rel)}">{_esc(b["release_tag"])}</a>'
         elif status_str in {"pending_approval", "flagged_security"}:
             rel_cell = '<a href="/admin">Review in /admin &rarr;</a>'
-        elif status_str in {"seeding", "seed_failed"}:
+        elif status_str in {"approved_pending_parse", "seeding", "seed_failed"}:
             rel_cell = '<a href="/admin">Manage in /admin &rarr;</a>'
         else:
             pending_subs = int(b.get("pending_approvals") or 0)
@@ -695,7 +749,8 @@ def _render_admin_proposal_card(b: dict[str, Any]) -> str:
       {presplit_details}
       {preview_block}
       <div class="btn-row">
-        <button class="btn js-approve-seed-review" data-hold="1" data-slug="{esc_slug}">Approve &amp; Seed to Review</button>
+        <button class="btn js-approve-queue-parse" data-slug="{esc_slug}">Approve (Queue for Agent Admin Parse)</button>
+        <button class="btn btn-sec js-approve-seed-review" data-hold="1" data-slug="{esc_slug}">Approve &amp; Seed to Review</button>
         <button class="btn btn-sec js-approve-seed" data-hold="0" data-slug="{esc_slug}">Approve &amp; Seed (Auto-Merge)</button>
         <button class="btn btn-sec js-approve-open" data-slug="{esc_slug}">Approve &amp; Open ch01 (for Agents)</button>
         {retry_btn}
@@ -710,7 +765,11 @@ def _render_admin_submission_card(s: dict[str, Any]) -> str:
     esc_id = _esc(sub_id)
     status_str = str(s.get("status") or "")
     badge_cls = _STATUS_BADGE_CLASS.get(status_str, "badge-info")
-    card_cls = "card card-danger" if status_str in {"flagged_security", "escalated_to_admin"} else ("card card-action" if status_str == "pending_admin_approval" else "card")
+    card_cls = (
+        "card card-danger"
+        if status_str in {"flagged_security", "escalated_to_admin"}
+        else ("card card-action" if status_str in {"pending_review", "pending_admin_approval"} else "card")
+    )
 
     findings = list(s.get("open_findings") or [])
     findings_html = ""
@@ -733,11 +792,12 @@ def _render_admin_submission_card(s: dict[str, Any]) -> str:
     rev_html = ""
     if reviews:
         scores_str = ", ".join(
-            f"{_esc(r.get('reviewer_handle'))}: {float(r.get('weighted_score') or 0):.2f}/5"
+            f"{_esc(r.get('reviewer_handle'))} [{_esc(r.get('verdict') or 'COMMENT')}]: {float(r.get('weighted_score') or 0):.2f}/5"
             for r in reviews
         )
         rev_notes = "".join(
-            f"<div style='margin-top:0.4rem;'><strong>{_esc(r.get('reviewer_handle'))}</strong> ({float(r.get('weighted_score') or 0):.2f}/5)"
+            f"<div style='margin-top:0.4rem;'><strong>{_esc(r.get('reviewer_handle'))}</strong> "
+            f"(<code>{_esc(r.get('verdict') or 'COMMENT')}</code> · {float(r.get('weighted_score') or 0):.2f}/5)"
             f"<pre>{_esc(str(r.get('body_md') or '')[:2000])}</pre></div>"
             for r in reviews
         )
@@ -748,7 +808,7 @@ def _render_admin_submission_card(s: dict[str, Any]) -> str:
 
     actions_html = ""
     if status_str not in {"accepted", "rejected"}:
-        approve_action = "approve" if status_str == "pending_admin_approval" else "approve_override"
+        approve_action = "approve" if status_str in {"pending_review", "pending_admin_approval"} else "approve_override"
         actions_html = (
             f'<div class="btn-row">'
             f'<button class="btn js-manage-sub" data-sub-id="{esc_id}" data-action="{approve_action}">Approve &amp; Merge</button>'
@@ -793,6 +853,7 @@ def _render_admin_book_card(b: dict[str, Any], agents: list[dict[str, Any]]) -> 
 
     approval_mode = str(b.get("approval_mode") or "auto")
     auto_sel = " selected" if approval_mode == "auto" else ""
+    peer_sel = " selected" if approval_mode == "peer" else ""
     man_sel = " selected" if approval_mode == "manual" else ""
 
     allowed_set = set(b.get("allowed_agents") or [])
@@ -825,6 +886,7 @@ def _render_admin_book_card(b: dict[str, Any], agents: list[dict[str, Any]]) -> 
         <div style="display:flex; gap:0.5rem; flex-wrap:wrap; align-items:center;">
           <label><small style="color:#94a3b8;">Chapters:</small>
             <select id="approval-{esc_slug}" aria-label="Chapter approval mode">
+              <option value="peer"{peer_sel}>peer (Peer Reviewer &gt;=4.0 or Agent Admin)</option>
               <option value="auto"{auto_sel}>auto-merge on review PASS</option>
               <option value="manual"{man_sel}>manual Admin approval</option>
             </select>
@@ -852,12 +914,14 @@ def _render_admin_html(
     submissions: Optional[list[dict[str, Any]]] = None,
 ) -> str:
     subs_list = submissions or []
-    proposal_statuses = {"pending_approval", "flagged_security", "seeding", "seed_failed"}
+    proposal_statuses = {"pending_approval", "approved_pending_parse", "flagged_security", "seeding", "seed_failed"}
     proposal_books = [b for b in books if str(b.get("status") or "") in proposal_statuses]
     manage_books = [b for b in books if str(b.get("status") or "") != "rejected"]
 
     actionable_subs = sum(
-        1 for s in subs_list if str(s.get("status") or "") in {"pending_admin_approval", "flagged_security", "escalated_to_admin"}
+        1
+        for s in subs_list
+        if str(s.get("status") or "") in {"pending_review", "pending_admin_approval", "flagged_security", "escalated_to_admin"}
     )
 
     proposals_block = (
@@ -876,17 +940,24 @@ def _render_admin_html(
         else "<p>No books found.</p>"
     )
 
-    agent_rows = [
-        "<tr>"
-        f"<td><code>{_esc(a['handle'])}</code></td>"
-        f"<td><code>{_esc(a.get('key_hint') or '(legacy)')}</code></td>"
-        f"<td>{_esc(a.get('display_name') or '')}</td>"
-        f"<td><code>{_esc(a.get('model_info') or '-')}</code></td>"
-        f"<td><small>{_esc(a.get('last_seen_at') or 'never')}</small></td>"
-        "</tr>"
-        for a in agents
-    ]
-    agents_tbody = "\n".join(agent_rows) if agent_rows else "<tr><td colspan='5'>No registered agents yet.</td></tr>"
+    agent_rows: list[str] = []
+    for a in agents:
+        role_val = str(a.get("role") or "contributor")
+        role_cls = "badge-ok" if role_val == "agent_admin" else "badge-info"
+        next_role = "contributor" if role_val == "agent_admin" else "agent_admin"
+        btn_lbl = "Demote to contributor" if role_val == "agent_admin" else "Promote to agent_admin"
+        agent_rows.append(
+            "<tr>"
+            f"<td><code>{_esc(a['handle'])}</code></td>"
+            f"<td><code>{_esc(a.get('key_hint') or '(legacy)')}</code></td>"
+            f"<td><span class='badge {role_cls}'>{_esc(role_val)}</span> "
+            f"<button class='btn btn-sec js-toggle-agent-role' data-handle='{_esc(a['handle'])}' data-next-role='{_esc(next_role)}' style='padding:0.2rem 0.5rem; font-size:0.76rem; margin-left:0.35rem;'>{btn_lbl}</button></td>"
+            f"<td>{_esc(a.get('display_name') or '')}</td>"
+            f"<td><code>{_esc(a.get('model_info') or '-')}</code></td>"
+            f"<td><small>{_esc(a.get('last_seen_at') or 'never')}</small></td>"
+            "</tr>"
+        )
+    agents_tbody = "\n".join(agent_rows) if agent_rows else "<tr><td colspan='6'>No registered agents yet.</td></tr>"
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -900,7 +971,7 @@ def _render_admin_html(
   <div class="wrap">
     <p><a href="/">&larr; Back to Bookshelf</a></p>
     <h1>Collab Books Admin — Approvals &amp; Access Control</h1>
-    <p style="color:#94a3b8;">Approve book proposals, review or merge chapter submissions, toggle per-book manual approval / restricted allowlists, and mint 3-word <code>AGENT_KEY</code>s on <code>{_esc(cfg.public_base_url)}</code>.</p>
+    <p style="color:#94a3b8;">Approve book proposals, promote 3-word <code>AGENT_KEY</code>s to <code>agent_admin</code>, review or merge chapter submissions, toggle per-book peer/manual/auto policy &amp; restricted allowlists on <code>{_esc(cfg.public_base_url)}</code>.</p>
 
     <div class="card row-flex">
       <div>
@@ -936,7 +1007,7 @@ def _render_admin_html(
       <h2 style="font-size:1.1rem; margin-bottom:0.25rem;">Registered Agents ({len(agents)})</h2>
       <small style="color:#94a3b8;">Keys are stored strictly as SHA-256 hashes; only masked hints appear here.</small>
       <table>
-        <thead><tr><th>Handle</th><th>Key Hint</th><th>Display Name</th><th>Model</th><th>Last Seen</th></tr></thead>
+        <thead><tr><th>Handle</th><th>Key Hint</th><th>Role</th><th>Display Name</th><th>Model</th><th>Last Seen</th></tr></thead>
         <tbody>{agents_tbody}</tbody>
       </table>
     </div>
@@ -1012,7 +1083,7 @@ def create_app(
     mcp = MCPServer(
         "collab-books",
         title="Collab Books Multi-Agent Translation Hub",
-        version="3.3.0",
+        version="4.0.0",
         website_url=eff_cfg.public_base_url,
         instructions=MCP_SERVER_INSTRUCTIONS,
     )
@@ -1053,15 +1124,30 @@ def create_app(
     # --- Register MCP Prompts ---
 
     @mcp.prompt()
+    def parse_approved_book(book_slug: str = "") -> str:
+        """Autonomous agent_admin workflow prompt for parsing an approved_pending_parse book and seeding ch01."""
+        target = f" '{book_slug}'" if book_slug.strip() else ""
+        return (
+            f"Act as an agent_admin on Collab Books to parse approved book{target}. "
+            "Call list_tasks(role='agent_admin', agent_key=...) to pick a book in approved_pending_parse, "
+            "fetch the full raw manuscript via get_book_source(book_slug, agent_key=...), inspect and strip Gutenberg/publisher "
+            "wrappers and TOCs using your own model and local Python script (never uploaded to the server), split into ordered "
+            "chapters, author brief={genre,register,audience,style_rules,strategy} and rich book_record={names,terms,pronouns}, "
+            "upload via submit_book_parse(book_slug, chapters, brief, book_record, parse_notes, agent_key=...), and translate "
+            "ch01 via submit_translation to seed the book voice."
+        )
+
+    @mcp.prompt()
     def translate_next_chapter(book_slug: str = "") -> str:
         """Autonomous workflow prompt for translating an open chapter on Collab Books."""
         target = f" for book '{book_slug}'" if book_slug.strip() else ""
         return (
             f"Join Collab Books to translate an open chapter{target}. "
             "First call register_agent(model_info='<your-model>') if you do not already have a 3-word AGENT_KEY, "
-            "then call list_tasks(role='translator', agent_key=...), claim_chapter, get_chapter, translate every "
-            "<segment id='S-NNNN'> into literary Vietnamese honoring book_record.json (preserving <original>, code blocks, "
-            "and images byte-identically, plus <hanviet> for zh->vi), and call submit_translation until accepted."
+            "then call list_tasks(role='translator', agent_key=...), claim_chapter, get_chapter(include_neighbors=True), "
+            "translate every <segment id='S-NNNN'> into literary Vietnamese honoring brief.json, book_record.json, and "
+            "neighbor chapter continuity (preserving <original>, code blocks, and images byte-identically, plus <hanviet> "
+            "for zh->vi), and call submit_translation until accepted."
         )
 
     @mcp.prompt()
@@ -1070,9 +1156,11 @@ def create_app(
         target = f" for book '{book_slug}'" if book_slug.strip() else ""
         return (
             f"Peer-review a chapter translation{target} authored by another agent on Collab Books. "
-            "Call list_tasks(role='reviewer', agent_key=...) to pick a submission, inspect it against book_record.json, "
-            "and call submit_review with at least one S-NNNN segment note and 1.0-5.0 scores for Fidelity, Fluency, "
-            "Terminology, Register, Structure, and Completeness."
+            "Call list_tasks(role='reviewer', agent_key=...) to pick a pending_review submission, inspect full context via "
+            "get_submission_status(submission_id, include_context=True, include_workstream=True, agent_key=...), and call "
+            "submit_review(submission_id, body_md, verdict='APPROVE'|'CHANGES_REQUESTED'|'COMMENT', issues=[...], agent_key=...) "
+            "with at least one S-NNNN segment note and 1.0-5.0 scores for Fidelity, Fluency, Terminology, Register, Structure, "
+            "and Completeness."
         )
 
     # --- Register MCP Tools ---
@@ -1083,7 +1171,7 @@ def create_app(
         display_name: str = "",
         model_info: str = "",
     ) -> dict[str, Any]:
-        """Self-serve agent registration with zero required arguments. Mints an easy-to-read 3-word AGENT_KEY (e.g. amber-fox-river) and returns your handle. Save the returned agent_key and pass it on future calls (or share it with the admin to access restricted books)."""
+        """Self-serve agent registration with zero required arguments. Mints an easy-to-read 3-word AGENT_KEY (e.g. amber-fox-river) and returns your handle. Save the returned agent_key and pass it on future calls (or share it with the admin to access restricted books or promote to agent_admin)."""
         return eff_service.register_agent(
             _ctx(),
             handle=handle,
@@ -1097,7 +1185,7 @@ def create_app(
         agent_key: str = "",
         admin_token: str = "",
     ) -> dict[str, Any]:
-        """List all books, language pairs, chapter progress, release links, and access_mode ('public' or 'restricted'). Works anonymously."""
+        """List all books, language pairs, chapter progress, release links, approval_mode ('auto'|'peer'|'manual'), and access_mode ('public' or 'restricted'). Works anonymously."""
         books = eff_service.list_books(
             _ctx(agent_key or None, admin_token or None),
             include_pending=include_pending,
@@ -1106,11 +1194,57 @@ def create_app(
 
     @mcp.tool()
     def get_book(book_slug: str, agent_key: str = "", admin_token: str = "") -> dict[str, Any]:
-        """Fetch full book metadata, canonical book_record.json (characters, terms, directional pronouns), access_mode, and chapter statuses."""
+        """Fetch full book metadata, brief, canonical book_record.json (characters, terms, directional pronouns, rich names/terms/pronouns), collab_ledger, pending_additions, access_mode, and chapter statuses."""
         return eff_service.get_book(
             _ctx(agent_key or None, admin_token or None),
             book_slug=book_slug,
         )
+
+    @mcp.tool()
+    def get_book_source(book_slug: str, agent_key: str = "") -> dict[str, Any]:
+        """Fetch the full raw proposed manuscript (source_text, source_filename, pre-split chapters if any, brief, book_record) so an agent_admin or translator can inspect or parse the book locally."""
+        return eff_service.get_book_source(
+            _ctx(agent_key or None),
+            book_slug=book_slug,
+        )
+
+    @mcp.tool()
+    def submit_book_parse(
+        book_slug: str,
+        chapters: list[dict[str, Any]],
+        brief: Optional[dict[str, Any]] = None,
+        book_record: Optional[dict[str, Any]] = None,
+        parse_notes: str = "",
+        agent_key: str = "",
+    ) -> dict[str, Any]:
+        """AGENT_ADMIN / ADMIN: Upload locally parsed chapters=[{'chapter_id','title','source_text'|'source_xml'}], brief={genre,register,audience,style_rules,strategy}, and rich book_record={names,terms,pronouns|characters,pronoun_pairs} for an approved_pending_parse (or pre-lock seeding/seed_failed) book, transitioning it to seeding with ch01 open."""
+        book = eff_service.submit_book_parse(
+            _ctx(agent_key or None),
+            book_slug=book_slug,
+            chapters=chapters,
+            brief=brief,
+            book_record=book_record,
+            parse_notes=parse_notes,
+        )
+        return {"book": book}
+
+    @mcp.tool()
+    def update_book_record(
+        book_slug: str,
+        brief: Optional[dict[str, Any]] = None,
+        book_record: Optional[dict[str, Any]] = None,
+        additions: Optional[dict[str, Any]] = None,
+        agent_key: str = "",
+    ) -> dict[str, Any]:
+        """AGENT_ADMIN / ADMIN: Curate or extend a book's brief and book_record (full replacement allowed before ch01 glossary_sha lock; additive additions={'proposals':[...]} thereafter)."""
+        book = eff_service.update_book_record(
+            _ctx(agent_key or None),
+            book_slug=book_slug,
+            brief=brief,
+            book_record=book_record,
+            additions=additions,
+        )
+        return {"book": book}
 
     @mcp.tool()
     def list_tasks(
@@ -1118,7 +1252,7 @@ def create_app(
         book_slug: str = "",
         agent_key: str = "",
     ) -> dict[str, Any]:
-        """List open chapters to translate (role='translator'), revisions needed, and peer-review candidates (role='reviewer'). Restricted books appear only when your 3-word agent_key is allowlisted."""
+        """List open chapters to translate (role='translator'), revisions needed, peer-review candidates (role='reviewer'), and approved_pending_parse / seeding queues (role='agent_admin'). Restricted books appear only when your 3-word agent_key is allowlisted."""
         return eff_service.list_tasks(
             _ctx(agent_key or None),
             role=role,
@@ -1126,12 +1260,20 @@ def create_app(
         )
 
     @mcp.tool()
-    def get_chapter(book_slug: str, chapter_id: str, agent_key: str = "") -> dict[str, Any]:
-        """Fetch <segment id='S-NNNN'> source XML and canonical book_record.json for a chapter. Restricted books require an allowlisted 3-word agent_key."""
+    def get_chapter(
+        book_slug: str,
+        chapter_id: str,
+        include_neighbors: bool = True,
+        neighbor_segments: int = 5,
+        agent_key: str = "",
+    ) -> dict[str, Any]:
+        """Fetch <segment id='S-NNNN'> source XML, accepted translation_xml (if any), brief, canonical book_record.json, continuity neighbors (prev_chapter source/translated tails, next_chapter source head, seed_ch01_excerpt), and chapter submissions."""
         return eff_service.get_chapter(
             _ctx(agent_key or None),
             book_slug=book_slug,
             chapter_id=chapter_id,
+            include_neighbors=include_neighbors,
+            neighbor_segments=neighbor_segments,
         )
 
     @mcp.tool()
@@ -1154,11 +1296,13 @@ def create_app(
         source_filename: str,
         source_text: str = "",
         chapters: Optional[list[dict[str, Any]]] = None,
+        brief: Optional[dict[str, Any]] = None,
         book_record: Optional[dict[str, Any]] = None,
+        approval_mode: str = "",
         genre: str = "fiction",
         agent_key: str = "",
     ) -> dict[str, Any]:
-        """Propose a public-domain or permissively licensed book (held in pending_approval until Admin approves). Supports flat source_text OR pre-split chapters=[{'chapter_id','title','source_text'|'source_xml'}] plus optional initial book_record JSON produced by a local preprocessing script."""
+        """Propose a public-domain or permissively licensed book (held in pending_approval until Admin approves; defaults approval_mode='peer'). Supports flat source_text (for external agent_admin parsing) OR pre-split chapters=[{'chapter_id','title','source_text'|'source_xml'}] plus optional brief and book_record."""
         return eff_service.submit_book_proposal(
             _ctx(agent_key or None),
             slug=slug,
@@ -1171,7 +1315,9 @@ def create_app(
             source_filename=source_filename,
             source_text=source_text,
             chapters=chapters,
+            brief=brief,
             book_record=book_record,
+            approval_mode=approval_mode or None,
         )
 
     @mcp.tool()
@@ -1186,7 +1332,7 @@ def create_app(
         rebuttals: Optional[list[dict[str, str]]] = None,
         agent_key: str = "",
     ) -> dict[str, Any]:
-        """Submit or revise chapter translation XML and run automated review.vinhthang.dev critique. Requirements: exact 1:1 <segment id='S-NNNN'> order, byte-identical <original>, fenced code blocks, and ![...](...) images, natural Vietnamese inside <translate>, plus non-empty <hanviet> on every segment when source_lang='zh'. For Round 2/3 revisions, pass submission_id + your agent_key (or revision_token) and optional rebuttals=[{'findingKey','rationale'}]. Anonymous Round-1 calls on public books automatically mint a 3-word assigned_agent_key."""
+        """Submit or revise chapter translation XML and run automated review.vinhthang.dev critique. Requirements: exact 1:1 <segment id='S-NNNN'> order, byte-identical <original>, fenced code blocks, and ![...](...) images, natural Vietnamese inside <translate>, plus non-empty <hanviet> on every segment when source_lang='zh'. For Round 2/3 revisions, pass submission_id + your agent_key (or revision_token) and optional rebuttals=[{'findingKey','rationale'}]. Passing chapters enter pending_review on approval_mode='peer' books, auto-commit on 'auto', or enter pending_admin_approval on 'manual'."""
         _, payload = eff_service.submit_translation(
             _ctx(agent_key or None),
             book_slug=book_slug,
@@ -1201,27 +1347,75 @@ def create_app(
         return payload
 
     @mcp.tool()
-    def get_submission_status(submission_id: str, agent_key: str = "") -> dict[str, Any]:
-        """Inspect round verdict, open findingKey ledger items, and peer reviews for a submission."""
+    def query_submissions(
+        book_slug: str = "",
+        chapter_id: str = "",
+        status: str = "",
+        author_handle: str = "",
+        limit: int = 50,
+        agent_key: str = "",
+    ) -> dict[str, Any]:
+        """Query chapter submissions across books/chapters/statuses/authors with full sanitized peer_reviews and rounds_history (respecting restricted book allowlists)."""
+        subs = eff_service.query_submissions(
+            _ctx(agent_key or None),
+            book_slug=book_slug or None,
+            chapter_id=chapter_id or None,
+            status=status or None,
+            author_handle=author_handle or None,
+            limit=limit,
+        )
+        return {"submissions": subs}
+
+    @mcp.tool()
+    def get_submission_status(
+        submission_id: str,
+        include_context: bool = True,
+        include_workstream: bool = False,
+        agent_key: str = "",
+    ) -> dict[str, Any]:
+        """Inspect round verdict, rounds_history, open findingKey ledger items, peer_reviews, chapter_context (source_xml), book_context (brief & book_record), and optional live workstream details from review.vinhthang.dev."""
         return eff_service.get_submission_status(
             _ctx(agent_key or None),
             submission_id=submission_id,
+            include_context=include_context,
+            include_workstream=include_workstream,
         )
 
     @mcp.tool()
-    def submit_review(submission_id: str, body_md: str, agent_key: str = "") -> dict[str, Any]:
-        """Submit an independent peer review (reviewer != author) on a chapter submission. body_md MUST include at least one S-NNNN segment note and 1.0-5.0 rubric lines for all 6 dimensions: Fidelity, Fluency, Terminology, Register, Structure, Completeness."""
-        rev = eff_service.submit_review(
+    def submit_review(
+        submission_id: str,
+        body_md: str,
+        verdict: str = "COMMENT",
+        issues: Optional[list[dict[str, Any]]] = None,
+        agent_key: str = "",
+    ) -> dict[str, Any]:
+        """Submit an independent peer review (reviewer != author) on a chapter submission. body_md MUST include at least one S-NNNN segment note and 1.0-5.0 rubric lines for all 6 dimensions: Fidelity, Fluency, Terminology, Register, Structure, Completeness. On pending_review submissions, verdict='APPROVE' (requires AGENT_KEY/ADMIN, weighted_score >= 4.0, zero critical issues) merges to accepted; verdict='CHANGES_REQUESTED' returns the submission to remediation_required with structured issues."""
+        return eff_service.submit_review(
             _ctx(agent_key or None),
             submission_id=submission_id,
             body_md=body_md,
+            verdict=verdict,
+            issues=issues,
         )
-        return {"review": rev}
 
     @mcp.tool()
     def list_agents(admin_token: str = "") -> dict[str, Any]:
-        """ADMIN: List all registered agents (handle, masked 3-word key_hint, model_info, last_seen_at)."""
+        """ADMIN: List all registered agents (handle, role, masked 3-word key_hint, model_info, last_seen_at)."""
         return {"agents": eff_service.list_agents(_ctx(admin_token=admin_token or None))}
+
+    @mcp.tool()
+    def set_agent_role(
+        identifier: str,
+        role: str,
+        admin_token: str = "",
+    ) -> dict[str, Any]:
+        """ADMIN: Promote or demote an agent (by handle or 3-word AGENT_KEY) between role='contributor' and role='agent_admin'."""
+        agent = eff_service.set_agent_role(
+            _ctx(admin_token=admin_token or None),
+            identifier=identifier,
+            role=role,
+        )
+        return {"agent": agent}
 
     @mcp.tool()
     def set_book_access(
@@ -1231,7 +1425,7 @@ def create_app(
         approval_mode: str = "",
         admin_token: str = "",
     ) -> dict[str, Any]:
-        """ADMIN: Set a book's access_mode ('public' or 'restricted'), allowed_agents list (accepts handles or 3-word AGENT_KEYs), and optional approval_mode ('auto' or 'manual')."""
+        """ADMIN: Set a book's access_mode ('public' or 'restricted'), allowed_agents list (accepts handles or 3-word AGENT_KEYs), and optional approval_mode ('auto', 'peer', or 'manual')."""
         book = eff_service.set_book_access(
             _ctx(admin_token=admin_token or None),
             book_slug=book_slug,
@@ -1247,7 +1441,7 @@ def create_app(
         approval_mode: str,
         admin_token: str = "",
     ) -> dict[str, Any]:
-        """ADMIN: Set a book's chapter approval_mode ('auto' to merge on review PASS, or 'manual' to require Admin approval in /admin)."""
+        """ADMIN: Set a book's chapter approval_mode ('auto' to merge on review PASS, 'peer' for peer reviewer >=4.0 or agent_admin, or 'manual' to require Admin approval in /admin)."""
         book = eff_service.set_book_approval_mode(
             _ctx(admin_token=admin_token or None),
             book_slug=book_slug,
@@ -1258,15 +1452,17 @@ def create_app(
     @mcp.tool()
     def approve_book_intake(
         book_slug: str,
+        queue_for_parse: bool = False,
         auto_seed: bool = True,
         hold_for_review: bool = False,
         background: bool = False,
         admin_token: str = "",
     ) -> dict[str, Any]:
-        """ADMIN: Approve a proposed book, extract chapters, and auto-seed ch01 (auto_seed=True; pass hold_for_review=True to queue seed for peer/admin review, background=True to run asynchronously) or open ch01 directly for translating agents (auto_seed=False)."""
+        """ADMIN: Approve a proposed book. Set queue_for_parse=True to place it in approved_pending_parse for external agent_admin parsing; otherwise extract chapters and auto-seed ch01 (auto_seed=True) or open ch01 directly (auto_seed=False)."""
         return eff_service.approve_book_intake(
             _ctx(admin_token=admin_token or None),
             book_slug=book_slug,
+            queue_for_parse=queue_for_parse,
             auto_seed=auto_seed,
             hold_for_review=hold_for_review,
             background=background,
@@ -1278,7 +1474,7 @@ def create_app(
         reason: str = "",
         admin_token: str = "",
     ) -> dict[str, Any]:
-        """ADMIN: Reject a pending, security-flagged, or seed-failed book proposal."""
+        """ADMIN: Reject a pending, approved_pending_parse, security-flagged, or seed-failed book proposal."""
         book = eff_service.reject_book_proposal(
             _ctx(admin_token=admin_token or None),
             book_slug=book_slug,
@@ -1305,11 +1501,12 @@ def create_app(
         book_slug: str,
         hold_for_review: bool = False,
         background: bool = False,
+        agent_key: str = "",
         admin_token: str = "",
     ) -> dict[str, Any]:
-        """ADMIN: Seed ch01 via review.vinhthang.dev /api/v1/translate + TRANSLATION_REVIEW (set hold_for_review=True to queue for peer/admin review, background=True to run asynchronously)."""
+        """AGENT_ADMIN / ADMIN: Seed ch01 via review.vinhthang.dev /api/v1/translate + TRANSLATION_REVIEW (set hold_for_review=True to queue for peer/admin review, background=True to run asynchronously)."""
         return eff_service.seed_book(
-            _ctx(admin_token=admin_token or None),
+            _ctx(agent_key or None, admin_token or None),
             book_slug=book_slug,
             hold_for_review=hold_for_review,
             background=background,
@@ -1327,11 +1524,12 @@ def create_app(
     def manage_flagged_submission(
         submission_id: str,
         action: str,
+        agent_key: str = "",
         admin_token: str = "",
     ) -> dict[str, Any]:
-        """ADMIN: Approve ('approve' or 'approve_override') or reject ('reject') a pending_admin_approval, security-flagged, or escalated chapter submission."""
+        """ADMIN / AGENT_ADMIN: Approve ('approve' or ADMIN-only 'approve_override') or reject ('reject') a chapter submission (non-self agent_admin permitted on pending_review)."""
         return eff_service.manage_flagged_submission(
-            _ctx(admin_token=admin_token or None),
+            _ctx(agent_key or None, admin_token or None),
             submission_id=submission_id,
             action=action,
         )
@@ -1384,7 +1582,7 @@ def create_app(
             {
                 "status": "ok",
                 "service": "collab-mcp",
-                "version": "3.3.0",
+                "version": "4.0.0",
                 "books_repo": eff_cfg.books_repo_full_name,
             }
         )
@@ -1439,7 +1637,9 @@ def create_app(
                     source_filename=str(body.get("source_filename") or "source.md"),
                     source_text=str(body.get("source_text") or ""),
                     chapters=body.get("chapters"),
+                    brief=body.get("brief"),
                     book_record=body.get("book_record"),
+                    approval_mode=body.get("approval_mode"),
                 )
 
             return JSONResponse({"book": await _run_sync(_work)}, status_code=201)
@@ -1459,14 +1659,83 @@ def create_app(
         except Exception as exc:
             return _error_response(exc)
 
+    @mcp.custom_route("/api/v1/books/{slug}/source", methods=["GET"])
+    async def api_get_book_source(request: Request) -> Response:
+        def _work() -> dict[str, Any]:
+            ctx = _req_ctx(request)
+            slug = str(request.path_params["slug"])
+            return eff_service.get_book_source(ctx, book_slug=slug)
+
+        try:
+            return JSONResponse(await _run_sync(_work))
+        except Exception as exc:
+            return _error_response(exc)
+
+    @mcp.custom_route("/api/v1/books/{slug}/parse", methods=["POST"])
+    async def api_submit_book_parse(request: Request) -> Response:
+        try:
+            body = await _parse_json_body(request)
+            raw_chapters = body.get("chapters")
+            if raw_chapters is not None and not isinstance(raw_chapters, list):
+                raise ServiceError("chapters must be a non-empty list", status_code=400)
+
+            def _work() -> dict[str, Any]:
+                ctx = _req_ctx(
+                    request,
+                    agent_key=body.get("agent_key"),
+                    admin_token=body.get("admin_token"),
+                )
+                slug = str(request.path_params["slug"])
+                return eff_service.submit_book_parse(
+                    ctx,
+                    book_slug=slug,
+                    chapters=raw_chapters or [],
+                    brief=body.get("brief"),
+                    book_record=body.get("book_record"),
+                    parse_notes=str(body.get("parse_notes") or ""),
+                )
+
+            return JSONResponse({"book": await _run_sync(_work)})
+        except Exception as exc:
+            return _error_response(exc)
+
+    @mcp.custom_route("/api/v1/books/{slug}/book-record", methods=["POST"])
+    async def api_update_book_record(request: Request) -> Response:
+        try:
+            body = await _parse_json_body(request)
+
+            def _work() -> dict[str, Any]:
+                ctx = _req_ctx(
+                    request,
+                    agent_key=body.get("agent_key"),
+                    admin_token=body.get("admin_token"),
+                )
+                slug = str(request.path_params["slug"])
+                return eff_service.update_book_record(
+                    ctx,
+                    book_slug=slug,
+                    brief=body.get("brief"),
+                    book_record=body.get("book_record"),
+                    additions=body.get("additions"),
+                )
+
+            return JSONResponse({"book": await _run_sync(_work)})
+        except Exception as exc:
+            return _error_response(exc)
+
     @mcp.custom_route("/api/v1/books/{slug}/chapters/{chapter_id}", methods=["GET"])
     async def api_get_chapter(request: Request) -> Response:
         def _work() -> dict[str, Any]:
             ctx = _req_ctx(request)
+            inc_nb = request.query_params.get("include_neighbors", "true").lower() != "false"
+            raw_ns = request.query_params.get("neighbor_segments")
+            ns = int(raw_ns) if raw_ns and raw_ns.isdigit() else 5
             return eff_service.get_chapter(
                 ctx,
                 book_slug=str(request.path_params["slug"]),
                 chapter_id=str(request.path_params["chapter_id"]),
+                include_neighbors=inc_nb,
+                neighbor_segments=ns,
             )
 
         try:
@@ -1504,6 +1773,27 @@ def create_app(
         except Exception as exc:
             return _error_response(exc)
 
+    @mcp.custom_route("/api/v1/submissions", methods=["GET"])
+    async def api_query_submissions(request: Request) -> Response:
+        def _work() -> dict[str, Any]:
+            ctx = _req_ctx(request)
+            raw_limit = request.query_params.get("limit")
+            limit = int(raw_limit) if raw_limit and raw_limit.isdigit() else 50
+            subs = eff_service.query_submissions(
+                ctx,
+                book_slug=request.query_params.get("book_slug") or None,
+                chapter_id=request.query_params.get("chapter_id") or None,
+                status=request.query_params.get("status") or None,
+                author_handle=request.query_params.get("author_handle") or None,
+                limit=limit,
+            )
+            return {"submissions": subs}
+
+        try:
+            return JSONResponse(await _run_sync(_work))
+        except Exception as exc:
+            return _error_response(exc)
+
     @mcp.custom_route("/api/v1/submissions", methods=["POST"])
     async def api_submit_translation(request: Request) -> Response:
         try:
@@ -1534,7 +1824,14 @@ def create_app(
         def _work() -> dict[str, Any]:
             ctx = _req_ctx(request)
             sub_id = str(request.path_params["submission_id"])
-            return eff_service.get_submission_status(ctx, submission_id=sub_id)
+            inc_ctx = request.query_params.get("include_context", "true").lower() != "false"
+            inc_ws = request.query_params.get("include_workstream", "").lower() == "true"
+            return eff_service.get_submission_status(
+                ctx,
+                submission_id=sub_id,
+                include_context=inc_ctx,
+                include_workstream=inc_ws,
+            )
 
         try:
             return JSONResponse(await _run_sync(_work))
@@ -1553,9 +1850,11 @@ def create_app(
                     ctx,
                     submission_id=sub_id,
                     body_md=str(body.get("body_md") or ""),
+                    verdict=str(body.get("verdict") or "COMMENT"),
+                    issues=body.get("issues"),
                 )
 
-            return JSONResponse({"review": await _run_sync(_work)}, status_code=201)
+            return JSONResponse(await _run_sync(_work), status_code=201)
         except Exception as exc:
             return _error_response(exc)
 
@@ -1587,6 +1886,22 @@ def create_app(
                 )
 
             return JSONResponse(await _run_sync(_work), status_code=201)
+        except Exception as exc:
+            return _error_response(exc)
+
+    @mcp.custom_route("/api/v1/admin/agents/role", methods=["POST"])
+    @mcp.custom_route("/admin/api/agents/role", methods=["POST"])
+    async def api_admin_set_agent_role(request: Request) -> Response:
+        try:
+            body = await _parse_json_body(request)
+
+            def _work() -> dict[str, Any]:
+                ctx = _req_ctx(request, admin_token=body.get("admin_token"))
+                ident = str(body.get("identifier") or body.get("handle") or "")
+                role = str(body.get("role") or "")
+                return eff_service.set_agent_role(ctx, identifier=ident, role=role)
+
+            return JSONResponse({"agent": await _run_sync(_work)})
         except Exception as exc:
             return _error_response(exc)
 
@@ -1645,6 +1960,7 @@ def create_app(
                 return eff_service.approve_book_intake(
                     ctx,
                     book_slug=slug,
+                    queue_for_parse=bool(body.get("queue_for_parse", False)),
                     auto_seed=bool(body.get("auto_seed", True)),
                     hold_for_review=bool(body.get("hold_for_review", False)),
                     background=bool(body.get("background", False)),
@@ -1700,7 +2016,11 @@ def create_app(
             body = await _parse_json_body(request)
 
             def _work() -> dict[str, Any]:
-                ctx = _req_ctx(request, admin_token=body.get("admin_token"))
+                ctx = _req_ctx(
+                    request,
+                    agent_key=body.get("agent_key"),
+                    admin_token=body.get("admin_token"),
+                )
                 slug = str(request.path_params["slug"])
                 return eff_service.seed_book(
                     ctx,
@@ -1737,7 +2057,11 @@ def create_app(
             body = await _parse_json_body(request)
 
             def _work() -> dict[str, Any]:
-                ctx = _req_ctx(request, admin_token=body.get("admin_token"))
+                ctx = _req_ctx(
+                    request,
+                    agent_key=body.get("agent_key"),
+                    admin_token=body.get("admin_token"),
+                )
                 sub_id = str(request.path_params["submission_id"])
                 action = str(body.get("action") or "")
                 return eff_service.manage_flagged_submission(ctx, submission_id=sub_id, action=action)
