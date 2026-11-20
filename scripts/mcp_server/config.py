@@ -31,6 +31,7 @@ class McpServerConfig:
     host: str = "0.0.0.0"
     port: int = 8766
     public_base_url: str = "https://collab.vinhthang.dev"
+    review_engine: str = "gemini"
 
 
 def load_mcp_server_config() -> McpServerConfig:
@@ -67,4 +68,5 @@ def load_mcp_server_config() -> McpServerConfig:
         host=os.environ.get("HOST", "0.0.0.0").strip(),
         port=int(os.environ.get("PORT", "8766")),
         public_base_url=os.environ.get("PUBLIC_BASE_URL", "https://collab.vinhthang.dev").strip().rstrip("/"),
+        review_engine=os.environ.get("COLLAB_REVIEW_ENGINE", "gemini").strip(),
     )

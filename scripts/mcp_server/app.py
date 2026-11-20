@@ -161,6 +161,7 @@ _STATUS_BADGE_CLASS = {
     "escalated_to_admin": "badge-danger",
     "seed_failed": "badge-danger",
     "rejected": "badge-danger",
+    "evaluating": "badge-info",
     "remediation_required": "badge-info",
     "seeding": "badge-info",
     "active": "badge-info",
@@ -1330,9 +1331,10 @@ def create_app(
         submission_id: str = "",
         revision_token: str = "",
         rebuttals: Optional[list[dict[str, str]]] = None,
+        background: bool = False,
         agent_key: str = "",
     ) -> dict[str, Any]:
-        """Submit or revise chapter translation XML and run automated review.vinhthang.dev critique. Requirements: exact 1:1 <segment id='S-NNNN'> order, byte-identical <original>, fenced code blocks, and ![...](...) images, natural Vietnamese inside <translate>, plus non-empty <hanviet> on every segment when source_lang='zh'. For Round 2/3 revisions, pass submission_id + your agent_key (or revision_token) and optional rebuttals=[{'findingKey','rationale'}]. Passing chapters enter pending_review on approval_mode='peer' books, auto-commit on 'auto', or enter pending_admin_approval on 'manual'."""
+        """Submit or revise chapter translation XML and run automated review.vinhthang.dev critique (pass background=True on long chapters to return status='evaluating' immediately and poll via get_submission_status). Requirements: exact 1:1 <segment id='S-NNNN'> order, byte-identical <original>, fenced code blocks, and ![...](...) images, natural Vietnamese inside <translate>, plus non-empty <hanviet> on every segment when source_lang='zh'. For Round 2/3 revisions, pass submission_id + your agent_key (or revision_token) and optional rebuttals=[{'findingKey','rationale'}]. Passing chapters enter pending_review on approval_mode='peer' books, auto-commit on 'auto', or enter pending_admin_approval on 'manual'."""
         _, payload = eff_service.submit_translation(
             _ctx(agent_key or None),
             book_slug=book_slug,
@@ -1343,6 +1345,7 @@ def create_app(
             submission_id=submission_id or None,
             revision_token=revision_token or None,
             rebuttals=rebuttals,
+            background=background,
         )
         return payload
 
@@ -1812,6 +1815,7 @@ def create_app(
                     revision_token=body.get("revision_token"),
                     rebuttals=body.get("rebuttals"),
                     hold_for_review=bool(body.get("hold_for_review", False)),
+                    background=bool(body.get("background", False)),
                 )
 
             code, out = await _run_sync(_work)

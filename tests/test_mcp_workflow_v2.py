@@ -936,3 +936,106 @@ def test_ac_056_app_middleware_and_html_renderer_boundaries(tmp_path: Path):
     )
     assert '<option value="auto" selected>' in c_auto
     store.close()
+
+
+def test_review_client_engine_overrides_and_background_submission(tmp_path: Path):
+    import threading
+    import time as _time
+
+    cfg, store, rs_client, svc = _build_env(tmp_path)
+
+    # 1. ReviewServerClient sends engineOverrides for all 4 TRANSLATION_REVIEW agents using cfg.review_engine ('gemini')
+    captured_round_body: dict[str, object] = {}
+
+    def _round_handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/api/v1/workstreams/ws-eo-1/rounds"
+        captured_round_body.update(json.loads(request.content.decode("utf-8")))
+        return httpx.Response(
+            200,
+            json={
+                "workstream": {"stageStatus": "GOVERNANCE_CLEAN", "roundNumber": 1},
+                "round": {"verdict": "PASS", "roundNumber": 1, "p0Count": 0, "p1Count": 0, "p2Count": 0, "judgeSummary": "Clean."},
+                "ledger": [],
+            },
+        )
+
+    real_cls = httpx.Client
+    with patch("scripts.mcp_server.review_client.httpx.Client", lambda **kw: real_cls(transport=httpx.MockTransport(_round_handler), **kw)):
+        rc = ReviewServerClient(cfg)
+        res = rc.run_translation_round(workstream_id="ws-eo-1", content="test bundle")
+        assert res["verdict"] == "PASS"
+
+    assert captured_round_body.get("engineOverrides") == {
+        "vi-translation-fidelity": "gemini",
+        "vi-literary-fluency": "gemini",
+        "vi-terminology-pronoun-hawk": "gemini",
+        "skeptic-judge": "gemini",
+    }
+
+    # 2. submit_translation(..., background=True) returns 202 'evaluating', blocks duplicates (409), and settles to 'pending_review'
+    gate = threading.Event()
+    orig_run = rs_client.run_translation_round
+
+    def _slow_round(**kwargs):
+        gate.wait(timeout=5.0)
+        return orig_run(**kwargs)
+
+    rs_client.run_translation_round = _slow_round  # type: ignore[method-assign]
+    app = create_app(cfg=cfg, service=svc)
+    admin_hdr = {"Authorization": f"Bearer {cfg.collab_admin_token}"}
+
+    with TestClient(app) as client:
+        tr_ag = client.post("/api/v1/agents/register", json={"handle": "bg-trans", "model_info": "sonnet"}).json()
+        client.post(
+            "/api/v1/books/propose",
+            json={
+                "slug": "bg-book",
+                "title": "BG Book",
+                "author": "A",
+                "source_lang": "en",
+                "license": "public-domain",
+                "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+                "source_filename": "bg.md",
+                "chapters": [{"chapter_id": "ch01", "title": "Ch 1", "source_text": "Quiet river water."}],
+            },
+        )
+        client.post("/api/v1/admin/books/bg-book/approve", headers=admin_hdr, json={"auto_seed": False})
+
+        tr_xml = (
+            '<segment id="S-0001" type="paragraph">\n<original>\nQuiet river water.\n</original>\n'
+            '<translate>\nMặt nước sông êm ả trôi.\n</translate>\n</segment>\n'
+        )
+        bg_res = client.post(
+            "/api/v1/submissions",
+            headers={"Authorization": f"Bearer {tr_ag['agent_key']}"},
+            json={
+                "book_slug": "bg-book",
+                "chapter_id": "ch01",
+                "translation_xml": tr_xml,
+                "background": True,
+            },
+        )
+        assert bg_res.status_code == 202
+        bg_sub = bg_res.json()["submission"]
+        assert bg_sub["status"] == "evaluating"
+
+        # Duplicate Round-1 submission while evaluating -> 409
+        assert (
+            client.post(
+                "/api/v1/submissions",
+                headers={"Authorization": f"Bearer {tr_ag['agent_key']}"},
+                json={"book_slug": "bg-book", "chapter_id": "ch01", "translation_xml": tr_xml},
+            ).status_code
+            == 409
+        )
+
+        gate.set()
+        for _ in range(50):
+            cur = client.get(f"/api/v1/submissions/{bg_sub['id']}", params={"agent_key": tr_ag["agent_key"]}).json()
+            if cur["submission"]["status"] != "evaluating":
+                break
+            _time.sleep(0.05)
+        assert cur["submission"]["status"] == "pending_review"
+
+    store.close()

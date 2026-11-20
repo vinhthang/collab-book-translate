@@ -16,13 +16,22 @@ class ReviewServerError(RuntimeError):
         self.status_code = status_code
 
 
+_TRANSLATION_REVIEW_AGENTS: tuple[str, ...] = (
+    "vi-translation-fidelity",
+    "vi-literary-fluency",
+    "vi-terminology-pronoun-hawk",
+    "skeptic-judge",
+)
+
+
 class ReviewServerClient:
     """Client driving TRANSLATION_REVIEW workstreams and fallback chapter translation."""
 
-    def __init__(self, cfg: McpServerConfig, timeout_seconds: float = 180.0) -> None:
+    def __init__(self, cfg: McpServerConfig, timeout_seconds: float = 300.0) -> None:
         self._base_url = cfg.review_server_url.rstrip("/")
         self._token = cfg.review_bearer_token
         self._timeout = timeout_seconds
+        self._review_engine = cfg.review_engine
 
     def _headers(self) -> dict[str, str]:
         hdrs = {"Content-Type": "application/json"}
@@ -84,6 +93,10 @@ class ReviewServerClient:
             "discoverRepoRules": False,
             "content": content,
         }
+        if self._review_engine:
+            payload["engineOverrides"] = {
+                slug: self._review_engine for slug in _TRANSLATION_REVIEW_AGENTS
+            }
         if rebuttals:
             payload["rebuttals"] = rebuttals
 

@@ -652,7 +652,7 @@ class CollabMcpService:
             pending_gate_chapters = {
                 s["chapter_id"]
                 for s in subs
-                if s["status"] in {"pending_review", "pending_admin_approval"}
+                if s["status"] in {"evaluating", "pending_review", "pending_admin_approval"}
             }
             if b["status"] in {"active", "published"} and role in {"all", "translator"}:
                 for c in self.store.list_chapters(slug):
@@ -1081,6 +1081,7 @@ class CollabMcpService:
         revision_token: Optional[str] = None,
         rebuttals: Optional[list[dict[str, str]]] = None,
         hold_for_review: bool = False,
+        background: bool = False,
     ) -> tuple[int, dict[str, Any]]:
         """Validate, scan, run review.vinhthang.dev round, and auto-sync on PASS."""
         self._check_write_rate(ctx)
@@ -1121,7 +1122,7 @@ class CollabMcpService:
                 )
                 if not is_same_agent:
                     verify_revision_token(revision_token, existing_sub["revision_token_sha256"])
-                if existing_sub["status"] in {"escalated_to_admin", "pending_review", "pending_admin_approval", "accepted", "rejected"} and ctx.tier != "ADMIN":
+                if existing_sub["status"] in {"evaluating", "escalated_to_admin", "pending_review", "pending_admin_approval", "accepted", "rejected"} and ctx.tier != "ADMIN":
                     raise ServiceError(
                         f"Submission is in terminal/review state '{existing_sub['status']}'",
                         status_code=409,
@@ -1133,7 +1134,7 @@ class CollabMcpService:
                 )
         elif ctx.tier != "ADMIN":
             existing_for_ch = self.store.list_submissions(book_slug=book_slug, chapter_id=chapter_id)
-            if any(s["status"] in {"pending_review", "pending_admin_approval"} for s in existing_for_ch):
+            if any(s["status"] in {"evaluating", "pending_review", "pending_admin_approval"} for s in existing_for_ch):
                 raise ServiceError(
                     f"Chapter '{book_slug}/{chapter_id}' already has a passing translation awaiting review or approval",
                     status_code=409,
@@ -1275,92 +1276,159 @@ class CollabMcpService:
             f"## Canonical book_record.json\n```json\n{json.dumps(book['book_record'], ensure_ascii=False, indent=2)}\n```\n\n"
             f"## Submitted Bilingual Segments (translation.xml)\n```xml\n{translation_xml}\n```\n"
         )
+        final_txt = _render_final_txt(translation_xml)
+        app_mode = str(book.get("approval_mode") or "auto")
+        prior_history = list(existing_sub.get("rounds_history") or []) if existing_sub else []
+
+        def _persist_round_outcome(target_sub_id: Optional[str], round_res: dict[str, Any]) -> dict[str, Any]:
+            verdict = round_res["verdict"]
+            round_num = int(round_res["roundNumber"])
+            if verdict == "PASS":
+                hold_admin_seed = bool(hold_for_review) and ctx.tier == "ADMIN"
+                if hold_admin_seed or (app_mode == "manual" and ctx.tier != "ADMIN"):
+                    sub_status = "pending_admin_approval"
+                elif app_mode == "peer" and ctx.tier != "ADMIN":
+                    sub_status = "pending_review"
+                else:
+                    self.review_client.approve_workstream(workstream_id=ws_id)
+                    sub_status = "accepted"
+            else:
+                sub_status = (
+                    "escalated_to_admin"
+                    if round_num >= self.cfg.max_revise_rounds or round_res["stageStatus"] == "ESCALATED_TO_HUMAN"
+                    else "remediation_required"
+                )
+
+            updated_history = list(prior_history)
+            updated_history.append(
+                {
+                    "round_number": round_num,
+                    "type": "translation_round",
+                    "engine_model": engine_model,
+                    "rebuttals": rebuttals or [],
+                    "verdict": verdict,
+                    "stage_status": round_res["stageStatus"],
+                    "p0_count": round_res["p0Count"],
+                    "p1_count": round_res["p1Count"],
+                    "p2_count": round_res["p2Count"],
+                    "judge_summary": round_res["judgeSummary"],
+                    "open_findings": round_res["openFindings"],
+                    "translation_xml": translation_xml,
+                }
+            )
+
+            if target_sub_id is None:
+                saved = self.store.create_submission(
+                    book_slug=book_slug,
+                    chapter_id=chapter_id,
+                    author_actor_id=eff_ctx.actor_id,
+                    author_handle=eff_ctx.handle,
+                    author_ip_hash=ctx.client_ip_hash,
+                    engine_model=engine_model,
+                    status=sub_status,
+                    round_number=round_num,
+                    max_rounds=self.cfg.max_revise_rounds,
+                    workstream_id=ws_id,
+                    revision_token_sha256=rt_sha,
+                    translation_xml=translation_xml,
+                    final_txt=final_txt,
+                    additions=norm_additions,
+                    open_findings=round_res["openFindings"],
+                    security_flags=[],
+                    judge_summary=round_res["judgeSummary"],
+                    rounds_history=updated_history,
+                )
+            else:
+                saved = self.store.update_submission(
+                    target_sub_id,
+                    status=sub_status,
+                    round_number=round_num,
+                    workstream_id=ws_id,
+                    translation_xml=translation_xml,
+                    final_txt=final_txt,
+                    additions=norm_additions,
+                    open_findings=round_res["openFindings"],
+                    judge_summary=round_res["judgeSummary"],
+                    rounds_history=updated_history,
+                )
+
+            if sub_status == "accepted":
+                fresh_book = self.store.get_book(book_slug) or book
+                fresh_ch = self.store.get_chapter(book_slug, chapter_id) or ch
+                self._finalize_accepted_chapter(
+                    book=fresh_book,
+                    ch=fresh_ch,
+                    submission=saved,
+                )
+            return saved
+
+        if background:
+            next_round_est = int(existing_sub["round_number"]) + 1 if existing_sub else 1
+            if existing_sub is None:
+                pending_sub = self.store.create_submission(
+                    book_slug=book_slug,
+                    chapter_id=chapter_id,
+                    author_actor_id=eff_ctx.actor_id,
+                    author_handle=eff_ctx.handle,
+                    author_ip_hash=ctx.client_ip_hash,
+                    engine_model=engine_model,
+                    status="evaluating",
+                    round_number=next_round_est,
+                    max_rounds=self.cfg.max_revise_rounds,
+                    workstream_id=ws_id,
+                    revision_token_sha256=rt_sha,
+                    translation_xml=translation_xml,
+                    final_txt=final_txt,
+                    additions=norm_additions,
+                    open_findings=[],
+                    security_flags=[],
+                    judge_summary="Running TRANSLATION_REVIEW specialists on review.vinhthang.dev...",
+                    rounds_history=prior_history,
+                )
+            else:
+                pending_sub = self.store.update_submission(
+                    existing_sub["id"],
+                    status="evaluating",
+                    workstream_id=ws_id,
+                    translation_xml=translation_xml,
+                    final_txt=final_txt,
+                    additions=norm_additions,
+                    judge_summary="Running TRANSLATION_REVIEW specialists on review.vinhthang.dev...",
+                )
+            target_id = str(pending_sub["id"])
+
+            def _bg_worker() -> None:
+                try:
+                    bg_round = self.review_client.run_translation_round(
+                        workstream_id=ws_id,
+                        content=review_bundle,
+                        rebuttals=rebuttals,
+                    )
+                    _persist_round_outcome(target_id, bg_round)
+                except Exception as exc:
+                    self.store.update_submission(
+                        target_id,
+                        status="remediation_required",
+                        judge_summary=f"Background review round error: {exc}",
+                    )
+
+            threading.Thread(target=_bg_worker, daemon=True).start()
+            bg_payload: dict[str, Any] = {
+                "submission": _sanitize_submission_public(pending_sub),
+                "evaluating_in_background": True,
+            }
+            if returned_rev_token:
+                bg_payload["revision_token"] = returned_rev_token
+            if auto_meta:
+                bg_payload.update(auto_meta)
+            return 202, bg_payload
+
         round_res = self.review_client.run_translation_round(
             workstream_id=ws_id,
             content=review_bundle,
             rebuttals=rebuttals,
         )
-
-        verdict = round_res["verdict"]
-        round_num = int(round_res["roundNumber"])
-        final_txt = _render_final_txt(translation_xml)
-        app_mode = str(book.get("approval_mode") or "auto")
-
-        if verdict == "PASS":
-            hold_admin_seed = bool(hold_for_review) and ctx.tier == "ADMIN"
-            if hold_admin_seed or (app_mode == "manual" and ctx.tier != "ADMIN"):
-                sub_status = "pending_admin_approval"
-            elif app_mode == "peer" and ctx.tier != "ADMIN":
-                sub_status = "pending_review"
-            else:
-                self.review_client.approve_workstream(workstream_id=ws_id)
-                sub_status = "accepted"
-        else:
-            sub_status = (
-                "escalated_to_admin"
-                if round_num >= self.cfg.max_revise_rounds or round_res["stageStatus"] == "ESCALATED_TO_HUMAN"
-                else "remediation_required"
-            )
-
-        prior_history = list(existing_sub.get("rounds_history") or []) if existing_sub else []
-        prior_history.append(
-            {
-                "round_number": round_num,
-                "type": "translation_round",
-                "engine_model": engine_model,
-                "rebuttals": rebuttals or [],
-                "verdict": verdict,
-                "stage_status": round_res["stageStatus"],
-                "p0_count": round_res["p0Count"],
-                "p1_count": round_res["p1Count"],
-                "p2_count": round_res["p2Count"],
-                "judge_summary": round_res["judgeSummary"],
-                "open_findings": round_res["openFindings"],
-                "translation_xml": translation_xml,
-            }
-        )
-
-        if existing_sub is None:
-            saved_sub = self.store.create_submission(
-                book_slug=book_slug,
-                chapter_id=chapter_id,
-                author_actor_id=eff_ctx.actor_id,
-                author_handle=eff_ctx.handle,
-                author_ip_hash=ctx.client_ip_hash,
-                engine_model=engine_model,
-                status=sub_status,
-                round_number=round_num,
-                max_rounds=self.cfg.max_revise_rounds,
-                workstream_id=ws_id,
-                revision_token_sha256=rt_sha,
-                translation_xml=translation_xml,
-                final_txt=final_txt,
-                additions=norm_additions,
-                open_findings=round_res["openFindings"],
-                security_flags=[],
-                judge_summary=round_res["judgeSummary"],
-                rounds_history=prior_history,
-            )
-        else:
-            saved_sub = self.store.update_submission(
-                existing_sub["id"],
-                status=sub_status,
-                round_number=round_num,
-                workstream_id=ws_id,
-                translation_xml=translation_xml,
-                final_txt=final_txt,
-                additions=norm_additions,
-                open_findings=round_res["openFindings"],
-                judge_summary=round_res["judgeSummary"],
-                rounds_history=prior_history,
-            )
-
-        if sub_status == "accepted":
-            self._finalize_accepted_chapter(
-                book=book,
-                ch=ch,
-                submission=saved_sub,
-            )
+        saved_sub = _persist_round_outcome(existing_sub["id"] if existing_sub else None, round_res)
 
         out_payload: dict[str, Any] = {
             "submission": _sanitize_submission_public(saved_sub),
