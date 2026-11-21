@@ -967,9 +967,9 @@ def test_review_client_engine_overrides_and_background_submission(tmp_path: Path
         assert res["verdict"] == "PASS"
 
     assert captured_round_body.get("selectionMode") == "manual"
-    assert captured_round_body.get("agentSlugs") == ["vi-literary-fluency"]
+    assert captured_round_body.get("agentSlugs") == ["vi-terminology-pronoun-hawk"]
     assert captured_round_body.get("engineOverrides") == {
-        "vi-literary-fluency": "gemini",
+        "vi-terminology-pronoun-hawk": "gemini",
         "skeptic-judge": "gemini",
     }
 
