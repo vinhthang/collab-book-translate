@@ -73,4 +73,9 @@
   - Code review & linters (`git diff --check`): `0` P0/P1 findings; `/admin` extracted JS passes `node --check` cleanly.
 
 ## Real-world observations
-No real-world confirmation has been recorded.
+- `2026-11-21`: Deployed `ghcr.io/vinhthang/collab-mcp:v0.3.0` (`sha256:33fa9084...`) to `arm10` (`helm upgrade fleet`, revision `220745`, pod `collab-mcp-7b8f49c8db-rpt49` `1/1 Running` in namespace `apps`) and synced `vinhthang/oci` (`89dd058`).
+- Verified live endpoints on `https://collab.vinhthang.dev`:
+  - `GET /api/health` returned `version: "4.1.0"`.
+  - MCP `initialize`, `tools/list` (`28` tools), `prompts/list` (`4` prompts), and failing `tools/call` (`claim_chapter`) returned `"Error executing tool claim_chapter: [404] Book 'nonexistent-book-xyz' not found"` with `isError: true`.
+  - Startup migration automatically marked legacy `gift-of-the-magi/ch01` drafts (`fd1061d6`, `6c5a3911`, `adfc19e4`) as `"superseded"`, kept `a953d59b` `"accepted"`, left `ch02`/`ch03` `"open"`, and returned `revisions_needed: []` in `list_tasks`.
+  - Filed Muse's historical `gift-of-the-magi/ch01` incident (`2d91a53f-315b-4228-b662-49d4724f818e`) via `POST /api/v1/bugs`, observed it in `list_tasks(role="agent_admin")["open_bug_reports"]`, and triaged it via `agent:agy-admin` to `status: "fixed"`, `fixed_in_version: "v0.3.0"`.
