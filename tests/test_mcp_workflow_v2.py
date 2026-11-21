@@ -966,10 +966,10 @@ def test_review_client_engine_overrides_and_background_submission(tmp_path: Path
         res = rc.run_translation_round(workstream_id="ws-eo-1", content="test bundle")
         assert res["verdict"] == "PASS"
 
+    assert captured_round_body.get("selectionMode") == "manual"
+    assert captured_round_body.get("agentSlugs") == ["vi-translation-fidelity"]
     assert captured_round_body.get("engineOverrides") == {
         "vi-translation-fidelity": "gemini",
-        "vi-literary-fluency": "gemini",
-        "vi-terminology-pronoun-hawk": "gemini",
         "skeptic-judge": "gemini",
     }
 

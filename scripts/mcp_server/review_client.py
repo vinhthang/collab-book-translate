@@ -27,11 +27,12 @@ _TRANSLATION_REVIEW_AGENTS: tuple[str, ...] = (
 class ReviewServerClient:
     """Client driving TRANSLATION_REVIEW workstreams and fallback chapter translation."""
 
-    def __init__(self, cfg: McpServerConfig, timeout_seconds: float = 300.0) -> None:
+    def __init__(self, cfg: McpServerConfig, timeout_seconds: float = 420.0) -> None:
         self._base_url = cfg.review_server_url.rstrip("/")
         self._token = cfg.review_bearer_token
         self._timeout = timeout_seconds
         self._review_engine = cfg.review_engine
+        self._agent_slugs = list(cfg.review_agent_slugs)
 
     def _headers(self) -> dict[str, str]:
         hdrs = {"Content-Type": "application/json"}
@@ -87,15 +88,19 @@ class ReviewServerClient:
         content: str,
         rebuttals: Optional[list[dict[str, str]]] = None,
     ) -> dict[str, Any]:
+        use_manual = bool(self._agent_slugs)
         payload: dict[str, Any] = {
             "stage": "TRANSLATION_REVIEW",
-            "selectionMode": "auto",
+            "selectionMode": "manual" if use_manual else "auto",
             "discoverRepoRules": False,
             "content": content,
         }
+        if use_manual:
+            payload["agentSlugs"] = list(self._agent_slugs)
         if self._review_engine:
+            target_slugs = (*self._agent_slugs, "skeptic-judge") if use_manual else _TRANSLATION_REVIEW_AGENTS
             payload["engineOverrides"] = {
-                slug: self._review_engine for slug in _TRANSLATION_REVIEW_AGENTS
+                slug: self._review_engine for slug in target_slugs
             }
         if rebuttals:
             payload["rebuttals"] = rebuttals
