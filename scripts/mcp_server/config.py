@@ -32,7 +32,7 @@ class McpServerConfig:
     port: int = 8766
     public_base_url: str = "https://collab.vinhthang.dev"
     review_engine: str = "gemini"
-    review_agent_slugs: tuple[str, ...] = ("vi-translation-fidelity",)
+    review_agent_slugs: tuple[str, ...] = ("vi-literary-fluency",)
 
 
 def load_mcp_server_config() -> McpServerConfig:
@@ -72,7 +72,7 @@ def load_mcp_server_config() -> McpServerConfig:
         review_engine=os.environ.get("COLLAB_REVIEW_ENGINE", "gemini").strip(),
         review_agent_slugs=tuple(
             s.strip()
-            for s in os.environ.get("COLLAB_REVIEW_AGENTS", "vi-translation-fidelity").split(",")
+            for s in os.environ.get("COLLAB_REVIEW_AGENTS", "vi-literary-fluency").split(",")
             if s.strip()
         ),
     )

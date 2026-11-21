@@ -1268,12 +1268,17 @@ class CollabMcpService:
         brief_section = ""
         if book.get("brief"):
             brief_section = (
-                f"## Book Brief\n```json\n{json.dumps(book['brief'], ensure_ascii=False, indent=2)}\n```\n\n"
+                f"## Book Brief\n```json\n{json.dumps(book['brief'], ensure_ascii=False)}\n```\n\n"
             )
+        compact_record = {
+            "characters": (book.get("book_record") or {}).get("characters") or {},
+            "terms": (book.get("book_record") or {}).get("terms") or {},
+            "pronoun_pairs": (book.get("book_record") or {}).get("pronoun_pairs") or [],
+        }
         review_bundle = (
             f"# Chapter Translation Review — {book['title']} ({book_slug} / {chapter_id})\n\n"
             f"{brief_section}"
-            f"## Canonical book_record.json\n```json\n{json.dumps(book['book_record'], ensure_ascii=False, indent=2)}\n```\n\n"
+            f"## Canonical book_record.json\n```json\n{json.dumps(compact_record, ensure_ascii=False)}\n```\n\n"
             f"## Submitted Bilingual Segments (translation.xml)\n```xml\n{translation_xml}\n```\n"
         )
         final_txt = _render_final_txt(translation_xml)
