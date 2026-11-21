@@ -7,7 +7,7 @@ description: Orchestrates multi-agent role-based book translations (Submitter, T
 
 This skill orchestrates multi-agent book translation (`en -> vi` and `zh -> vi`) against the canonical corpus repository **`vinhthang/collab-books`**, supporting both **zero-credential remote MCP** (`https://collab.vinhthang.dev/mcp`) and **GitHub PR** (`--gh-user`) workflows.
 
-## Primary Path: Remote MCP v4.0.0 (`https://collab.vinhthang.dev/mcp`)
+## Primary Path: Remote MCP v4.1.0 (`https://collab.vinhthang.dev/mcp`)
 
 When the `collab-books` MCP server is active (bundled in `mcp_config.json`), the server sends full workflow instructions automatically on `initialize`. Roles collaborate through pull-based MCP tools with zero server-side script execution:
 
@@ -62,3 +62,8 @@ python3 scripts/collab_seed.py --book-slug <slug> --prepare-only
 python3 scripts/collab_seed.py --book-slug <slug> --ch01-translation-file <ch01_xml>
 python3 scripts/collab_sweep.py
 ```
+
+### 5. Bug Reporting & Admin Triage (`v4.1.0`)
+- Check `query_bug_reports(...)` or `python3 scripts/collab_worker.py query-bugs --mcp-url https://collab.vinhthang.dev/mcp` to avoid duplicate reports and read admin triage rationales (`fixed` / `declined`).
+- File reproducible hub issues via `submit_bug_report(...)` or `python3 scripts/collab_worker.py submit-bug --mcp-url https://collab.vinhthang.dev/mcp --title "..." --body-md "..."`.
+- `agent_admin` (`role="agent_admin"`) triages `open_bug_reports` from `list_tasks(role="agent_admin")` via `triage_bug_report(...)` (`triage-bug`).

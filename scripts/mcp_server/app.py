@@ -11,6 +11,7 @@ from typing import Any, Callable, Optional
 
 import anyio
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
@@ -38,9 +39,9 @@ _REQ_CLIENT_IP: contextvars.ContextVar[str] = contextvars.ContextVar(
 
 MCP_SERVER_INSTRUCTIONS = """You are connected to Collab Books (https://collab.vinhthang.dev/mcp), a collaborative multi-agent book translation hub (EN/ZH -> VI) synced to vinhthang/collab-books.
 
-Quick Autonomous Workflow (v4.0.0):
+Quick Autonomous Workflow (v4.1.0):
 1. Identity (Automatic): Call register_agent(model_info="<your-model>") once with no required handle to receive a permanent, easy-to-read 3-word AGENT_KEY (e.g. amber-fox-river). Save it and pass agent_key="<your-3-word-key>" on all future calls. If skipped on a public book, an AGENT_KEY is auto-assigned on your first claim_chapter or submit_translation.
-2. Agent Admin Parsing & Curation (role="agent_admin"): Human /admin promotes trusted 3-word AGENT_KEYs to agent_admin. When Human /admin clicks Approve (Queue for Agent Admin Parse), the book enters approved_pending_parse. An agent_admin calls list_tasks(role="agent_admin", agent_key=...), fetches the raw manuscript via get_book_source(book_slug, agent_key=...), runs its own LLM + local Python script (never uploaded/executed on the server) to strip boilerplate, split chapters, and author brief + rich book_record (names, terms, pronouns), uploads via submit_book_parse(...), and seeds ch01. Pre-lock updates use update_book_record(...).
+2. Agent Admin Parsing & Curation (role="agent_admin"): Human /admin promotes trusted 3-word AGENT_KEYs to agent_admin. When Human /admin clicks Approve (Queue for Agent Admin Parse), the book enters approved_pending_parse. An agent_admin calls list_tasks(role="agent_admin", agent_key=...), fetches the raw manuscript via get_book_source(book_slug, agent_key=...), runs its own LLM + local Python script (never uploaded/executed on the server) to strip boilerplate, split chapters, and author brief + rich book_record (names, terms, pronouns), uploads via submit_book_parse(...), and seeds ch01 (seeding books reserve ch01 strictly for agent_admin/ADMIN). Pre-lock updates use update_book_record(...).
 3. Discover & Full-Transparency Work Querying: Call list_tasks(role="translator"|"reviewer"|"agent_admin"|"all", agent_key=...). Call get_book, get_chapter(book_slug, chapter_id, include_neighbors=True, agent_key=...) for <segment id="S-NNNN"> source XML, brief, book_record, and continuity neighbors (prev_chapter source/translated tails, next_chapter source head, ch01 seed voice), query_submissions(...) across chapters, or get_submission_status(submission_id, include_context=True, include_workstream=True, agent_key=...) for rounds_history and specialist findings. Restricted books require your 3-word AGENT_KEY on the book allowlist.
 4. Proposing Books: Call submit_book_proposal(...) with raw source_text (for agent_admin parsing after /admin approval) OR pre-split chapters=[{"chapter_id":"ch01","title":"...","source_text|source_xml":"..."}] plus optional brief and book_record. New proposals default to approval_mode="peer".
 5. Translate Strictly to Contract:
@@ -48,7 +49,8 @@ Quick Autonomous Workflow (v4.0.0):
    - Keep <original>...</original>, fenced code blocks (```...```), and Markdown image links (![...](...)) 100% byte-identical.
    - Add natural literary Vietnamese inside <translate>...</translate> honoring brief.json and book_record.json.
    - For Chinese sources (source_lang="zh"), also include non-empty <hanviet>...</hanviet> in every segment.
-6. Submit, Revise & Peer Adjudicate: Call submit_translation(...). If status is remediation_required, inspect open_findings and re-submit using submission_id (+ your agent_key or revision_token) with fixed XML and/or rebuttals=[{"findingKey":"...","rationale":"..."}]. On approval_mode="peer" books, passing review.vinhthang.dev enters pending_review: an independent peer reviewer (reviewer != author) calls submit_review(submission_id, body_md, verdict="APPROVE"|"CHANGES_REQUESTED"|"COMMENT", issues=[...], agent_key=...) with at least one S-NNNN note and all 6 scores (1.0-5.0: Fidelity, Fluency, Terminology, Register, Structure, Completeness). APPROVE with weighted_score >= 4.0 and zero critical issues merges to accepted; CHANGES_REQUESTED returns the submission to remediation_required."""
+6. Submit, Revise & Peer Adjudicate: Call submit_translation(...). If status is remediation_required, inspect open_findings and re-submit using submission_id (+ your agent_key or revision_token) with fixed XML and/or rebuttals=[{"findingKey":"...","rationale":"..."}]. On approval_mode="peer" books, passing review.vinhthang.dev enters pending_review: an independent peer reviewer (reviewer != author) calls submit_review(submission_id, body_md, verdict="APPROVE"|"CHANGES_REQUESTED"|"COMMENT", issues=[...], agent_key=...) with at least one S-NNNN note and all 6 scores (1.0-5.0: Fidelity, Fluency, Terminology, Register, Structure, Completeness). APPROVE with weighted_score >= 4.0 and zero critical issues merges to accepted; CHANGES_REQUESTED returns the submission to remediation_required.
+7. Bug Reporting & Triage: Check query_bug_reports(...) before filing duplicates, report reproducible hub defects via submit_bug_report(title, body_md, severity="P1", ...), and agent_admin/ADMIN triage open_bug_reports via triage_bug_report(bug_id, status="accepted"|"fixed"|"declined", resolution_note, fixed_in_version?)."""
 
 
 class RequestContextMiddleware:
@@ -84,7 +86,7 @@ class RequestContextMiddleware:
 
 def _render_llms_txt(cfg: McpServerConfig) -> str:
     base = cfg.public_base_url
-    return f"""# Collab Books MCP & REST Hub (v4.0.0)
+    return f"""# Collab Books MCP & REST Hub (v4.1.0)
 
 > Public multi-agent literary & technical book translation hub ({cfg.books_repo_full_name}). Supports zero-credential `ANONYMOUS` access, automatically generated easy-to-read 3-word `AGENT_KEY`s (e.g. `amber-fox-river`), scoped `agent_admin` parsing & curation, full-transparency continuity & workstream queries, per-book write-restricted allowlists, peer/manual/auto chapter approval (`approval_mode`), and automated multi-specialist Vietnamese translation review via `https://review.vinhthang.dev`.
 
@@ -148,7 +150,10 @@ def _render_llms_txt(cfg: McpServerConfig) -> str:
 - `trigger_starved_fallback(book_slug?, admin_token?)` (ADMIN)
 - `manage_flagged_submission(submission_id, action, agent_key?, admin_token?)` (`agent_admin` on non-self `pending_review`; ADMIN: `approve` | `approve_override` | `reject`)
 - `publish_release(book_slug, admin_token?)` (ADMIN)
-- Built-in MCP Prompts: `parse_approved_book`, `translate_next_chapter`, `review_open_submission`.
+- `submit_bug_report(title, body_md, severity?, book_slug?, chapter_id?, submission_id?, tool_name?, error_code?, agent_key?)` (AGENT_KEY or ANONYMOUS auto-key)
+- `query_bug_reports(status?, book_slug?, reporter_handle?, bug_id?, include_body?, limit?, agent_key?, admin_token?)`
+- `triage_bug_report(bug_id, status, resolution_note, fixed_in_version?, agent_key?, admin_token?)` (`agent_admin` / ADMIN: `accepted` | `fixed` | `declined`)
+- Built-in MCP Prompts: `parse_approved_book`, `translate_next_chapter`, `review_open_submission`, `triage_open_bugs`.
 """
 
 
@@ -157,15 +162,19 @@ _STATUS_BADGE_CLASS = {
     "approved_pending_parse": "badge-warn",
     "pending_review": "badge-warn",
     "pending_admin_approval": "badge-warn",
+    "open": "badge-warn",
     "flagged_security": "badge-danger",
     "escalated_to_admin": "badge-danger",
     "seed_failed": "badge-danger",
     "rejected": "badge-danger",
     "evaluating": "badge-info",
     "remediation_required": "badge-info",
+    "superseded": "badge-info",
     "seeding": "badge-info",
     "active": "badge-info",
+    "declined": "badge-info",
     "accepted": "badge-ok",
+    "fixed": "badge-ok",
     "published": "badge-ok",
 }
 
@@ -556,6 +565,31 @@ document.querySelectorAll('.js-release-book').forEach(btn => {
     }
   });
 });
+
+document.querySelectorAll('.js-triage-bug').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const bugId = btn.dataset.bugId;
+    const status = btn.dataset.status;
+    const noteEl = document.getElementById('bug-note-' + bugId);
+    const verEl = document.getElementById('bug-ver-' + bugId);
+    const msg = document.getElementById('bug-msg-' + bugId);
+    const note = noteEl ? noteEl.value.trim() : '';
+    const fixedVer = verEl ? verEl.value.trim() : '';
+    btn.disabled = true;
+    const out = await postJson(
+      '/admin/api/bugs/' + encodeURIComponent(bugId) + '/triage',
+      { status, resolution_note: note, fixed_in_version: fixedVer },
+      msg,
+      'Updating bug report...'
+    );
+    btn.disabled = false;
+    if (out.ok) {
+      msg.style.color = '#6ee7b7';
+      msg.textContent = 'Updated bug status: ' + out.data.bug_report.status + '. Reloading...';
+      setTimeout(() => location.reload(), 700);
+    }
+  });
+});
 """
 
 
@@ -840,6 +874,65 @@ def _render_admin_submission_card(s: dict[str, Any]) -> str:
     </div>"""
 
 
+def _render_admin_bug_card(bug: dict[str, Any]) -> str:
+    bug_id = str(bug["id"])
+    esc_id = _esc(bug_id)
+    status_str = str(bug.get("status") or "open")
+    sev_str = str(bug.get("severity") or "P1")
+    badge_cls = _STATUS_BADGE_CLASS.get(status_str, "badge-info")
+    card_cls = (
+        "card card-danger"
+        if status_str == "flagged_security" or sev_str == "P0"
+        else ("card card-action" if status_str in {"open", "accepted"} else "card")
+    )
+    meta_parts = [f"by <code>{_esc(bug.get('reporter_handle') or bug.get('reporter_actor_id'))}</code>"]
+    if bug.get("book_slug"):
+        loc = _esc(bug["book_slug"])
+        if bug.get("chapter_id"):
+            loc += f"/<code>{_esc(bug['chapter_id'])}</code>"
+        meta_parts.append(loc)
+    if bug.get("tool_name"):
+        tool_s = f"tool=<code>{_esc(bug['tool_name'])}</code>"
+        if int(bug.get("error_code") or 0) > 0:
+            tool_s += f" ({int(bug['error_code'])})"
+        meta_parts.append(tool_s)
+    if bug.get("triaged_by"):
+        meta_parts.append(f"triaged by <code>{_esc(bug['triaged_by'])}</code>")
+
+    sec_flags = list(bug.get("security_flags") or [])
+    sec_html = (
+        f"<p style='margin:0.4rem 0 0; color:#fca5a5; font-size:0.86rem;'><strong>Security flags:</strong> {_esc(', '.join(str(x) for x in sec_flags))}</p>"
+        if sec_flags
+        else ""
+    )
+    note_val = _esc(bug.get("resolution_note") or "")
+    ver_val = _esc(bug.get("fixed_in_version") or "")
+    return f"""<div class="{card_cls}">
+      <div class="row-flex">
+        <div>
+          <code>{_esc(sev_str)}</code>
+          <strong>{_esc(bug.get('title') or '')}</strong>
+          <span class="badge {badge_cls}">{_esc(status_str)}</span>
+          <small style="color:#94a3b8;"> · {' · '.join(meta_parts)}</small>
+        </div>
+        <small style="color:#94a3b8;"><code>{esc_id[:8]}</code></small>
+      </div>
+      {sec_html}
+      <details open>
+        <summary>Inspect bug details</summary>
+        <pre>{_esc(str(bug.get('body_md') or '')[:4000])}</pre>
+      </details>
+      <div class="btn-row">
+        <input id="bug-note-{esc_id}" type="text" value="{note_val}" placeholder="Resolution note / decline reason" style="flex:1; min-width:220px;"/>
+        <input id="bug-ver-{esc_id}" type="text" value="{ver_val}" placeholder="Fixed version (e.g. v0.3.0)" style="width:155px;"/>
+        <button class="btn btn-sec js-triage-bug" data-bug-id="{esc_id}" data-status="accepted">Accept</button>
+        <button class="btn js-triage-bug" data-bug-id="{esc_id}" data-status="fixed">Mark Fixed</button>
+        <button class="btn btn-danger js-triage-bug" data-bug-id="{esc_id}" data-status="declined">Decline</button>
+      </div>
+      <div id="bug-msg-{esc_id}" class="status-msg"></div>
+    </div>"""
+
+
 def _render_admin_book_card(b: dict[str, Any], agents: list[dict[str, Any]]) -> str:
     slug = str(b["slug"])
     esc_slug = _esc(slug)
@@ -913,8 +1006,10 @@ def _render_admin_html(
     books: list[dict[str, Any]],
     agents: list[dict[str, Any]],
     submissions: Optional[list[dict[str, Any]]] = None,
+    bug_reports: Optional[list[dict[str, Any]]] = None,
 ) -> str:
     subs_list = submissions or []
+    bugs_list = bug_reports or []
     proposal_statuses = {"pending_approval", "approved_pending_parse", "flagged_security", "seeding", "seed_failed"}
     proposal_books = [b for b in books if str(b.get("status") or "") in proposal_statuses]
     manage_books = [b for b in books if str(b.get("status") or "") != "rejected"]
@@ -924,6 +1019,7 @@ def _render_admin_html(
         for s in subs_list
         if str(s.get("status") or "") in {"pending_review", "pending_admin_approval", "flagged_security", "escalated_to_admin"}
     )
+    open_bugs = sum(1 for bg in bugs_list if str(bg.get("status") or "") in {"open", "accepted", "flagged_security"})
 
     proposals_block = (
         "\n".join(_render_admin_proposal_card(b) for b in proposal_books)
@@ -934,6 +1030,11 @@ def _render_admin_html(
         "\n".join(_render_admin_submission_card(s) for s in subs_list)
         if subs_list
         else "<div class='card'><small style='color:#94a3b8;'>No chapter submissions recorded yet.</small></div>"
+    )
+    bugs_block = (
+        "\n".join(_render_admin_bug_card(bg) for bg in bugs_list)
+        if bugs_list
+        else "<div class='card'><small style='color:#94a3b8;'>No agent bug reports filed yet.</small></div>"
     )
     books_block = (
         "\n".join(_render_admin_book_card(b, agents) for b in manage_books)
@@ -978,6 +1079,7 @@ def _render_admin_html(
       <div>
         <span class="pill">Pending Book Proposals: <strong>{len(proposal_books)}</strong></span>
         <span class="pill">Submissions Awaiting Decision: <strong>{actionable_subs}</strong></span>
+        <span class="pill">Open Bug Reports: <strong>{open_bugs}</strong></span>
         <span class="pill">Registered Agents: <strong>{len(agents)}</strong></span>
       </div>
       <button id="btn-global-fallback" class="btn btn-sec">Run Starved Fallback</button>
@@ -989,6 +1091,9 @@ def _render_admin_html(
 
     <h2 style="margin-top:1.75rem; font-size:1.2rem;">Chapter Translation Submissions Queue ({len(subs_list)})</h2>
     {subs_block}
+
+    <h2 style="margin-top:1.75rem; font-size:1.2rem;">Agent Bug Reports Queue ({len(bugs_list)})</h2>
+    {bugs_block}
 
     <h2 style="margin-top:1.75rem; font-size:1.2rem;">Per-Book Access, Chapter Approval Policy &amp; Releases</h2>
     {books_block}
@@ -1055,6 +1160,34 @@ def _error_response(exc: Exception) -> JSONResponse:
     return JSONResponse({"error": str(exc)}, status_code=500)
 
 
+def _format_mcp_tool_error(exc: Exception) -> str:
+    if isinstance(exc, AuthError):
+        return f"[{exc.status_code}] {exc}"
+    if isinstance(exc, RateLimitError):
+        extra = json.dumps({"retry_after_seconds": exc.retry_after_seconds})
+        return f"[429] {exc} | details={extra}"
+    if isinstance(exc, ServiceError):
+        suffix = f" | details={json.dumps(exc.details, ensure_ascii=False)}" if exc.details else ""
+        return f"[{exc.status_code}] {exc}{suffix}"
+    if isinstance(exc, ReviewServerError):
+        status = getattr(exc, "status_code", 502)
+        return f"[{status}] {exc}"
+    return str(exc)
+
+
+def _mcp_safe(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Translate domain errors into MCP ToolError with status code and JSON details."""
+
+    @functools.wraps(fn)
+    def _wrapped(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return fn(*args, **kwargs)
+        except (AuthError, RateLimitError, ServiceError, ReviewServerError) as exc:
+            raise ToolError(_format_mcp_tool_error(exc)) from exc
+
+    return _wrapped
+
+
 def create_app(
     *,
     cfg: Optional[McpServerConfig] = None,
@@ -1084,7 +1217,7 @@ def create_app(
     mcp = MCPServer(
         "collab-books",
         title="Collab Books Multi-Agent Translation Hub",
-        version="4.0.0",
+        version="4.1.0",
         website_url=eff_cfg.public_base_url,
         instructions=MCP_SERVER_INSTRUCTIONS,
     )
@@ -1164,9 +1297,22 @@ def create_app(
             "and Completeness."
         )
 
+    @mcp.prompt()
+    def triage_open_bugs(book_slug: str = "") -> str:
+        """Autonomous agent_admin workflow prompt for triaging agent-submitted bug reports."""
+        target = f" on book '{book_slug}'" if book_slug.strip() else ""
+        return (
+            f"Review and triage agent bug reports{target} on Collab Books. "
+            "Call list_tasks(role='agent_admin', agent_key=...) or query_bug_reports(status='open', agent_key=...) "
+            "to inspect open reports, check whether the defect is reproducible, accepted, already fixed, or invalid/already addressed, "
+            "and call triage_bug_report(bug_id, status='accepted'|'fixed'|'declined', resolution_note='...', "
+            "fixed_in_version='...', agent_key=...) with a clear explanation so contributor agents see the resolution."
+        )
+
     # --- Register MCP Tools ---
 
     @mcp.tool()
+    @_mcp_safe
     def register_agent(
         handle: str = "",
         display_name: str = "",
@@ -1181,6 +1327,7 @@ def create_app(
         )
 
     @mcp.tool()
+    @_mcp_safe
     def list_books(
         include_pending: bool = False,
         agent_key: str = "",
@@ -1194,6 +1341,7 @@ def create_app(
         return {"books": books}
 
     @mcp.tool()
+    @_mcp_safe
     def get_book(book_slug: str, agent_key: str = "", admin_token: str = "") -> dict[str, Any]:
         """Fetch full book metadata, brief, canonical book_record.json (characters, terms, directional pronouns, rich names/terms/pronouns), collab_ledger, pending_additions, access_mode, and chapter statuses."""
         return eff_service.get_book(
@@ -1202,6 +1350,7 @@ def create_app(
         )
 
     @mcp.tool()
+    @_mcp_safe
     def get_book_source(book_slug: str, agent_key: str = "") -> dict[str, Any]:
         """Fetch the full raw proposed manuscript (source_text, source_filename, pre-split chapters if any, brief, book_record) so an agent_admin or translator can inspect or parse the book locally."""
         return eff_service.get_book_source(
@@ -1210,6 +1359,7 @@ def create_app(
         )
 
     @mcp.tool()
+    @_mcp_safe
     def submit_book_parse(
         book_slug: str,
         chapters: list[dict[str, Any]],
@@ -1230,6 +1380,7 @@ def create_app(
         return {"book": book}
 
     @mcp.tool()
+    @_mcp_safe
     def update_book_record(
         book_slug: str,
         brief: Optional[dict[str, Any]] = None,
@@ -1248,6 +1399,7 @@ def create_app(
         return {"book": book}
 
     @mcp.tool()
+    @_mcp_safe
     def list_tasks(
         role: str = "all",
         book_slug: str = "",
@@ -1261,6 +1413,7 @@ def create_app(
         )
 
     @mcp.tool()
+    @_mcp_safe
     def get_chapter(
         book_slug: str,
         chapter_id: str,
@@ -1278,6 +1431,7 @@ def create_app(
         )
 
     @mcp.tool()
+    @_mcp_safe
     def claim_chapter(book_slug: str, chapter_id: str, agent_key: str = "") -> dict[str, Any]:
         """Place a short-lived advisory claim on an open chapter before translating. If called anonymously on a public book, automatically mints and returns a 3-word assigned_agent_key."""
         return eff_service.claim_chapter(
@@ -1287,6 +1441,7 @@ def create_app(
         )
 
     @mcp.tool()
+    @_mcp_safe
     def submit_book_proposal(
         slug: str,
         title: str,
@@ -1322,6 +1477,7 @@ def create_app(
         )
 
     @mcp.tool()
+    @_mcp_safe
     def submit_translation(
         book_slug: str,
         chapter_id: str,
@@ -1350,6 +1506,7 @@ def create_app(
         return payload
 
     @mcp.tool()
+    @_mcp_safe
     def query_submissions(
         book_slug: str = "",
         chapter_id: str = "",
@@ -1370,6 +1527,7 @@ def create_app(
         return {"submissions": subs}
 
     @mcp.tool()
+    @_mcp_safe
     def get_submission_status(
         submission_id: str,
         include_context: bool = True,
@@ -1385,6 +1543,7 @@ def create_app(
         )
 
     @mcp.tool()
+    @_mcp_safe
     def submit_review(
         submission_id: str,
         body_md: str,
@@ -1402,11 +1561,13 @@ def create_app(
         )
 
     @mcp.tool()
+    @_mcp_safe
     def list_agents(admin_token: str = "") -> dict[str, Any]:
         """ADMIN: List all registered agents (handle, role, masked 3-word key_hint, model_info, last_seen_at)."""
         return {"agents": eff_service.list_agents(_ctx(admin_token=admin_token or None))}
 
     @mcp.tool()
+    @_mcp_safe
     def set_agent_role(
         identifier: str,
         role: str,
@@ -1421,6 +1582,7 @@ def create_app(
         return {"agent": agent}
 
     @mcp.tool()
+    @_mcp_safe
     def set_book_access(
         book_slug: str,
         access_mode: str,
@@ -1439,6 +1601,7 @@ def create_app(
         return {"book": book}
 
     @mcp.tool()
+    @_mcp_safe
     def set_book_approval_mode(
         book_slug: str,
         approval_mode: str,
@@ -1453,6 +1616,7 @@ def create_app(
         return {"book": book}
 
     @mcp.tool()
+    @_mcp_safe
     def approve_book_intake(
         book_slug: str,
         queue_for_parse: bool = False,
@@ -1472,6 +1636,7 @@ def create_app(
         )
 
     @mcp.tool()
+    @_mcp_safe
     def reject_book_proposal(
         book_slug: str,
         reason: str = "",
@@ -1486,6 +1651,7 @@ def create_app(
         return {"book": book}
 
     @mcp.tool()
+    @_mcp_safe
     def list_submissions(
         book_slug: str = "",
         status: str = "",
@@ -1500,6 +1666,7 @@ def create_app(
         return {"submissions": subs}
 
     @mcp.tool()
+    @_mcp_safe
     def seed_book(
         book_slug: str,
         hold_for_review: bool = False,
@@ -1516,6 +1683,7 @@ def create_app(
         )
 
     @mcp.tool()
+    @_mcp_safe
     def trigger_starved_fallback(book_slug: str = "", admin_token: str = "") -> dict[str, Any]:
         """ADMIN: Translate open chapters unclaimed past fallback_hours via review.vinhthang.dev."""
         return eff_service.trigger_starved_fallback(
@@ -1524,6 +1692,7 @@ def create_app(
         )
 
     @mcp.tool()
+    @_mcp_safe
     def manage_flagged_submission(
         submission_id: str,
         action: str,
@@ -1538,12 +1707,86 @@ def create_app(
         )
 
     @mcp.tool()
+    @_mcp_safe
     def publish_release(book_slug: str, admin_token: str = "") -> dict[str, Any]:
         """ADMIN: Compile EPUB 3, PDF, and DOCX deliverables and publish GitHub Release."""
         return eff_service.publish_release(
             _ctx(admin_token=admin_token or None),
             book_slug=book_slug,
         )
+
+    @mcp.tool()
+    @_mcp_safe
+    def submit_bug_report(
+        title: str,
+        body_md: str,
+        severity: str = "P1",
+        book_slug: str = "",
+        chapter_id: str = "",
+        submission_id: str = "",
+        tool_name: str = "",
+        error_code: int = 0,
+        agent_key: str = "",
+    ) -> dict[str, Any]:
+        """Submit a bug report against Collab Books MCP/hub (AGENT_KEY or ANONYMOUS with automatic 3-word key). Check query_bug_reports first to avoid filing duplicates."""
+        _, payload = eff_service.submit_bug_report(
+            _ctx(agent_key or None),
+            title=title,
+            body_md=body_md,
+            severity=severity,
+            book_slug=book_slug,
+            chapter_id=chapter_id,
+            submission_id=submission_id,
+            tool_name=tool_name,
+            error_code=error_code,
+        )
+        return payload
+
+    @mcp.tool()
+    @_mcp_safe
+    def query_bug_reports(
+        status: str = "",
+        book_slug: str = "",
+        reporter_handle: str = "",
+        bug_id: str = "",
+        include_body: bool = True,
+        limit: int = 50,
+        agent_key: str = "",
+        admin_token: str = "",
+    ) -> dict[str, Any]:
+        """Query bug reports and triage resolutions (open, accepted, fixed, declined) across agents to avoid duplicate filings or read resolution notes."""
+        ctx = _ctx(agent_key or None, admin_token or None)
+        if bug_id.strip():
+            return {"bug_report": eff_service.get_bug_report(ctx, bug_id=bug_id)}
+        bugs = eff_service.query_bug_reports(
+            ctx,
+            status=status or None,
+            book_slug=book_slug or None,
+            reporter_handle=reporter_handle or None,
+            include_body=include_body,
+            limit=limit,
+        )
+        return {"bug_reports": bugs}
+
+    @mcp.tool()
+    @_mcp_safe
+    def triage_bug_report(
+        bug_id: str,
+        status: str,
+        resolution_note: str,
+        fixed_in_version: str = "",
+        agent_key: str = "",
+        admin_token: str = "",
+    ) -> dict[str, Any]:
+        """AGENT_ADMIN / ADMIN: Triage a bug report to 'open', 'accepted', 'fixed', or 'declined' with mandatory resolution_note for terminal decisions."""
+        updated = eff_service.triage_bug_report(
+            _ctx(agent_key or None, admin_token or None),
+            bug_id=bug_id,
+            status=status,
+            resolution_note=resolution_note,
+            fixed_in_version=fixed_in_version,
+        )
+        return {"bug_report": updated}
 
     # --- Custom HTTP / REST / Discovery / Admin UI Routes ---
 
@@ -1567,7 +1810,8 @@ def create_app(
             agents = eff_service.list_agents(ctx)
             books = eff_service.list_books(ctx, include_pending=True)
             submissions = eff_service.list_admin_submissions(ctx)
-            return _render_admin_html(eff_cfg, books, agents, submissions)
+            bug_reports = eff_service.list_admin_bug_reports(ctx)
+            return _render_admin_html(eff_cfg, books, agents, submissions, bug_reports)
 
         try:
             return HTMLResponse(await _run_sync(_work))
@@ -1585,7 +1829,7 @@ def create_app(
             {
                 "status": "ok",
                 "service": "collab-mcp",
-                "version": "4.0.0",
+                "version": "4.1.0",
                 "books_repo": eff_cfg.books_repo_full_name,
             }
         )
@@ -2086,6 +2330,88 @@ def create_app(
                 return eff_service.publish_release(ctx, book_slug=slug)
 
             return JSONResponse(await _run_sync(_work))
+        except Exception as exc:
+            return _error_response(exc)
+
+    @mcp.custom_route("/api/v1/bugs", methods=["POST"])
+    async def api_submit_bug_report(request: Request) -> Response:
+        try:
+            body = await _parse_json_body(request)
+
+            def _work() -> tuple[int, dict[str, Any]]:
+                ctx = _req_ctx(request, agent_key=body.get("agent_key"))
+                return eff_service.submit_bug_report(
+                    ctx,
+                    title=str(body.get("title") or ""),
+                    body_md=str(body.get("body_md") or ""),
+                    severity=str(body.get("severity") or "P1"),
+                    book_slug=str(body.get("book_slug") or ""),
+                    chapter_id=str(body.get("chapter_id") or ""),
+                    submission_id=str(body.get("submission_id") or ""),
+                    tool_name=str(body.get("tool_name") or ""),
+                    error_code=body.get("error_code", 0),
+                )
+
+            code, payload = await _run_sync(_work)
+            return JSONResponse(payload, status_code=code)
+        except Exception as exc:
+            return _error_response(exc)
+
+    @mcp.custom_route("/api/v1/bugs", methods=["GET"])
+    async def api_query_bug_reports(request: Request) -> Response:
+        def _work() -> list[dict[str, Any]]:
+            ctx = _req_ctx(request)
+            raw_limit = request.query_params.get("limit")
+            limit = int(raw_limit) if raw_limit and raw_limit.isdigit() else 50
+            inc_body = request.query_params.get("include_body", "true").lower() != "false"
+            return eff_service.query_bug_reports(
+                ctx,
+                status=request.query_params.get("status") or None,
+                book_slug=request.query_params.get("book_slug") or None,
+                reporter_handle=request.query_params.get("reporter_handle") or None,
+                include_body=inc_body,
+                limit=limit,
+            )
+
+        try:
+            return JSONResponse({"bug_reports": await _run_sync(_work)})
+        except Exception as exc:
+            return _error_response(exc)
+
+    @mcp.custom_route("/api/v1/bugs/{bug_id}", methods=["GET"])
+    async def api_get_bug_report(request: Request) -> Response:
+        def _work() -> dict[str, Any]:
+            ctx = _req_ctx(request)
+            bug_id = str(request.path_params["bug_id"])
+            return eff_service.get_bug_report(ctx, bug_id=bug_id)
+
+        try:
+            return JSONResponse({"bug_report": await _run_sync(_work)})
+        except Exception as exc:
+            return _error_response(exc)
+
+    @mcp.custom_route("/api/v1/bugs/{bug_id}/triage", methods=["POST"])
+    @mcp.custom_route("/admin/api/bugs/{bug_id}/triage", methods=["POST"])
+    async def api_triage_bug_report(request: Request) -> Response:
+        try:
+            body = await _parse_json_body(request)
+
+            def _work() -> dict[str, Any]:
+                ctx = _req_ctx(
+                    request,
+                    agent_key=body.get("agent_key"),
+                    admin_token=body.get("admin_token"),
+                )
+                bug_id = str(request.path_params["bug_id"])
+                return eff_service.triage_bug_report(
+                    ctx,
+                    bug_id=bug_id,
+                    status=str(body.get("status") or ""),
+                    resolution_note=str(body.get("resolution_note") or ""),
+                    fixed_in_version=str(body.get("fixed_in_version") or ""),
+                )
+
+            return JSONResponse({"bug_report": await _run_sync(_work)})
         except Exception as exc:
             return _error_response(exc)
 

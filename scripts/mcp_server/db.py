@@ -116,6 +116,29 @@ SCHEMA_STATEMENTS_COMMON = (
         created_at TEXT NOT NULL
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS bug_reports (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        severity TEXT NOT NULL DEFAULT 'P1',
+        status TEXT NOT NULL DEFAULT 'open',
+        reporter_actor_id TEXT NOT NULL,
+        reporter_handle TEXT NOT NULL,
+        reporter_ip_hash TEXT NOT NULL DEFAULT '',
+        book_slug TEXT NOT NULL DEFAULT '',
+        chapter_id TEXT NOT NULL DEFAULT '',
+        submission_id TEXT NOT NULL DEFAULT '',
+        tool_name TEXT NOT NULL DEFAULT '',
+        error_code INTEGER NOT NULL DEFAULT 0,
+        body_md TEXT NOT NULL,
+        security_flags_json TEXT NOT NULL DEFAULT '[]',
+        triaged_by TEXT NOT NULL DEFAULT '',
+        resolution_note TEXT NOT NULL DEFAULT '',
+        fixed_in_version TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
 )
 
 
@@ -1003,3 +1026,224 @@ class CollabStore:
                 )
             imported += 1
         return imported
+
+    def recover_stale_evaluating_submissions(
+        self,
+        *,
+        max_age_seconds: float,
+        reason: str,
+        now_ts: Optional[float] = None,
+    ) -> int:
+        """Transition stuck 'evaluating' submissions older than max_age_seconds to 'remediation_required'."""
+        ts_now = time.time() if now_ts is None else now_ts
+        with self._lock:
+            rows = self._exec(
+                "SELECT id, updated_at FROM submissions WHERE status = 'evaluating'",
+                fetchall=True,
+            )
+            recovered = 0
+            now_iso = _utc_iso()
+            for r in rows:
+                should_recover = max_age_seconds <= 0.0
+                if not should_recover:
+                    updated_ts = parse_utc_timestamp(str(r.get("updated_at") or ""))
+                    if updated_ts is None or (ts_now - updated_ts) >= max_age_seconds:
+                        should_recover = True
+                if should_recover:
+                    self._exec(
+                        """
+                        UPDATE submissions
+                        SET status = 'remediation_required', judge_summary = ?, updated_at = ?
+                        WHERE id = ? AND status = 'evaluating'
+                        """,
+                        (reason, now_iso, r["id"]),
+                    )
+                    recovered += 1
+            return recovered
+
+    def supersede_other_chapter_submissions(
+        self,
+        *,
+        book_slug: str,
+        chapter_id: str,
+        accepted_submission_id: str,
+    ) -> int:
+        """Mark remaining non-accepted actionable drafts on an accepted chapter as 'superseded'."""
+        with self._lock:
+            rows = self._exec(
+                """
+                SELECT id FROM submissions
+                WHERE book_slug = ? AND chapter_id = ? AND id != ?
+                  AND status IN ('remediation_required', 'evaluating', 'pending_review', 'pending_admin_approval')
+                """,
+                (book_slug, chapter_id, accepted_submission_id),
+                fetchall=True,
+            )
+            if not rows:
+                return 0
+            now_iso = _utc_iso()
+            for r in rows:
+                self._exec(
+                    "UPDATE submissions SET status = 'superseded', updated_at = ? WHERE id = ?",
+                    (now_iso, r["id"]),
+                )
+            return len(rows)
+
+    def supersede_all_accepted_chapter_drafts(self) -> int:
+        """Idempotently supersede leftover drafts on already-accepted chapters (startup hygiene)."""
+        with self._lock:
+            accepted_chs = self._exec(
+                "SELECT book_slug, chapter_id, accepted_submission_id FROM chapters WHERE status = 'accepted'",
+                fetchall=True,
+            )
+            total = 0
+            for ch in accepted_chs:
+                total += self.supersede_other_chapter_submissions(
+                    book_slug=str(ch["book_slug"]),
+                    chapter_id=str(ch["chapter_id"]),
+                    accepted_submission_id=str(ch.get("accepted_submission_id") or ""),
+                )
+            return total
+
+    def _hydrate_bug_report(self, row: dict[str, Any]) -> dict[str, Any]:
+        out = dict(row)
+        out["error_code"] = int(out.get("error_code") or 0)
+        out["security_flags"] = json.loads(out.pop("security_flags_json", "[]") or "[]")
+        return out
+
+    def create_bug_report(
+        self,
+        *,
+        title: str,
+        severity: str,
+        status: str,
+        reporter_actor_id: str,
+        reporter_handle: str,
+        reporter_ip_hash: str = "",
+        book_slug: str = "",
+        chapter_id: str = "",
+        submission_id: str = "",
+        tool_name: str = "",
+        error_code: int = 0,
+        body_md: str,
+        security_flags: Optional[list[str]] = None,
+    ) -> dict[str, Any]:
+        """Insert a new agent bug report into SQLite/PostgreSQL."""
+        bug_id = str(uuid.uuid4())
+        now = _utc_iso()
+        self._exec(
+            """
+            INSERT INTO bug_reports (
+                id, title, severity, status, reporter_actor_id, reporter_handle,
+                reporter_ip_hash, book_slug, chapter_id, submission_id, tool_name,
+                error_code, body_md, security_flags_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                bug_id,
+                title,
+                severity,
+                status,
+                reporter_actor_id,
+                reporter_handle,
+                reporter_ip_hash,
+                book_slug,
+                chapter_id,
+                submission_id,
+                tool_name,
+                int(error_code),
+                body_md,
+                json.dumps(security_flags or [], ensure_ascii=False),
+                now,
+                now,
+            ),
+        )
+        bug = self.get_bug_report(bug_id)
+        if bug is None:
+            raise RuntimeError(f"Failed to persist bug report '{bug_id}'")
+        return bug
+
+    def get_bug_report(self, bug_id: str) -> Optional[dict[str, Any]]:
+        """Fetch one bug report by ID."""
+        row = self._exec("SELECT * FROM bug_reports WHERE id = ?", (bug_id,), fetchone=True)
+        return self._hydrate_bug_report(row) if row else None
+
+    def list_bug_reports(
+        self,
+        *,
+        status: Optional[str] = None,
+        statuses: Optional[tuple[str, ...]] = None,
+        book_slug: Optional[str] = None,
+        reporter_handle: Optional[str] = None,
+        include_flagged: bool = False,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """List bug reports filtered by status/book/reporter while hiding quarantined items unless permitted."""
+        clauses: list[str] = []
+        params: list[Any] = []
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        elif statuses:
+            placeholders = ", ".join("?" for _ in statuses)
+            clauses.append(f"status IN ({placeholders})")
+            params.extend(statuses)
+        if not include_flagged:
+            clauses.append("status != 'flagged_security'")
+        if book_slug:
+            clauses.append("book_slug = ?")
+            params.append(book_slug)
+        if reporter_handle:
+            clauses.append("reporter_handle = ?")
+            params.append(reporter_handle)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        capped = max(1, min(int(limit), 200))
+        params.append(capped)
+        rows = self._exec(
+            f"SELECT * FROM bug_reports {where} ORDER BY created_at DESC LIMIT ?",
+            tuple(params),
+            fetchall=True,
+        )
+        return [self._hydrate_bug_report(r) for r in rows]
+
+    def update_bug_report(
+        self,
+        bug_id: str,
+        *,
+        status: str,
+        triaged_by: str,
+        resolution_note: str,
+        fixed_in_version: str = "",
+    ) -> dict[str, Any]:
+        """Update status and triage metadata for an existing bug report."""
+        current = self.get_bug_report(bug_id)
+        if current is None:
+            raise KeyError(f"Bug report '{bug_id}' not found")
+        now = _utc_iso()
+        self._exec(
+            """
+            UPDATE bug_reports
+            SET status = ?, triaged_by = ?, resolution_note = ?, fixed_in_version = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (status, triaged_by, resolution_note, fixed_in_version, now, bug_id),
+        )
+        updated = self.get_bug_report(bug_id)
+        if updated is None:
+            raise RuntimeError(f"Failed to update bug report '{bug_id}'")
+        return updated
+
+
+def parse_utc_timestamp(raw_iso: str) -> Optional[float]:
+    """Parse an ISO-8601 UTC timestamp string into POSIX epoch seconds."""
+    text = (raw_iso or "").strip()
+    if not text:
+        return None
+    normalized = text[:-1] + "+00:00" if text.endswith("Z") else text
+    try:
+        parsed = datetime.datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+    return parsed.timestamp()

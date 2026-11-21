@@ -34,12 +34,14 @@ from scripts.mcp_server.auth import (
     verify_revision_token,
 )
 from scripts.mcp_server.config import McpServerConfig
-from scripts.mcp_server.db import CollabStore
+from scripts.mcp_server.db import CollabStore, parse_utc_timestamp
 from scripts.mcp_server.git_sync import CollabBooksGitSync
 
 MAX_MCP_XML_BYTES = 524_288  # 512 KB cap per REQ-040
 MAX_PROPOSED_CHAPTERS = 200
 MAX_BOOK_PROPOSAL_BYTES = 5_242_880  # 5 MiB cap
+EVALUATING_STALE_SECONDS = 480.0
+MAX_BUG_BODY_BYTES = 65_536
 _PROPOSED_CHAPTER_ID_RE = re.compile(r"^ch\d{2,4}$")
 ALLOWED_LICENSES = frozenset(
     {"public-domain", "CC0-1.0", "CC-BY-4.0", "CC-BY-SA-4.0", "owner-permission"}
@@ -49,6 +51,8 @@ VALID_AGENT_ROLES = frozenset({"contributor", "agent_admin"})
 VALID_APPROVAL_MODES = frozenset({"peer", "auto", "manual"})
 VALID_STRATEGIES = frozenset({"faithful", "idiomatic", "register-matched"})
 VALID_REVIEW_VERDICTS = frozenset({"COMMENT", "APPROVE", "CHANGES_REQUESTED"})
+VALID_BUG_SEVERITIES = frozenset({"P0", "P1", "P2", "P3"})
+VALID_BUG_STATUSES = frozenset({"open", "accepted", "fixed", "declined"})
 ACTIONABLE_SUBMISSION_STATUSES = frozenset(
     {"pending_review", "pending_admin_approval", "flagged_security", "escalated_to_admin"}
 )
@@ -60,6 +64,7 @@ _SUBMISSION_SORT_RANK = {
     "remediation_required": 4,
     "accepted": 5,
     "rejected": 6,
+    "superseded": 7,
 }
 
 
@@ -365,6 +370,18 @@ def _sanitize_submission_public(sub: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _sanitize_bug_public(bug: dict[str, Any], *, include_body: bool = True) -> dict[str, Any]:
+    out = dict(bug)
+    out.pop("reporter_ip_hash", None)
+    if not include_body:
+        out.pop("body_md", None)
+    return out
+
+
+def _is_coord(ctx: AuthContext) -> bool:
+    return ctx.tier == "ADMIN" or (ctx.tier == "AGENT_KEY" and ctx.agent_role == "agent_admin")
+
+
 class CollabMcpService:
     """Domain orchestrator for book queries, 3-tier submissions, review-server rounds, and git sync."""
 
@@ -384,6 +401,27 @@ class CollabMcpService:
         self._seed_lock = threading.Lock()
         self._active_seeds: set[str] = set()
         self._seed_errors: dict[str, str] = {}
+        self.store.recover_stale_evaluating_submissions(
+            max_age_seconds=0.0,
+            reason="Evaluation interrupted by server restart; please re-submit.",
+        )
+        self.store.supersede_all_accepted_chapter_drafts()
+
+    def _sweep_stale_evaluating(self) -> int:
+        return self.store.recover_stale_evaluating_submissions(
+            max_age_seconds=EVALUATING_STALE_SECONDS,
+            reason=f"Evaluation timed out (> {int(EVALUATING_STALE_SECONDS)}s); please re-submit.",
+        )
+
+    def _assert_seeding_access(self, ctx: AuthContext, book: dict[str, Any]) -> None:
+        if str(book.get("status") or "") == "seeding" and not _is_coord(ctx):
+            raise ServiceError(
+                (
+                    f"Book '{book['slug']}' is currently in 'seeding' (ch01 reserved for agent_admin/ADMIN); "
+                    "ch02..chNN unlock automatically once ch01 is accepted"
+                ),
+                status_code=409,
+            )
 
     def _check_read_rate(self, ctx: AuthContext) -> None:
         if ctx.tier == "ANONYMOUS":
@@ -603,14 +641,26 @@ class CollabMcpService:
         book_slug: Optional[str] = None,
     ) -> dict[str, Any]:
         self._check_read_rate(ctx)
+        self._sweep_stale_evaluating()
         now = time.time()
-        is_coord = ctx.tier == "ADMIN" or (ctx.tier == "AGENT_KEY" and ctx.agent_role == "agent_admin")
+        is_coord = _is_coord(ctx)
         books = [self.store.get_book(book_slug)] if book_slug else self.store.list_books(include_pending=is_coord)
         open_chapters: list[dict[str, Any]] = []
         review_targets: list[dict[str, Any]] = []
         revisions_needed: list[dict[str, Any]] = []
         books_pending_parse: list[dict[str, Any]] = []
         books_pending_seed: list[dict[str, Any]] = []
+        open_bug_reports: list[dict[str, Any]] = []
+        if is_coord and role in {"all", "agent_admin"}:
+            open_bug_reports = [
+                _sanitize_bug_public(r)
+                for r in self.store.list_bug_reports(
+                    statuses=("open", "accepted"),
+                    book_slug=book_slug,
+                    include_flagged=False,
+                    limit=50,
+                )
+            ]
 
         for b in books:
             if not b:
@@ -619,6 +669,8 @@ class CollabMcpService:
                 continue
             slug = b["slug"]
             subs = self.store.list_submissions(book_slug=slug)
+            book_chapters = self.store.list_chapters(slug)
+            ch_status_by_id = {c["chapter_id"]: c["status"] for c in book_chapters}
 
             if is_coord and role in {"all", "agent_admin"}:
                 if b["status"] == "approved_pending_parse":
@@ -643,7 +695,7 @@ class CollabMcpService:
                                 "title": b["title"],
                                 "author": b["author"],
                                 "source_lang": b["source_lang"],
-                                "total_chapters": len(self.store.list_chapters(slug)),
+                                "total_chapters": len(book_chapters),
                             }
                         )
 
@@ -655,7 +707,7 @@ class CollabMcpService:
                 if s["status"] in {"evaluating", "pending_review", "pending_admin_approval"}
             }
             if b["status"] in {"active", "published"} and role in {"all", "translator"}:
-                for c in self.store.list_chapters(slug):
+                for c in book_chapters:
                     if c["status"] != "open" or c["chapter_id"] in pending_gate_chapters:
                         continue
                     claimed_other = (
@@ -676,8 +728,10 @@ class CollabMcpService:
                         }
                     )
             for sub in subs:
+                ch_open = ch_status_by_id.get(sub["chapter_id"]) == "open"
                 if (
                     b["status"] in {"active", "published", "seeding"}
+                    and ch_open
                     and role in {"all", "translator"}
                     and sub["author_actor_id"] == ctx.actor_id
                     and sub["status"] == "remediation_required"
@@ -686,7 +740,10 @@ class CollabMcpService:
                 if (
                     role in {"all", "reviewer"}
                     and sub["author_actor_id"] != ctx.actor_id
-                    and sub["status"] in {"pending_review", "remediation_required", "pending_admin_approval", "accepted"}
+                    and (
+                        (ch_open and sub["status"] in {"pending_review", "remediation_required", "pending_admin_approval"})
+                        or sub["status"] == "accepted"
+                    )
                 ):
                     review_targets.append(_sanitize_submission_public(sub))
 
@@ -698,6 +755,7 @@ class CollabMcpService:
             "open_chapters": open_chapters,
             "revisions_needed": revisions_needed,
             "peer_review_candidates": review_targets[:25],
+            "open_bug_reports": open_bug_reports,
         }
 
     def _build_chapter_neighbors(
@@ -808,6 +866,7 @@ class CollabMcpService:
         if book is None:
             raise ServiceError(f"Book '{book_slug}' not found", status_code=404)
         self._assert_book_work_access(ctx, book)
+        self._assert_seeding_access(ctx, book)
         eff_ctx, auto_meta = self._maybe_auto_assign_agent(ctx)
 
         claim_token = f"cbt_cl_{secrets.token_hex(16)}"
@@ -1085,6 +1144,7 @@ class CollabMcpService:
     ) -> tuple[int, dict[str, Any]]:
         """Validate, scan, run review.vinhthang.dev round, and auto-sync on PASS."""
         self._check_write_rate(ctx)
+        self._sweep_stale_evaluating()
 
         xml_bytes = translation_xml.encode("utf-8")
         if len(xml_bytes) > MAX_MCP_XML_BYTES:
@@ -1133,11 +1193,39 @@ class CollabMcpService:
                     status_code=409,
                 )
         elif ctx.tier != "ADMIN":
+            self._assert_seeding_access(ctx, book)
             existing_for_ch = self.store.list_submissions(book_slug=book_slug, chapter_id=chapter_id)
-            if any(s["status"] in {"evaluating", "pending_review", "pending_admin_approval"} for s in existing_for_ch):
+            eval_sub = next((s for s in existing_for_ch if s["status"] == "evaluating"), None)
+            if eval_sub is not None:
+                upd_ts = parse_utc_timestamp(str(eval_sub.get("updated_at") or ""))
+                elapsed_s = int(max(0.0, time.time() - upd_ts)) if upd_ts is not None else 0
                 raise ServiceError(
-                    f"Chapter '{book_slug}/{chapter_id}' already has a passing translation awaiting review or approval",
+                    (
+                        f"Chapter '{book_slug}/{chapter_id}' has submission '{eval_sub['id']}' currently actively evaluating "
+                        f"on {self.cfg.review_server_url} (elapsed {elapsed_s}s); wait for evaluation to settle"
+                    ),
                     status_code=409,
+                    details={
+                        "blocking_submission_id": eval_sub["id"],
+                        "blocking_status": "evaluating",
+                        "elapsed_seconds": elapsed_s,
+                    },
+                )
+            passing_sub = next(
+                (s for s in existing_for_ch if s["status"] in {"pending_review", "pending_admin_approval"}),
+                None,
+            )
+            if passing_sub is not None:
+                raise ServiceError(
+                    (
+                        f"Chapter '{book_slug}/{chapter_id}' already has a passing submission '{passing_sub['id']}' "
+                        f"in '{passing_sub['status']}' awaiting peer/admin review"
+                    ),
+                    status_code=409,
+                    details={
+                        "blocking_submission_id": passing_sub["id"],
+                        "blocking_status": passing_sub["status"],
+                    },
                 )
 
         norm_additions = additions if additions is not None else {"proposals": []}
@@ -1468,6 +1556,11 @@ class CollabMcpService:
             translation_xml=submission["translation_xml"],
             final_txt=submission["final_txt"],
         )
+        self.store.supersede_other_chapter_submissions(
+            book_slug=slug,
+            chapter_id=chapter_id,
+            accepted_submission_id=str(submission["id"]),
+        )
 
         # Unlock ch02..chNN if ch01 just finished seeding
         if chapter_id == "ch01":
@@ -1567,6 +1660,7 @@ class CollabMcpService:
     ) -> list[dict[str, Any]]:
         """Query sanitized submissions across books accessible to the caller."""
         self._check_read_rate(ctx)
+        self._sweep_stale_evaluating()
         rows = self.store.list_submissions(
             book_slug=book_slug,
             chapter_id=chapter_id,
@@ -1602,6 +1696,7 @@ class CollabMcpService:
         include_workstream: bool = False,
     ) -> dict[str, Any]:
         self._check_read_rate(ctx)
+        self._sweep_stale_evaluating()
         sub = self.store.get_submission(submission_id)
         if sub is None:
             raise ServiceError(f"Submission '{submission_id}' not found", status_code=404)
@@ -2294,3 +2389,161 @@ class CollabMcpService:
             author=book["author"],
             release_tag=rel_tag,
         )
+
+    def submit_bug_report(
+        self,
+        ctx: AuthContext,
+        *,
+        title: str,
+        body_md: str,
+        severity: str = "P1",
+        book_slug: str = "",
+        chapter_id: str = "",
+        submission_id: str = "",
+        tool_name: str = "",
+        error_code: int = 0,
+    ) -> tuple[int, dict[str, Any]]:
+        """Validate, scan for prompt-injection, and persist an agent bug report."""
+        self._check_write_rate(ctx)
+        clean_title = (title or "").strip()
+        if not clean_title or len(clean_title) > 200:
+            raise ServiceError("title must be between 1 and 200 characters", status_code=400)
+        clean_body = (body_md or "").strip()
+        body_bytes = len(clean_body.encode("utf-8"))
+        if not clean_body or body_bytes > MAX_BUG_BODY_BYTES:
+            raise ServiceError(
+                f"body_md must be non-empty and at most {MAX_BUG_BODY_BYTES} bytes",
+                status_code=400,
+            )
+        clean_sev = (severity or "P1").strip().upper()
+        if clean_sev not in VALID_BUG_SEVERITIES:
+            raise ServiceError("severity must be one of P0, P1, P2, P3", status_code=400)
+        try:
+            clean_code = int(error_code or 0)
+        except (TypeError, ValueError) as exc:
+            raise ServiceError("error_code must be an integer >= 0", status_code=400) from exc
+        if clean_code < 0:
+            raise ServiceError("error_code must be >= 0", status_code=400)
+
+        clean_slug = (book_slug or "").strip()
+        clean_ch = (chapter_id or "").strip()
+        clean_sub = (submission_id or "").strip()
+        clean_tool = (tool_name or "").strip()
+
+        inj_flags = detect_prompt_injection(f"{clean_title}\n{clean_body}")
+        if inj_flags:
+            quarantined = self.store.create_bug_report(
+                title=clean_title,
+                severity=clean_sev,
+                status="flagged_security",
+                reporter_actor_id=ctx.actor_id,
+                reporter_handle=ctx.handle,
+                reporter_ip_hash=ctx.client_ip_hash,
+                book_slug=clean_slug,
+                chapter_id=clean_ch,
+                submission_id=clean_sub,
+                tool_name=clean_tool,
+                error_code=clean_code,
+                body_md=clean_body,
+                security_flags=inj_flags,
+            )
+            return 202, {
+                "bug_report": _sanitize_bug_public(quarantined),
+                "quarantined": True,
+            }
+
+        eff_ctx, auto_meta = self._maybe_auto_assign_agent(ctx)
+        saved = self.store.create_bug_report(
+            title=clean_title,
+            severity=clean_sev,
+            status="open",
+            reporter_actor_id=eff_ctx.actor_id,
+            reporter_handle=eff_ctx.handle,
+            reporter_ip_hash=ctx.client_ip_hash,
+            book_slug=clean_slug,
+            chapter_id=clean_ch,
+            submission_id=clean_sub,
+            tool_name=clean_tool,
+            error_code=clean_code,
+            body_md=clean_body,
+            security_flags=[],
+        )
+        payload: dict[str, Any] = {"bug_report": _sanitize_bug_public(saved)}
+        if auto_meta:
+            payload.update(auto_meta)
+        return 201, payload
+
+    def query_bug_reports(
+        self,
+        ctx: AuthContext,
+        *,
+        status: Optional[str] = None,
+        book_slug: Optional[str] = None,
+        reporter_handle: Optional[str] = None,
+        include_body: bool = True,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """List non-quarantined bug reports (or all including flagged_security for ADMIN)."""
+        self._check_read_rate(ctx)
+        clean_status = (status or "").strip().lower() or None
+        rows = self.store.list_bug_reports(
+            status=clean_status,
+            book_slug=(book_slug or "").strip() or None,
+            reporter_handle=(reporter_handle or "").strip().lower() or None,
+            include_flagged=(ctx.tier == "ADMIN"),
+            limit=limit,
+        )
+        return [_sanitize_bug_public(r, include_body=include_body) for r in rows]
+
+    def get_bug_report(self, ctx: AuthContext, *, bug_id: str) -> dict[str, Any]:
+        """Fetch one bug report by ID, hiding flagged_security items from non-ADMIN callers."""
+        self._check_read_rate(ctx)
+        bug = self.store.get_bug_report(bug_id.strip())
+        if bug is None or (bug["status"] == "flagged_security" and ctx.tier != "ADMIN"):
+            raise ServiceError(f"Bug report '{bug_id}' not found", status_code=404)
+        return _sanitize_bug_public(bug)
+
+    def list_admin_bug_reports(self, ctx: AuthContext, *, limit: int = 100) -> list[dict[str, Any]]:
+        """List all bug reports including quarantined items for the Human /admin console."""
+        assert_admin(ctx)
+        rows = self.store.list_bug_reports(include_flagged=True, limit=limit)
+        return [_sanitize_bug_public(r) for r in rows]
+
+    def triage_bug_report(
+        self,
+        ctx: AuthContext,
+        *,
+        bug_id: str,
+        status: str,
+        resolution_note: str,
+        fixed_in_version: str = "",
+    ) -> dict[str, Any]:
+        """Triage a bug report as accepted, fixed, or declined (agent_admin / ADMIN)."""
+        assert_agent_admin_or_admin(ctx)
+        bug = self.store.get_bug_report(bug_id.strip())
+        if bug is None:
+            raise ServiceError(f"Bug report '{bug_id}' not found", status_code=404)
+        if bug["status"] == "flagged_security":
+            assert_admin(ctx)
+
+        clean_status = (status or "").strip().lower()
+        if clean_status not in VALID_BUG_STATUSES:
+            raise ServiceError("status must be one of: open, accepted, fixed, declined", status_code=400)
+        clean_note = (resolution_note or "").strip()
+        if clean_status in {"fixed", "declined"} and not clean_note:
+            raise ServiceError(
+                "resolution_note is required when marking a bug fixed or declined",
+                status_code=400,
+            )
+        clean_ver = (fixed_in_version or "").strip()
+        if detect_prompt_injection(f"{clean_note}\n{clean_ver}"):
+            raise ServiceError("Triage note blocked by prompt-injection scanner", status_code=422)
+
+        updated = self.store.update_bug_report(
+            bug["id"],
+            status=clean_status,
+            triaged_by=ctx.actor_id,
+            resolution_note=clean_note,
+            fixed_in_version=clean_ver,
+        )
+        return _sanitize_bug_public(updated)

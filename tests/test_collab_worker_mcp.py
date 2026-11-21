@@ -161,7 +161,7 @@ def test_ac_043_2_worker_missing_target_or_http_error_exits_nonzero(tmp_path: Pa
 def test_ac_043_1_plugin_v3_manifest_and_mcp_docs():
     repo_root = Path(__file__).resolve().parent.parent
     plugin = json.loads((repo_root / "plugin.json").read_text(encoding="utf-8"))
-    assert plugin["version"] == "4.0.0"
+    assert plugin["version"] == "4.1.0"
 
     readme = (repo_root / "README.md").read_text(encoding="utf-8")
     skill = (repo_root / "skills" / "collab-translate-book" / "SKILL.md").read_text(encoding="utf-8")

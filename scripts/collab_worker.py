@@ -91,6 +91,14 @@ def run_mcp_command(
     status: str = "",
     author_handle: str = "",
     output_file: Optional[str] = None,
+    body_md: str = "",
+    body_file: str = "",
+    severity: str = "P1",
+    tool_name: str = "",
+    error_code: int = 0,
+    bug_id: str = "",
+    resolution_note: str = "",
+    fixed_in_version: str = "",
 ) -> Dict[str, Any]:
     """Execute worker subcommands over HTTP against collab-mcp (ANONYMOUS or AGENT_KEY)."""
     base = _normalize_mcp_base_url(mcp_url)
@@ -204,6 +212,46 @@ def run_mcp_command(
                 f"{base}/api/v1/submissions/{submission_id}/reviews",
                 headers=headers,
                 json=rev_payload,
+            )
+        elif subcommand == "submit-bug":
+            eff_body = body_md
+            if body_file:
+                bf = Path(body_file)
+                if not bf.is_file():
+                    return {"success": False, "error": f"Bug body file not found: {body_file}"}
+                eff_body = bf.read_text(encoding="utf-8")
+            bug_payload: Dict[str, Any] = {
+                "title": title,
+                "body_md": eff_body,
+                "severity": severity,
+                "book_slug": book_slug or "",
+                "chapter_id": chapter or "",
+                "submission_id": submission_id or "",
+                "tool_name": tool_name,
+                "error_code": int(error_code or 0),
+            }
+            resp = client.post(f"{base}/api/v1/bugs", headers=headers, json=bug_payload)
+        elif subcommand == "query-bugs":
+            if bug_id:
+                resp = client.get(f"{base}/api/v1/bugs/{bug_id}", headers=headers)
+            else:
+                b_params: Dict[str, str] = {}
+                if status:
+                    b_params["status"] = status
+                if book_slug:
+                    b_params["book_slug"] = book_slug
+                if author_handle:
+                    b_params["reporter_handle"] = author_handle
+                resp = client.get(f"{base}/api/v1/bugs", headers=headers, params=b_params)
+        elif subcommand == "triage-bug":
+            resp = client.post(
+                f"{base}/api/v1/bugs/{bug_id}/triage",
+                headers=headers,
+                json={
+                    "status": status,
+                    "resolution_note": resolution_note,
+                    "fixed_in_version": fixed_in_version,
+                },
             )
         else:
             return {"success": False, "error": f"Unsupported MCP subcommand: {subcommand}"}
@@ -1003,9 +1051,50 @@ def main() -> None:
     p_rev.add_argument("--issues-file")
     p_rev.add_argument("--config")
 
+    # submit-bug (MCP mode)
+    p_bug = subparsers.add_parser("submit-bug", help="Submit a bug report to collab-mcp.")
+    p_bug.add_argument("--mcp-url", default="")
+    p_bug.add_argument("--agent-key", default="")
+    p_bug.add_argument("--title", required=True)
+    p_bug.add_argument("--body-md", default="")
+    p_bug.add_argument("--body-file", default="")
+    p_bug.add_argument("--severity", choices=["P0", "P1", "P2", "P3"], default="P1")
+    p_bug.add_argument("--book-slug", default="")
+    p_bug.add_argument("--chapter", default="")
+    p_bug.add_argument("--submission-id", default="")
+    p_bug.add_argument("--tool-name", default="")
+    p_bug.add_argument("--error-code", type=int, default=0)
+
+    # query-bugs (MCP mode)
+    p_qbug = subparsers.add_parser("query-bugs", help="Query bug reports and triage resolutions.")
+    p_qbug.add_argument("--mcp-url", default="")
+    p_qbug.add_argument("--agent-key", default="")
+    p_qbug.add_argument("--bug-id", default="")
+    p_qbug.add_argument("--status", default="")
+    p_qbug.add_argument("--book-slug", default="")
+    p_qbug.add_argument("--reporter-handle", default="")
+
+    # triage-bug (MCP mode, agent_admin / ADMIN)
+    p_tbug = subparsers.add_parser("triage-bug", help="Triage an agent bug report (accepted|fixed|declined).")
+    p_tbug.add_argument("--mcp-url", default="")
+    p_tbug.add_argument("--agent-key", default="")
+    p_tbug.add_argument("--bug-id", required=True)
+    p_tbug.add_argument("--status", choices=["open", "accepted", "fixed", "declined"], required=True)
+    p_tbug.add_argument("--resolution-note", default="")
+    p_tbug.add_argument("--fixed-in-version", default="")
+
     args = parser.parse_args()
 
-    if args.subcommand in ("register-agent", "get-chapter", "get-book-source", "submit-book-parse", "query-submissions"):
+    if args.subcommand in (
+        "register-agent",
+        "get-chapter",
+        "get-book-source",
+        "submit-book-parse",
+        "query-submissions",
+        "submit-bug",
+        "query-bugs",
+        "triage-bug",
+    ):
         mode_info = resolve_worker_mode(None, args.mcp_url)
         if mode_info["mode"] != "mcp":
             print(json.dumps({"success": False, "error": mode_info["error"]}, indent=2))
@@ -1021,8 +1110,18 @@ def main() -> None:
             model_info=getattr(args, "model_info", ""),
             parse_file=getattr(args, "parse_file", ""),
             status=getattr(args, "status", ""),
-            author_handle=getattr(args, "author_handle", ""),
+            author_handle=getattr(args, "author_handle", "") or getattr(args, "reporter_handle", ""),
             output_file=getattr(args, "output_file", None),
+            title=getattr(args, "title", ""),
+            body_md=getattr(args, "body_md", ""),
+            body_file=getattr(args, "body_file", ""),
+            severity=getattr(args, "severity", "P1"),
+            submission_id=getattr(args, "submission_id", None),
+            tool_name=getattr(args, "tool_name", ""),
+            error_code=getattr(args, "error_code", 0),
+            bug_id=getattr(args, "bug_id", ""),
+            resolution_note=getattr(args, "resolution_note", ""),
+            fixed_in_version=getattr(args, "fixed_in_version", ""),
         )
         print(json.dumps(res, indent=2, ensure_ascii=False))
         if not res.get("success"):

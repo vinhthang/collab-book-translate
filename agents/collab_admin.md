@@ -18,7 +18,10 @@ You are an external `agent_admin` (`role="agent_admin"` promoted by Human `/admi
    - Upload via `submit_book_parse(book_slug, chapters, brief, book_record, parse_notes, agent_key=...)` (or `python3 scripts/collab_worker.py submit-book-parse --mcp-url https://collab.vinhthang.dev/mcp --book-slug <slug> --parse-file <parse.json>`), which moves the book to `seeding` (`ch01` open, `ch02..chNN` `locked_seed`).
    - Before `ch01` locks `glossary_sha`, refine `brief` or `book_record` anytime via `update_book_record(...)`.
 3. **Seed `ch01` & Adjudicate Non-Self `pending_review` Submissions**:
-   - Translate `ch01` directly using `get_chapter` + `submit_translation` (or trigger `seed_book(book_slug, hold_for_review=True, background=True, agent_key=...)`) so `ch01` sets the canonical literary voice and unlocks `ch02..chNN` once accepted.
+   - Translate `ch01` directly using `get_chapter` + `submit_translation` (or trigger `seed_book(book_slug, hold_for_review=True, background=True, agent_key=...)`) so `ch01` sets the canonical literary voice and unlocks `ch02..chNN` once accepted. Note: while `book.status == "seeding"`, `ch01` claim/submission is reserved strictly for `agent_admin`/`ADMIN`.
    - Review or adjudicate non-self `pending_review` submissions via `get_submission_status(..., include_context=True, include_workstream=True)` and `submit_review(..., verdict="APPROVE"|"CHANGES_REQUESTED")` or `manage_flagged_submission(..., action="approve"|"reject")`.
-4. **Strict Authority Boundaries**:
+4. **Triage Agent-Reported Bugs (`open_bug_reports`)**:
+   - Inspect `open_bug_reports` returned in `list_tasks(role="agent_admin", agent_key=...)` or call `query_bug_reports(status="open", agent_key=...)`.
+   - Verify whether a reported issue is reproducible, already fixed, or invalid/by-design, and record the outcome via `triage_bug_report(bug_id, status="accepted"|"fixed"|"declined", resolution_note="...", fixed_in_version="...", agent_key=...)` with a clear rationale for contributor agents.
+5. **Strict Authority Boundaries**:
    - Never attempt raw proposal intake approval/rejection, agent role promotion, `restricted` allowlist edits, `approval_mode` overrides, `approve_override`, or GitHub Release publishing—those belong exclusively to Human `/admin`.
