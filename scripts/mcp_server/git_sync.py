@@ -20,6 +20,15 @@ from scripts.extractors.base import BaseExtractor
 from scripts.helper import atomic_write_json
 from scripts.mcp_server.config import McpServerConfig
 
+PUBLIC_CORPUS_LICENSES = frozenset({"public-domain", "CC0-1.0", "CC-BY-4.0", "CC-BY-SA-4.0"})
+
+
+def is_public_corpus_book(*, license_id: str, access_mode: str = "public") -> bool:
+    """Return True iff the book uses an open public license AND is configured for public access."""
+    clean_lic = str(license_id or "").strip()
+    clean_mode = (str(access_mode or "public").strip().lower() or "public")
+    return clean_lic in PUBLIC_CORPUS_LICENSES and clean_mode == "public"
+
 
 class CollabBooksGitSync:
     """Serializes file writes, git commits/pushes, and release publishing on collab-books."""
@@ -28,6 +37,32 @@ class CollabBooksGitSync:
         self._cfg = cfg
         self._lock = threading.RLock()
         self._publish_github_release = publish_github_release
+
+    @property
+    def private_books_dir(self) -> Path:
+        """Filesystem root for non-public (owner-permission / restricted) books outside the Git checkout."""
+        return self._cfg.books_repo_dir.parent / "private-books"
+
+    def _storage_root(self, *, public_corpus: bool = True) -> Path:
+        if public_corpus:
+            return self.ensure_cloned()
+        root = self.private_books_dir
+        root.mkdir(parents=True, exist_ok=True)
+        return root
+
+    @staticmethod
+    def _copy_missing_tree(src: Path, dst: Path) -> None:
+        """Copy files from src into dst without overwriting newer files already in dst."""
+        if not src.is_dir():
+            return
+        for item in src.rglob("*"):
+            rel = item.relative_to(src)
+            target = dst / rel
+            if item.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+            elif item.is_file() and not target.exists():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(item, target)
 
     def _run_git(self, args: list[str]) -> str:
         repo_dir = self._cfg.books_repo_dir
@@ -83,10 +118,11 @@ class CollabBooksGitSync:
         initial_book_record: Optional[dict[str, Any]] = None,
         initial_brief: Optional[dict[str, Any]] = None,
         overwrite_record: bool = False,
+        public_corpus: bool = True,
     ) -> list[dict[str, Any]]:
         """Write books/<slug> source & manifest and extract (or ingest pre-split) ch01..chNN/source.txt."""
         with self._lock:
-            repo_dir = self.ensure_cloned()
+            repo_dir = self._storage_root(public_corpus=public_corpus)
             book_dir = repo_dir / "books" / slug
             src_dir = book_dir / "source"
             src_dir.mkdir(parents=True, exist_ok=True)
@@ -182,10 +218,11 @@ class CollabBooksGitSync:
         slug: str,
         brief: Optional[dict[str, Any]] = None,
         book_record: Optional[dict[str, Any]] = None,
+        public_corpus: bool = True,
     ) -> None:
         """Persist runs/<slug>/brief.json and/or runs/<slug>/book_record.json on disk."""
         with self._lock:
-            repo_dir = self.ensure_cloned()
+            repo_dir = self._storage_root(public_corpus=public_corpus)
             run_dir = repo_dir / "runs" / slug
             run_dir.mkdir(parents=True, exist_ok=True)
             if brief is not None:
@@ -193,19 +230,98 @@ class CollabBooksGitSync:
             if book_record is not None:
                 atomic_write_json(run_dir / "book_record.json", book_record)
 
-    def read_ledger(self, slug: str) -> dict[str, Any]:
+    def read_ledger(self, slug: str, *, public_corpus: bool = True) -> dict[str, Any]:
         """Read runs/<slug>/collab_ledger.json if present."""
         if not slug or "/" in slug or "\\" in slug or slug in {".", ".."}:
             return {}
         with self._lock:
-            ledger_path = self._cfg.books_repo_dir / "runs" / slug / "collab_ledger.json"
-            if not ledger_path.is_file():
-                return {}
-            try:
-                data = json.loads(ledger_path.read_text(encoding="utf-8"))
-                return data if isinstance(data, dict) else {}
-            except Exception:
-                return {}
+            candidates = (
+                [
+                    self.private_books_dir / "runs" / slug / "collab_ledger.json",
+                    self._cfg.books_repo_dir / "runs" / slug / "collab_ledger.json",
+                ]
+                if not public_corpus
+                else [self._cfg.books_repo_dir / "runs" / slug / "collab_ledger.json"]
+            )
+            for ledger_path in candidates:
+                if not ledger_path.is_file():
+                    continue
+                try:
+                    data = json.loads(ledger_path.read_text(encoding="utf-8"))
+                    if isinstance(data, dict):
+                        return data
+                except Exception:
+                    return {}
+            return {}
+
+    def _write_run_chapter_artifacts(
+        self,
+        *,
+        run_dir: Path,
+        slug: str,
+        chapter_id: str,
+        chapter_num: int,
+        source_xml: str,
+        translation_xml: str,
+        final_txt: str,
+        book_record: dict[str, Any],
+        glossary_sha: str,
+        translator_handle: str,
+        reviewer_handles: list[str],
+        score_of_record: float,
+        all_chapters_status: list[dict[str, Any]],
+        head_sha: str,
+        brief: Optional[dict[str, Any]] = None,
+    ) -> None:
+        ch_dir = run_dir / chapter_id
+        ch_dir.mkdir(parents=True, exist_ok=True)
+        (ch_dir / "source.txt").write_text(source_xml, encoding="utf-8")
+        (ch_dir / "translation.xml").write_text(translation_xml, encoding="utf-8")
+        (ch_dir / "final.txt").write_text(final_txt, encoding="utf-8")
+        atomic_write_json(run_dir / "book_record.json", book_record)
+        if brief:
+            atomic_write_json(run_dir / "brief.json", brief)
+
+        checklist_payload = {
+            "book_slug": slug,
+            "seed_status": "seeded",
+            "seed_error": None,
+            "glossary_sha": glossary_sha,
+            "chapters": [
+                {
+                    "chapter": str(c["chapter_id"]),
+                    "chapter_num": int(c["chapter_num"]),
+                    "title": str(c["title"]),
+                    "status": "done" if c["status"] == "accepted" else str(c["status"]),
+                }
+                for c in all_chapters_status
+            ],
+        }
+        atomic_write_json(run_dir / "checklist.json", checklist_payload)
+
+        eff_reviewers = sorted({r for r in reviewer_handles if r}) or ["review-vinhthang-dev"]
+        peer_only = sorted({r for r in reviewer_handles if r and r != "review-vinhthang-dev"})
+        ledger_entry = {
+            "chapter": chapter_id,
+            "issue_number": 0 if chapter_id == "ch01" else chapter_num,
+            "selected_pr": chapter_num,
+            "rejected_prs": [],
+            "translator_login": translator_handle or "anon-agent",
+            "reviewer_logins": peer_only if chapter_id == "ch01" else eff_reviewers,
+            "reviewer_score": float(score_of_record),
+            "score_of_record": float(score_of_record),
+            "verdict": "PASS",
+            "merge_sha": head_sha,
+            "glossary_sha": glossary_sha,
+        }
+        ledger_path = run_dir / "collab_ledger.json"
+        existing_chapters: set[str] = set()
+        if ledger_path.is_file():
+            raw_led = json.loads(ledger_path.read_text(encoding="utf-8"))
+            if isinstance(raw_led.get("chapters"), dict):
+                existing_chapters = set(raw_led["chapters"].keys())
+        if chapter_id not in existing_chapters:
+            append_ledger_entry(ledger_path, slug, ledger_entry)
 
     def sync_accepted_chapter(
         self,
@@ -223,9 +339,31 @@ class CollabBooksGitSync:
         score_of_record: float,
         all_chapters_status: list[dict[str, Any]],
         brief: Optional[dict[str, Any]] = None,
+        public_corpus: bool = True,
     ) -> str:
-        """Write chapter files, book_record, checklist, and collab_ledger, then commit & push."""
+        """Write chapter files, book_record, checklist, and collab_ledger; commit & push only for public-corpus books."""
         with self._lock:
+            if not public_corpus:
+                priv_root = self._storage_root(public_corpus=False)
+                self._write_run_chapter_artifacts(
+                    run_dir=priv_root / "runs" / slug,
+                    slug=slug,
+                    chapter_id=chapter_id,
+                    chapter_num=chapter_num,
+                    source_xml=source_xml,
+                    translation_xml=translation_xml,
+                    final_txt=final_txt,
+                    book_record=book_record,
+                    glossary_sha=glossary_sha,
+                    translator_handle=translator_handle,
+                    reviewer_handles=reviewer_handles,
+                    score_of_record=score_of_record,
+                    all_chapters_status=all_chapters_status,
+                    head_sha="0" * 40,
+                    brief=brief,
+                )
+                return ""
+
             repo_dir = self.ensure_cloned()
             if self._has_origin():
                 try:
@@ -233,57 +371,24 @@ class CollabBooksGitSync:
                 except subprocess.CalledProcessError as pull_exc:
                     logging.getLogger(__name__).warning("git pull --rebase skipped: %s", pull_exc)
 
-            run_dir = repo_dir / "runs" / slug
-            ch_dir = run_dir / chapter_id
-            ch_dir.mkdir(parents=True, exist_ok=True)
-            (ch_dir / "source.txt").write_text(source_xml, encoding="utf-8")
-            (ch_dir / "translation.xml").write_text(translation_xml, encoding="utf-8")
-            (ch_dir / "final.txt").write_text(final_txt, encoding="utf-8")
-            atomic_write_json(run_dir / "book_record.json", book_record)
-            if brief:
-                atomic_write_json(run_dir / "brief.json", brief)
-
-            checklist_payload = {
-                "book_slug": slug,
-                "seed_status": "seeded",
-                "seed_error": None,
-                "glossary_sha": glossary_sha,
-                "chapters": [
-                    {
-                        "chapter": str(c["chapter_id"]),
-                        "chapter_num": int(c["chapter_num"]),
-                        "title": str(c["title"]),
-                        "status": "done" if c["status"] == "accepted" else str(c["status"]),
-                    }
-                    for c in all_chapters_status
-                ],
-            }
-            atomic_write_json(run_dir / "checklist.json", checklist_payload)
-
             head_before = self._current_head_sha() or ("0" * 40)
-            eff_reviewers = sorted({r for r in reviewer_handles if r}) or ["review-vinhthang-dev"]
-            peer_only = sorted({r for r in reviewer_handles if r and r != "review-vinhthang-dev"})
-            ledger_entry = {
-                "chapter": chapter_id,
-                "issue_number": 0 if chapter_id == "ch01" else chapter_num,
-                "selected_pr": chapter_num,
-                "rejected_prs": [],
-                "translator_login": translator_handle or "anon-agent",
-                "reviewer_logins": peer_only if chapter_id == "ch01" else eff_reviewers,
-                "reviewer_score": float(score_of_record),
-                "score_of_record": float(score_of_record),
-                "verdict": "PASS",
-                "merge_sha": head_before,
-                "glossary_sha": glossary_sha,
-            }
-            ledger_path = run_dir / "collab_ledger.json"
-            existing_chapters = set()
-            if ledger_path.is_file():
-                raw_led = json.loads(ledger_path.read_text(encoding="utf-8"))
-                if isinstance(raw_led.get("chapters"), dict):
-                    existing_chapters = set(raw_led["chapters"].keys())
-            if chapter_id not in existing_chapters:
-                append_ledger_entry(ledger_path, slug, ledger_entry)
+            self._write_run_chapter_artifacts(
+                run_dir=repo_dir / "runs" / slug,
+                slug=slug,
+                chapter_id=chapter_id,
+                chapter_num=chapter_num,
+                source_xml=source_xml,
+                translation_xml=translation_xml,
+                final_txt=final_txt,
+                book_record=book_record,
+                glossary_sha=glossary_sha,
+                translator_handle=translator_handle,
+                reviewer_handles=reviewer_handles,
+                score_of_record=score_of_record,
+                all_chapters_status=all_chapters_status,
+                head_sha=head_before,
+                brief=brief,
+            )
 
             add_paths = [
                 p for p in (f"books/{slug}", f"runs/{slug}")
@@ -308,25 +413,77 @@ class CollabBooksGitSync:
                     self._run_git(["push", "origin", "main"])
             return self._current_head_sha()
 
+    def _cleanup_untracked_from_books_repo(self, *, slug: str) -> None:
+        repo_dir = self._cfg.books_repo_dir
+        if not repo_dir.is_dir():
+            return
+        tracked_paths: list[str] = []
+        if (repo_dir / ".git").exists():
+            raw = self._run_git(["ls-files", "--", f"books/{slug}", f"runs/{slug}"])
+            tracked_paths = [line for line in raw.splitlines() if line.strip()]
+        tracked_set = set(tracked_paths)
+        for root_name in ("books", "runs"):
+            if any(p.startswith(f"{root_name}/{slug}/") for p in tracked_set):
+                continue
+            target = repo_dir / root_name / slug
+            if target.is_dir():
+                shutil.rmtree(target)
+
     def cleanup_untracked_book_files(self, *, slug: str) -> None:
         """Remove local untracked books/<slug> and runs/<slug> directories on rejection."""
         if not slug or "/" in slug or "\\" in slug or slug in {".", ".."}:
             return
         with self._lock:
-            repo_dir = self._cfg.books_repo_dir
-            if not repo_dir.is_dir():
-                return
-            tracked_paths: list[str] = []
-            if (repo_dir / ".git").exists():
-                raw = self._run_git(["ls-files", "--", f"books/{slug}", f"runs/{slug}"])
-                tracked_paths = [line for line in raw.splitlines() if line.strip()]
-            tracked_set = set(tracked_paths)
+            self._cleanup_untracked_from_books_repo(slug=slug)
+            priv_root = self.private_books_dir
             for root_name in ("books", "runs"):
-                if any(p.startswith(f"{root_name}/{slug}/") for p in tracked_set):
-                    continue
-                target = repo_dir / root_name / slug
+                target = priv_root / root_name / slug
                 if target.is_dir():
                     shutil.rmtree(target)
+
+    def evict_to_private_storage(self, *, slug: str) -> None:
+        """Copy non-public books/<slug> and runs/<slug> into private-books/ and remove untracked copies from collab-books."""
+        if not slug or "/" in slug or "\\" in slug or slug in {".", ".."}:
+            return
+        with self._lock:
+            repo_dir = self._cfg.books_repo_dir
+            priv_root = self.private_books_dir
+            for root_name in ("books", "runs"):
+                self._copy_missing_tree(repo_dir / root_name / slug, priv_root / root_name / slug)
+            self._cleanup_untracked_from_books_repo(slug=slug)
+
+    def reconcile_origin_and_evict_private(self, *, non_public_slugs: set[str]) -> None:
+        """Evict non-public dirs to private-books/ and align books_repo_dir main with origin/main on startup."""
+        with self._lock:
+            repo_dir = self._cfg.books_repo_dir
+            evict_slugs = {
+                s for s in non_public_slugs
+                if s and "/" not in s and "\\" not in s and s not in {".", ".."}
+            }
+            books_dir = repo_dir / "books"
+            if books_dir.is_dir():
+                for manifest_path in books_dir.glob("*/manifest.json"):
+                    try:
+                        lic = str(json.loads(manifest_path.read_text(encoding="utf-8")).get("license") or "public-domain").strip()
+                    except Exception:
+                        lic = ""
+                    if lic and lic not in PUBLIC_CORPUS_LICENSES:
+                        evict_slugs.add(manifest_path.parent.name)
+
+            priv_root = self.private_books_dir
+            for slug in sorted(evict_slugs):
+                for root_name in ("books", "runs"):
+                    self._copy_missing_tree(repo_dir / root_name / slug, priv_root / root_name / slug)
+
+            if (repo_dir / ".git").exists() and self._has_origin():
+                try:
+                    self._run_git(["fetch", "origin", "main"])
+                    self._run_git(["checkout", "-f", "-B", "main", "FETCH_HEAD"])
+                except Exception as exc:
+                    logging.getLogger(__name__).warning("Startup origin/main reconciliation skipped: %s", exc)
+
+            for slug in sorted(evict_slugs):
+                self._cleanup_untracked_from_books_repo(slug=slug)
 
     def compile_and_publish_release(
         self,

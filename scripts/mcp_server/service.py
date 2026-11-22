@@ -38,7 +38,7 @@ from scripts.mcp_server.auth import (
 )
 from scripts.mcp_server.config import McpServerConfig
 from scripts.mcp_server.db import CollabStore, parse_utc_timestamp
-from scripts.mcp_server.git_sync import CollabBooksGitSync
+from scripts.mcp_server.git_sync import CollabBooksGitSync, is_public_corpus_book
 
 MAX_MCP_XML_BYTES = 524_288  # 512 KB cap per REQ-040
 MAX_PROPOSED_CHAPTERS = 200
@@ -656,6 +656,14 @@ def _compute_glossary_sha(record: dict[str, Any] | None) -> str:
     return hashlib.sha256(canonical_bytes).hexdigest()
 
 
+def _book_is_public_corpus(book: dict[str, Any]) -> bool:
+    """Return True iff the book satisfies public GitHub corpus publishing eligibility."""
+    return is_public_corpus_book(
+        license_id=str(book.get("license_id") or book.get("license") or ""),
+        access_mode=str(book.get("access_mode") or "public"),
+    )
+
+
 class CollabMcpService:
     """Domain orchestrator for book queries, 3-tier submissions, review-server rounds, and git sync."""
 
@@ -681,6 +689,12 @@ class CollabMcpService:
         )
         self.store.supersede_all_accepted_chapter_drafts()
         self._backfill_chapter_section_types()
+        self._evict_non_public_books()
+
+    def _evict_non_public_books(self) -> None:
+        for bk in self.store.list_books(include_pending=True):
+            if not _book_is_public_corpus(bk):
+                self.git_sync.evict_to_private_storage(slug=str(bk["slug"]))
 
     def _backfill_chapter_section_types(self) -> int:
         updated = 0
@@ -822,6 +836,7 @@ class CollabMcpService:
                 "license": b["license_id"],
                 "status": b["status"],
                 "access_mode": str(b.get("access_mode") or "public"),
+                "public_corpus": _book_is_public_corpus(b),
                 "approval_mode": str(b.get("approval_mode") or "auto"),
                 "allowed_agent_count": len(allowed),
                 "pending_approvals": pending_approvals,
@@ -900,7 +915,12 @@ class CollabMcpService:
         if ctx.tier == "ADMIN":
             out["last_seed_error"] = last_seed_err
         out["brief"] = book.get("brief") or {}
-        out["collab_ledger"] = self.git_sync.read_ledger(book_slug) if can_work else {}
+        out["public_corpus"] = _book_is_public_corpus(book)
+        out["collab_ledger"] = (
+            self.git_sync.read_ledger(book_slug, public_corpus=_book_is_public_corpus(book))
+            if can_work
+            else {}
+        )
         out["pending_additions"] = pending_additions
         out["chapters"] = chapters
         return out
@@ -1551,6 +1571,7 @@ class CollabMcpService:
         init_status = "approved_pending_parse"
 
         if norm_chapters and not queue_for_parse:
+            pub_corpus = is_public_corpus_book(license_id=license_id, access_mode="public")
             extracted = self.git_sync.prepare_book_files(
                 slug=clean_slug,
                 manifest=manifest,
@@ -1560,6 +1581,7 @@ class CollabMcpService:
                 initial_book_record=merged_record,
                 initial_brief=norm_brief,
                 overwrite_record=True,
+                public_corpus=pub_corpus,
             )
             if not extracted:
                 raise ServiceError(f"Zero chapters extracted for '{clean_slug}'", status_code=422)
@@ -1707,6 +1729,7 @@ class CollabMcpService:
             initial_book_record=merged_record,
             initial_brief=norm_brief,
             overwrite_record=True,
+            public_corpus=_book_is_public_corpus(book),
         )
         if not extracted:
             raise ServiceError(f"Zero chapters extracted for '{book_slug}'", status_code=422)
@@ -1851,6 +1874,7 @@ class CollabMcpService:
                     proposed_chapters=prop_chs or None,
                     initial_book_record=book.get("book_record") or None,
                     initial_brief=book.get("brief") or None,
+                    public_corpus=_book_is_public_corpus(book),
                 )
                 if not extracted:
                     raise ServiceError(f"Zero chapters extracted for '{book_slug}'", status_code=422)
@@ -1942,7 +1966,7 @@ class CollabMcpService:
                         section_type=str(c.get("section_type") or "body"),
                         opened_at=time.time(),
                     )
-        if book["status"] != "published":
+        if book["status"] not in {"published", "completed"}:
             self.store.set_book_status(slug=book_slug, status="active")
 
         app_mode = str(book.get("approval_mode") or "peer")
@@ -2049,7 +2073,12 @@ class CollabMcpService:
             brief=eff_brief,
             book_record=eff_record,
         )
-        self.git_sync.write_brief_and_record(slug=book_slug, brief=eff_brief, book_record=eff_record)
+        self.git_sync.write_brief_and_record(
+            slug=book_slug,
+            brief=eff_brief,
+            book_record=eff_record,
+            public_corpus=_book_is_public_corpus(book),
+        )
         return self.get_book(ctx, book_slug=book_slug)
 
     def submit_translation(
@@ -2504,7 +2533,8 @@ class CollabMcpService:
 
         all_chapters = self.store.list_chapters(slug)
         all_done = bool(all_chapters) and all(c["status"] == "accepted" for c in all_chapters)
-        new_book_status = "published" if all_done else "active"
+        pub_corpus = _book_is_public_corpus(book)
+        new_book_status = ("published" if pub_corpus else "completed") if all_done else "active"
 
         peer_revs = self.store.list_peer_reviews(submission["id"])
         rev_handles = [r["reviewer_handle"] for r in peer_revs]
@@ -2548,9 +2578,10 @@ class CollabMcpService:
             reviewer_handles=rev_handles,
             score_of_record=avg_score,
             all_chapters_status=all_chapters,
+            public_corpus=pub_corpus,
         )
 
-        if all_done:
+        if all_done and pub_corpus:
             rel_tag = f"{slug}-v1.0"
             rel_info = self.git_sync.compile_and_publish_release(
                 slug=slug,
@@ -3008,8 +3039,11 @@ class CollabMcpService:
         )
         if norm_approval is not None:
             updated = self.store.set_book_approval_mode(slug=book_slug, approval_mode=norm_approval)
+        if not _book_is_public_corpus(updated):
+            self.git_sync.evict_to_private_storage(slug=book_slug)
         out = dict(updated)
         out.pop("source_text", None)
+        out["public_corpus"] = _book_is_public_corpus(updated)
         return out
 
     def set_book_approval_mode(
@@ -3044,8 +3078,8 @@ class CollabMcpService:
         book = self.store.get_book(book_slug)
         if book is None:
             raise ServiceError(f"Book '{book_slug}' not found", status_code=404)
-        if book["status"] == "published":
-            raise ServiceError(f"Book '{book_slug}' is already published", status_code=409)
+        if book["status"] in {"published", "completed"}:
+            raise ServiceError(f"Book '{book_slug}' is already {book['status']}", status_code=409)
 
         if queue_for_parse:
             if any(c["status"] == "accepted" for c in self.store.list_chapters(book_slug)):
@@ -3067,6 +3101,7 @@ class CollabMcpService:
                 proposed_chapters=book.get("proposed_chapters") or None,
                 initial_book_record=book.get("book_record") or None,
                 initial_brief=book.get("brief") or None,
+                public_corpus=_book_is_public_corpus(book),
             )
             if not extracted:
                 raise ServiceError(f"Zero chapters extracted for '{book_slug}'", status_code=422)
@@ -3124,7 +3159,7 @@ class CollabMcpService:
         book = self.store.get_book(book_slug)
         if book is None:
             raise ServiceError(f"Book '{book_slug}' not found", status_code=404)
-        if book["status"] in {"active", "published"}:
+        if book["status"] in {"active", "published", "completed"}:
             raise ServiceError(
                 f"Cannot reject book '{book_slug}' in status '{book['status']}'",
                 status_code=409,
@@ -3413,6 +3448,14 @@ class CollabMcpService:
         book = self.store.get_book(book_slug)
         if book is None:
             raise ServiceError(f"Book '{book_slug}' not found", status_code=404)
+        if not _book_is_public_corpus(book):
+            raise ServiceError(
+                (
+                    f"Book '{book_slug}' uses license '{book['license_id']}' "
+                    f"(access_mode='{book.get('access_mode', 'public')}') and cannot be published to the public GitHub repository"
+                ),
+                status_code=409,
+            )
         chapters = self.store.list_chapters(book_slug)
         if not chapters or any(c["status"] != "accepted" for c in chapters):
             raise ServiceError(f"Book '{book_slug}' has incomplete chapters", status_code=409)

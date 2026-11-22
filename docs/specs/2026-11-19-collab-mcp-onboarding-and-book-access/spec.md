@@ -55,6 +55,7 @@ Inspected against `collab-book-translate` at commit `0ae2b74`:
 
 ### REQ-046: Built-in MCP `instructions`, self-explanatory tool docstrings, `@mcp.prompt()` helpers, and `/` onboarding card
 
+- Current contract: Changed by [2026-11-23-collab-mcp-public-corpus-publish-gate/REQ-069](../2026-11-23-collab-mcp-public-corpus-publish-gate/spec.md#req-069-public-bookshelf-filtering-admin-policy-controls-startup-originmain-reconciliation--mcp-v431)
 - Changes: [2026-11-19-collab-mcp-and-books-split/REQ-038](../2026-11-19-collab-mcp-and-books-split/spec.md#req-038-standalone-collab-mcp-transports-discovery-endpoints-and-postgresqlsqlite-persistence)
 - Source intent: Verbatim user prompt (*"why this too detail, I just ask for add this mcp server, https://collab.vinhthang.dev/mcp, and then the agent can do by it self, right?"*) and `/grill-me` Q4.
 - Previous contract: `MCPServer("collab-books")` had no `instructions`, one-line tool docstrings, no MCP prompts, and a minimal JSON snippet on `/`.

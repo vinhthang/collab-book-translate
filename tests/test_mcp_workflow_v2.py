@@ -612,7 +612,7 @@ def test_ac_054_and_055_full_queries_peer_changes_requested_and_approve(tmp_path
         )
         assert app_r2.status_code == 201
         assert app_r2.json()["submission"]["status"] == "accepted"
-        ledger = json.loads((cfg.books_repo_dir / "runs" / "lantern-chronicle" / "collab_ledger.json").read_text(encoding="utf-8"))
+        ledger = client.get("/api/v1/books/lantern-chronicle", headers={"Authorization": f"Bearer {peer['agent_key']}"}).json()["collab_ledger"]
         assert peer["handle"] in ledger["chapters"]["ch02"]["reviewer_logins"]
 
         # Verify ReviewServerClient.get_workstream real HTTP transport method
@@ -651,7 +651,7 @@ def test_ac_056_mcp_v4_tools_admin_ui_xss_and_worker_cli(tmp_path: Path, monkeyp
                 "params": {"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}},
             },
         ).json()["result"]
-        assert init["serverInfo"]["version"] == "4.3.0"
+        assert init["serverInfo"]["version"] == "4.3.1"
         assert "submit_book_parse" in init["instructions"]
         assert "get_book_source" in init["instructions"]
 
@@ -766,7 +766,7 @@ def test_ac_056_mcp_v4_tools_admin_ui_xss_and_worker_cli(tmp_path: Path, monkeyp
 
     repo_root = Path(__file__).resolve().parent.parent
     assert (repo_root / "agents" / "collab_admin.md").is_file()
-    assert json.loads((repo_root / "plugin.json").read_text(encoding="utf-8"))["version"] == "4.3.0"
+    assert json.loads((repo_root / "plugin.json").read_text(encoding="utf-8"))["version"] == "4.3.1"
 
     store.close()
 

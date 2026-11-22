@@ -394,7 +394,8 @@ def test_req_061_trusted_submit_proposal_auto_approve_and_boundaries(tmp_path: P
 
     after_book = svc.get_book(coord, book_slug="dalio-trusted")
     assert after_book["glossary_sha"] == orig_sha
-    ledger = json.loads((work_repo / "runs" / "dalio-trusted" / "collab_ledger.json").read_text(encoding="utf-8"))
+    assert not (work_repo / "runs" / "dalio-trusted").exists()
+    ledger = json.loads((svc.git_sync.private_books_dir / "runs" / "dalio-trusted" / "collab_ledger.json").read_text(encoding="utf-8"))
     ch01_entry = ledger["chapters"]["ch01"]
     assert ch01_entry["reviewer_logins"] == ["peer-rev"]
     assert "review-vinhthang-dev" not in ch01_entry["reviewer_logins"]
@@ -617,10 +618,10 @@ def test_req_063_mcp_v420_rest_admin_ui_and_worker_cli(tmp_path: Path, monkeypat
     with TestClient(app) as client:
         # 1. Health, llms.txt, plugin.json, MCP initialize & 29 tools
         h = client.get("/api/health").json()
-        assert h["version"] == "4.3.0"
-        assert "v4.3.0" in client.get("/llms.txt").text
+        assert h["version"] == "4.3.1"
+        assert "v4.3.1" in client.get("/llms.txt").text
         assert "import_chapter_translations" in client.get("/llms.txt").text
-        assert json.loads((repo_root / "plugin.json").read_text(encoding="utf-8"))["version"] == "4.3.0"
+        assert json.loads((repo_root / "plugin.json").read_text(encoding="utf-8"))["version"] == "4.3.1"
 
         init_rpc = client.post(
             "/mcp",
@@ -636,7 +637,7 @@ def test_req_063_mcp_v420_rest_admin_ui_and_worker_cli(tmp_path: Path, monkeypat
                 },
             },
         ).json()
-        assert init_rpc["result"]["serverInfo"]["version"] == "4.3.0"
+        assert init_rpc["result"]["serverInfo"]["version"] == "4.3.1"
         assert "import_chapter_translations" in init_rpc["result"]["instructions"]
 
         tools_rpc = client.post(

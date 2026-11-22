@@ -200,6 +200,20 @@ def test_req_064_section_type_classification_backfill_and_boilerplate_auto_accep
     )
     assert _classify_chapter_section_type("ch10", "CHAPTER 1: THE BIG DEBT CYCLE", body_src) == "body"
 
+    # Exact word-count boundary assertions for _classify_chapter_section_type
+    cov60_src, _ = _xml_pair("![cover:art](images/c.jpg) " + " ".join(["w"] * 59), "Bìa")
+    assert _classify_chapter_section_type("ch90", "Gallery Item", cov60_src) == "boilerplate"
+    dl250_src, _ = _xml_pair(" ".join(["ebook"] * 250), "Sách")
+    assert _classify_chapter_section_type("ch91", "Thank you for downloading this guide", dl250_src) == "boilerplate"
+    isbn450_src, _ = _xml_pair("ISBN 123 copyright © " + " ".join(["legal"] * 446), "Bản quyền")
+    assert _classify_chapter_section_type("ch92", "Edition Legal Notice", isbn450_src) == "boilerplate"
+    also350_src, _ = _xml_pair(" ".join(["title"] * 350), "Tác phẩm")
+    assert _classify_chapter_section_type("ch93", "Also From This Author", also350_src) == "boilerplate"
+    part40_src, _ = _xml_pair(" ".join(["overview"] * 40), "Tổng quan")
+    assert _classify_chapter_section_type("ch94", "Part II", part40_src) == "boilerplate"
+    ded120_src, _ = _xml_pair(" ".join(["family"] * 120), "Lời đề tặng")
+    assert _classify_chapter_section_type("ch95", "Dedication Note", ded120_src) == "front_matter"
+
     # 2. Startup backfill of pre-existing SQLite chapters
     cfg, store, svc = _make_service(tmp_path)
     admin = _auth("ADMIN", "admin", role="admin")
@@ -562,9 +576,9 @@ def test_req_067_mcp_v430_rest_admin_and_worker_cli_parity(tmp_path: Path, monke
     )
 
     with TestClient(app) as client:
-        assert client.get("/api/health").json()["version"] == "4.3.0"
-        assert "v4.3.0" in client.get("/llms.txt").text
-        assert json.loads((repo_root / "plugin.json").read_text(encoding="utf-8"))["version"] == "4.3.0"
+        assert client.get("/api/health").json()["version"] == "4.3.1"
+        assert "v4.3.1" in client.get("/llms.txt").text
+        assert json.loads((repo_root / "plugin.json").read_text(encoding="utf-8"))["version"] == "4.3.1"
 
         init_rpc = client.post(
             "/mcp",
@@ -580,7 +594,7 @@ def test_req_067_mcp_v430_rest_admin_and_worker_cli_parity(tmp_path: Path, monke
                 },
             },
         ).json()
-        assert init_rpc["result"]["serverInfo"]["version"] == "4.3.0"
+        assert init_rpc["result"]["serverInfo"]["version"] == "4.3.1"
 
         reg = client.post("/api/v1/agents/register", json={"handle": "aa-v43"}).json()
         client.post(

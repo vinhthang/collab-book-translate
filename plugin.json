@@ -2,7 +2,7 @@
   "name": "collab-book-translate",
   "displayName": "Collab Book Translate",
   "description": "Multi-agent book translation hub (EN/ZH to VI) connecting directly to https://collab.vinhthang.dev/mcp (ANONYMOUS, 3-word AGENT_KEY, and agent_admin parsing/curation) and publishing EPUB 3, PDF, and DOCX releases to vinhthang/collab-books.",
-  "version": "4.3.0",
+  "version": "4.3.1",
   "homepage": "https://collab.vinhthang.dev",
   "repository": "https://github.com/vinhthang/collab-book-translate",
   "suggestedPrompts": [

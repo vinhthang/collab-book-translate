@@ -20,7 +20,7 @@ import uvicorn
 from scripts.mcp_server.auth import AuthContext, AuthError, RateLimitError, resolve_auth
 from scripts.mcp_server.config import McpServerConfig, load_mcp_server_config
 from scripts.mcp_server.db import CollabStore
-from scripts.mcp_server.git_sync import CollabBooksGitSync
+from scripts.mcp_server.git_sync import PUBLIC_CORPUS_LICENSES, CollabBooksGitSync, is_public_corpus_book
 from scripts.mcp_server.review_client import ReviewServerClient, ReviewServerError
 from scripts.mcp_server.service import CollabMcpService, ServiceError
 
@@ -37,9 +37,9 @@ _REQ_CLIENT_IP: contextvars.ContextVar[str] = contextvars.ContextVar(
     default="127.0.0.1",
 )
 
-MCP_SERVER_INSTRUCTIONS = """You are connected to Collab Books (https://collab.vinhthang.dev/mcp), a collaborative multi-agent book translation hub (EN/ZH -> VI) synced to vinhthang/collab-books.
+MCP_SERVER_INSTRUCTIONS = """You are connected to Collab Books (https://collab.vinhthang.dev/mcp), a collaborative multi-agent book translation hub (EN/ZH -> VI) where public-license corpus books sync to vinhthang/collab-books.
 
-Quick Autonomous Workflow (v4.3.0):
+Quick Autonomous Workflow (v4.3.1):
 1. Identity (Automatic): Call register_agent(model_info="<your-model>") once with no required handle to receive a permanent, easy-to-read 3-word AGENT_KEY (e.g. amber-fox-river). Save it and pass agent_key="<your-3-word-key>" on all future calls. If skipped on a public book, an AGENT_KEY is auto-assigned on your first claim_chapter or submit_translation.
 2. Trusted Intake, Agent Admin Parsing & Curation (role="agent_admin" or ADMIN): Human /admin promotes trusted 3-word AGENT_KEYs to agent_admin. Trusted submitters (ADMIN or agent_admin) calling submit_book_proposal bypass pending_approval automatically: raw manuscripts enter approved_pending_parse, while pre-split chapters with a curated book_record (or unlock_all_chapters=True / translation_xml drafts) lock glossary_sha, open ch01..chNN, auto-accept low-value boilerplate (auto_approve_boilerplate=True), and stage remaining imported chapters directly in pending_review. Untrusted contributor/ANONYMOUS proposals still queue in pending_approval. For raw manuscripts, fetch source via get_book_source, parse/curate via submit_book_parse / update_book_record (agent_admin can update brief & additions even after glossary_sha locks), or use import_chapter_translations(book_slug, chapters, ...) for fast validated batch uploads (1..50 chapters per call) into pending_review.
 3. Discover & Full-Transparency Work Querying: Call list_tasks(role="translator"|"reviewer"|"agent_admin"|"all", book_slug?, section_type?, include_matter=True, limit=200, offset=0, agent_key=...). peer_review_candidates return full 36-char submission_id, section_type (body sorted before front_matter/back_matter in ascending chapter order), and compact summaries paginated up to 500/call. Call get_book, get_chapter(book_slug, chapter_id, include_neighbors=True, agent_key=...) for <segment id="S-NNNN"> source XML, brief, book_record, and continuity neighbors, query_submissions(..., limit=100, offset=0, section_type?, include_xml=True), or get_submission_status(submission_id, include_context=True, include_workstream=True, agent_key=...) which bundles context (book_record, brief, glossary_sha, source_xml, section_type, neighbors), top-level book_record/brief, rounds_history, and specialist findings in a single call. Restricted books require your 3-word AGENT_KEY on the book allowlist.
@@ -86,9 +86,9 @@ class RequestContextMiddleware:
 
 def _render_llms_txt(cfg: McpServerConfig) -> str:
     base = cfg.public_base_url
-    return f"""# Collab Books MCP & REST Hub (v4.3.0)
+    return f"""# Collab Books MCP & REST Hub (v4.3.1)
 
-> Public multi-agent literary & technical book translation hub ({cfg.books_repo_full_name}). Supports zero-credential `ANONYMOUS` access, automatically generated easy-to-read 3-word `AGENT_KEY`s (e.g. `amber-fox-river`), scoped `agent_admin` parsing & curation, full-transparency continuity & workstream queries, per-book write-restricted allowlists, peer/manual/auto chapter approval (`approval_mode`), and automated multi-specialist Vietnamese translation review via `https://review.vinhthang.dev`.
+> Multi-agent literary & technical book translation hub (public open-license corpus synced to {cfg.books_repo_full_name}; `owner-permission` and `restricted` books stay private on this hub without GitHub commits or releases). Supports zero-credential `ANONYMOUS` access, automatically generated easy-to-read 3-word `AGENT_KEY`s (e.g. `amber-fox-river`), scoped `agent_admin` parsing & curation, full-transparency continuity & workstream queries, per-book write-restricted allowlists, peer/manual/auto chapter approval (`approval_mode`), and automated multi-specialist Vietnamese translation review via `https://review.vinhthang.dev`.
 
 ## Endpoints & MCP Connection
 
@@ -175,6 +175,7 @@ _STATUS_BADGE_CLASS = {
     "active": "badge-info",
     "declined": "badge-info",
     "accepted": "badge-ok",
+    "completed": "badge-ok",
     "fixed": "badge-ok",
     "published": "badge-ok",
 }
@@ -987,20 +988,22 @@ def _render_admin_book_card(b: dict[str, Any], agents: list[dict[str, Any]]) -> 
         )
     checks_block = "".join(checks_html) if checks_html else "<small style='color:#94a3b8;'>No registered agents to select yet.</small>"
 
+    pub_corpus = bool(b.get("public_corpus", True))
+    corpus_badge = "" if pub_corpus else ' <span class="badge badge-restricted">private &middot; no GitHub sync</span>'
     extra_btns: list[str] = []
     if status_str == "active":
         extra_btns.append(f'<button class="btn btn-sec js-book-fallback" data-slug="{esc_slug}">Run Fallback</button>')
     safe_rel = _safe_http_url(str(b.get("release_url") or ""))
     if safe_rel:
         extra_btns.append(f'<a class="pill" href="{_esc(safe_rel)}">{_esc(b.get("release_tag") or "Release")}</a>')
-    elif total > 0 and done == total:
+    elif pub_corpus and total > 0 and done == total:
         extra_btns.append(f'<button class="btn btn-sec js-release-book" data-slug="{esc_slug}">Compile &amp; Publish Release</button>')
 
     return f"""<div class="card" data-book-slug="{esc_slug}">
       <div class="row-flex">
         <div>
           <strong>{_esc(b['title'])}</strong> <code>{esc_slug}</code>
-          <span class="badge {badge_cls}">{_esc(status_str)}</span>
+          <span class="badge {badge_cls}">{_esc(status_str)}</span>{corpus_badge}
           <small style="color:#94a3b8;"> ({done}/{total} chapters)</small>
         </div>
         <div style="display:flex; gap:0.5rem; flex-wrap:wrap; align-items:center;">
@@ -1226,6 +1229,16 @@ def create_app(
         store.init_db()
         git_sync = CollabBooksGitSync(eff_cfg)
         try:
+            non_public_slugs = {
+                str(b["slug"])
+                for b in store.list_books(include_pending=True)
+                if not is_public_corpus_book(
+                    license_id=str(b.get("license_id") or ""),
+                    access_mode=str(b.get("access_mode") or "public"),
+                )
+            }
+            if eff_cfg.books_repo_dir.exists():
+                git_sync.reconcile_origin_and_evict_private(non_public_slugs=non_public_slugs)
             repo_path = git_sync.ensure_cloned()
             store.bootstrap_from_books_dir(repo_path)
         except Exception as boot_exc:
@@ -1243,7 +1256,7 @@ def create_app(
     mcp = MCPServer(
         "collab-books",
         title="Collab Books Multi-Agent Translation Hub",
-        version="4.3.0",
+        version="4.3.1",
         website_url=eff_cfg.public_base_url,
         instructions=MCP_SERVER_INSTRUCTIONS,
     )
@@ -1868,7 +1881,11 @@ def create_app(
     async def bookshelf_index(request: Request) -> Response:
         def _work() -> str:
             ctx = _req_ctx(request)
-            books = eff_service.list_books(ctx, include_pending=False)
+            books = [
+                b
+                for b in eff_service.list_books(ctx, include_pending=False)
+                if str(b.get("license") or "") in PUBLIC_CORPUS_LICENSES
+            ]
             return _render_bookshelf_html(eff_cfg, books)
 
         try:
@@ -1903,7 +1920,7 @@ def create_app(
             {
                 "status": "ok",
                 "service": "collab-mcp",
-                "version": "4.3.0",
+                "version": "4.3.1",
                 "books_repo": eff_cfg.books_repo_full_name,
             }
         )

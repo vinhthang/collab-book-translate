@@ -14,6 +14,7 @@ import uuid
 
 from scripts.mcp_server.auth import generate_default_handle, mint_agent_key, sha256_hex
 from scripts.mcp_server.config import McpServerConfig
+from scripts.mcp_server.git_sync import PUBLIC_CORPUS_LICENSES, is_public_corpus_book
 
 HANDLE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{1,38}[a-z0-9]$")
 
@@ -584,6 +585,10 @@ class CollabStore:
         out["allowed_agents"] = json.loads(out.pop("allowed_agents_json", "[]") or "[]")
         out["approval_mode"] = str(out.get("approval_mode") or "auto")
         out["proposed_chapters"] = json.loads(out.pop("proposed_chapters_json", "[]") or "[]")
+        out["public_corpus"] = is_public_corpus_book(
+            license_id=str(out.get("license_id") or ""),
+            access_mode=out["access_mode"],
+        )
         return out
 
     def get_book(self, slug: str) -> Optional[dict[str, Any]]:
@@ -993,6 +998,9 @@ class CollabStore:
             if self.get_book(slug) is not None:
                 continue
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            license_id = str(manifest.get("license") or "public-domain").strip()
+            if license_id not in PUBLIC_CORPUS_LICENSES:
+                continue
             run_dir = runs_dir / slug
             book_record = {}
             if (run_dir / "book_record.json").is_file():
