@@ -1,0 +1,81 @@
+name: Build & Publish collab-mcp Container Image
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Container image tag to publish (e.g. v0.4.0)"
+        required: false
+        default: "v0.4.0"
+        type: string
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build-arm64:
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build native linux/arm64 image
+        run: |
+          docker build \
+            --label "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
+            -t local/collab-mcp:build .
+
+      - name: Push and verify anonymous GHCR pullability
+        run: |
+          TAG="${{ inputs.image_tag || 'v0.4.0' }}"
+          docker tag local/collab-mcp:build ghcr.io/vinhthang/collab-book-translate:"$TAG"
+          docker tag local/collab-mcp:build ghcr.io/vinhthang/collab-book-translate:latest
+          docker push ghcr.io/vinhthang/collab-book-translate:"$TAG"
+          docker push ghcr.io/vinhthang/collab-book-translate:latest
+
+          if docker tag local/collab-mcp:build ghcr.io/vinhthang/collab-mcp:"$TAG" && docker push ghcr.io/vinhthang/collab-mcp:"$TAG"; then
+            echo "Pushed ghcr.io/vinhthang/collab-mcp:$TAG"
+          else
+            echo "Note: standalone ghcr.io/vinhthang/collab-mcp package push skipped/denied (expected if bound to another workflow)."
+          fi
+
+          check_public() {
+            local pkg="$1"
+            local tok_json tok status
+            tok_json=$(curl -fsS "https://ghcr.io/token?scope=repository:${pkg}:pull" || true)
+            tok=$(python3 -c 'import json,sys; d=json.loads(sys.stdin.read() or "{}"); print(d.get("token",""))' <<< "$tok_json")
+            if [ -z "$tok" ]; then
+              return 1
+            fi
+            status=$(curl -s -o /dev/null -w "%{http_code}" -I \
+              -H "Authorization: Bearer ${tok}" \
+              -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.docker.distribution.manifest.list.v2+json" \
+              "https://ghcr.io/v2/${pkg}/manifests/${TAG}" || echo "000")
+            echo "Anonymous check ${pkg}:${TAG} -> HTTP ${status}"
+            [ "$status" = "200" ]
+          }
+
+          if check_public "vinhthang/collab-mcp"; then
+            echo "VERIFIED_PUBLIC_IMAGE=ghcr.io/vinhthang/collab-mcp:${TAG}"
+          elif check_public "vinhthang/collab-book-translate"; then
+            echo "VERIFIED_PUBLIC_IMAGE=ghcr.io/vinhthang/collab-book-translate:${TAG}"
+          else
+            echo "ERROR_PACKAGE_NOT_PUBLIC: Neither vinhthang/collab-mcp:${TAG} nor vinhthang/collab-book-translate:${TAG} is anonymously pullable."
+            exit 1
+          fi
