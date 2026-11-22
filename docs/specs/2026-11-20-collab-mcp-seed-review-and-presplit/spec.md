@@ -43,6 +43,7 @@ Inspected against `collab-book-translate` at commit `bb08997`:
 
 ### REQ-051: Pre-Split Chapters & Initial `book_record` in `submit_book_proposal`
 
+- Current contract: Changed by [2026-11-22-collab-mcp-trusted-intake-and-import/REQ-061](../2026-11-22-collab-mcp-trusted-intake-and-import/spec.md#req-061-trusted-submitter-auto-approve--curated-glossary-chapter-unlock)
 - Changes: [2026-11-19-collab-mcp-and-books-split/spec.md](../2026-11-19-collab-mcp-and-books-split/spec.md)
 - Source intent: Support local agent-written Python preprocessing scripts without executing untrusted code on `collab-mcp` by allowing pre-split `chapters` and initial `book_record` JSON in book proposals.
 - Previous contract: `submit_book_proposal` accepted only flat `source_text`, always ran `extract_document()`, and initialized `book_record` with empty `characters`/`terms`/`pronoun_pairs`.

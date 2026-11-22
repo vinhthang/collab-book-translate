@@ -12,6 +12,9 @@ import time
 from typing import Any, Optional
 
 from scripts.collab_pr_validate import (
+    HANVIET_TAG_RE,
+    ORIG_TAG_RE,
+    SEGMENT_BLOCK_RE,
     SLUG_RE,
     TRANS_TAG_RE,
     detect_prompt_injection,
@@ -40,6 +43,8 @@ from scripts.mcp_server.git_sync import CollabBooksGitSync
 MAX_MCP_XML_BYTES = 524_288  # 512 KB cap per REQ-040
 MAX_PROPOSED_CHAPTERS = 200
 MAX_BOOK_PROPOSAL_BYTES = 5_242_880  # 5 MiB cap
+MAX_TRUSTED_BOOK_PROPOSAL_BYTES = 10_485_760  # 10 MiB cap for trusted ADMIN / agent_admin proposals
+MAX_IMPORT_CHAPTERS_BATCH = 50
 EVALUATING_STALE_SECONDS = 480.0
 MAX_BUG_BODY_BYTES = 65_536
 _PROPOSED_CHAPTER_ID_RE = re.compile(r"^ch\d{2,4}$")
@@ -129,12 +134,36 @@ def _extract_segment_slice(
     return "\n\n".join(chunks)
 
 
+def _extract_scannable_xml_text(xml_text: str) -> tuple[str, list[str]]:
+    """Extract segment inner texts for prompt-injection scan and check per-segment breakout tags."""
+    if not xml_text:
+        return "", []
+    direct_flags: list[str] = []
+    chunks: list[str] = []
+    matches = list(SEGMENT_BLOCK_RE.finditer(xml_text))
+    if not matches:
+        return xml_text[:4000], []
+    for m in matches:
+        seg_body = m.group(2)
+        if re.search(r"(?i)</translate>[\s\S]*?<translate>", seg_body):
+            direct_flags.append("Prompt injection detected: 'translate tag breakout / injection'")
+        for tag_re in (ORIG_TAG_RE, HANVIET_TAG_RE, TRANS_TAG_RE):
+            chunks.extend(tag_re.findall(seg_body))
+        rem = HANVIET_TAG_RE.sub("", TRANS_TAG_RE.sub("", ORIG_TAG_RE.sub("", seg_body))).strip()
+        if rem:
+            chunks.append(rem)
+    outside = SEGMENT_BLOCK_RE.sub("", xml_text).strip()
+    if outside:
+        chunks.append(outside)
+    return "\n".join(chunks)[:8000], direct_flags
+
+
 def _normalize_proposed_chapters(
     chapters: Any,
-) -> tuple[list[dict[str, str]], int, str]:
+) -> tuple[list[dict[str, str]], int, str, list[str]]:
     """Validate and normalize pre-split chapters submitted from local agent preprocessing."""
     if chapters is None:
-        return [], 0, ""
+        return [], 0, "", []
     if not isinstance(chapters, list):
         raise ServiceError("chapters must be a list of chapter objects", status_code=400)
     if len(chapters) > MAX_PROPOSED_CHAPTERS:
@@ -144,6 +173,7 @@ def _normalize_proposed_chapters(
     seen_ids: set[str] = set()
     total_bytes = 0
     scan_chunks: list[str] = []
+    direct_inj_flags: list[str] = []
 
     for idx, raw in enumerate(chapters, start=1):
         if not isinstance(raw, dict):
@@ -159,6 +189,7 @@ def _normalize_proposed_chapters(
         title = str(raw.get("title") or f"Chapter {idx}").strip() or f"Chapter {idx}"
         src_text = str(raw.get("source_text") or "")
         src_xml = str(raw.get("source_xml") or "")
+        tr_xml = str(raw.get("translation_xml") or "")
         if not src_text.strip() and not src_xml.strip():
             raise ServiceError(
                 f"Chapter '{ch_id}' must supply non-empty source_text or source_xml",
@@ -177,18 +208,31 @@ def _normalize_proposed_chapters(
                     status_code=422,
                 )
 
-        total_bytes += len(src_text.encode("utf-8")) + len(src_xml.encode("utf-8"))
-        scan_chunks.append(f"{title}\n{src_text[:4000]}\n{src_xml[:4000]}")
-        normalized.append(
-            {
-                "chapter_id": ch_id,
-                "title": title,
-                "source_text": src_text,
-                "source_xml": src_xml,
-            }
-        )
+        tr_bytes = tr_xml.encode("utf-8")
+        if tr_xml.strip() and len(tr_bytes) > MAX_MCP_XML_BYTES:
+            raise ServiceError(
+                f"Chapter '{ch_id}' translation_xml exceeds {MAX_MCP_XML_BYTES}-byte cap",
+                status_code=413,
+            )
 
-    return normalized, total_bytes, "\n".join(scan_chunks)
+        src_scan, src_flags = _extract_scannable_xml_text(src_xml)
+        tr_scan, tr_flags = _extract_scannable_xml_text(tr_xml)
+        direct_inj_flags.extend(src_flags)
+        direct_inj_flags.extend(tr_flags)
+
+        total_bytes += len(src_text.encode("utf-8")) + len(src_xml.encode("utf-8")) + len(tr_bytes)
+        scan_chunks.append(f"{title}\n{src_text[:4000]}\n{src_scan}\n{tr_scan}")
+        entry: dict[str, str] = {
+            "chapter_id": ch_id,
+            "title": title,
+            "source_text": src_text,
+            "source_xml": src_xml,
+        }
+        if tr_xml.strip():
+            entry["translation_xml"] = tr_xml
+        normalized.append(entry)
+
+    return normalized, total_bytes, "\n".join(scan_chunks), direct_inj_flags
 
 
 def _merge_initial_book_record(
@@ -380,6 +424,24 @@ def _sanitize_bug_public(bug: dict[str, Any], *, include_body: bool = True) -> d
 
 def _is_coord(ctx: AuthContext) -> bool:
     return ctx.tier == "ADMIN" or (ctx.tier == "AGENT_KEY" and ctx.agent_role == "agent_admin")
+
+
+def _is_trusted_submitter(ctx: AuthContext) -> bool:
+    return _is_coord(ctx)
+
+
+def _has_curated_book_record(record: dict[str, Any] | None) -> bool:
+    if not isinstance(record, dict):
+        return False
+    return any(
+        bool(record.get(k))
+        for k in ("characters", "terms", "pronoun_pairs", "names", "term_entries", "pronouns")
+    )
+
+
+def _compute_glossary_sha(record: dict[str, Any] | None) -> str:
+    canonical_bytes = json.dumps(record or {}, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(canonical_bytes).hexdigest()
 
 
 class CollabMcpService:
@@ -748,15 +810,27 @@ class CollabMcpService:
                     review_targets.append(_sanitize_submission_public(sub))
 
         review_targets.sort(key=lambda s: _SUBMISSION_SORT_RANK.get(str(s.get("status") or ""), 99))
+        rev_cap = 200 if book_slug else 50
         return {
             "caller": {"tier": ctx.tier, "handle": ctx.handle, "agent_role": ctx.agent_role},
             "books_pending_parse": books_pending_parse,
             "books_pending_seed": books_pending_seed,
             "open_chapters": open_chapters,
             "revisions_needed": revisions_needed,
-            "peer_review_candidates": review_targets[:25],
+            "peer_review_candidates": review_targets[:rev_cap],
             "open_bug_reports": open_bug_reports,
         }
+
+    def _effective_chapter_translation_xml(self, book_slug: str, chapter_row: dict[str, Any]) -> str:
+        direct_xml = str(chapter_row.get("translation_xml") or "")
+        if direct_xml:
+            return direct_xml
+        subs = self.store.list_submissions(book_slug=book_slug, chapter_id=chapter_row["chapter_id"])
+        for status_target in ("accepted", "pending_review", "pending_admin_approval"):
+            match = next((s for s in subs if s["status"] == status_target and s.get("translation_xml")), None)
+            if match is not None:
+                return str(match["translation_xml"])
+        return ""
 
     def _build_chapter_neighbors(
         self,
@@ -772,12 +846,13 @@ class CollabMcpService:
         next_info: Optional[dict[str, Any]] = None
         if idx > 0:
             p_ch = all_chs[idx - 1]
+            p_tr_xml = self._effective_chapter_translation_xml(book_slug, p_ch)
             prev_info = {
                 "chapter_id": p_ch["chapter_id"],
                 "title": p_ch["title"],
                 "status": p_ch["status"],
                 "source_tail": _extract_segment_slice(p_ch["source_xml"], count=n_segs, from_end=True, field="original"),
-                "translated_tail": _extract_segment_slice(p_ch.get("translation_xml") or "", count=n_segs, from_end=True, field="translate"),
+                "translated_tail": _extract_segment_slice(p_tr_xml, count=n_segs, from_end=True, field="translate"),
             }
         if 0 <= idx < len(all_chs) - 1:
             n_ch = all_chs[idx + 1]
@@ -789,8 +864,10 @@ class CollabMcpService:
             }
         seed_excerpt = ""
         ch01 = next((c for c in all_chs if c["chapter_id"] == "ch01"), None)
-        if ch01 and ch01["status"] == "accepted" and ch01.get("translation_xml"):
-            seed_excerpt = _extract_segment_slice(ch01["translation_xml"], count=n_segs, from_end=False, field="translate")
+        if ch01:
+            ch01_xml = self._effective_chapter_translation_xml(book_slug, ch01)
+            if ch01_xml:
+                seed_excerpt = _extract_segment_slice(ch01_xml, count=n_segs, from_end=False, field="translate")
         return {
             "prev_chapter": prev_info,
             "next_chapter": next_info,
@@ -897,6 +974,161 @@ class CollabMcpService:
             result.update(auto_meta)
         return result
 
+    def _validate_chapter_import_item(
+        self,
+        *,
+        book_slug: str,
+        chapter_id: str,
+        source_lang: str,
+        manifest: dict[str, Any],
+        glossary_sha: str,
+        source_xml: str,
+        translation_xml: str,
+    ) -> str:
+        """Validate pre-translated XML parity, byte-invariance, injection safety, and target language."""
+        xml_bytes = translation_xml.encode("utf-8")
+        if len(xml_bytes) > MAX_MCP_XML_BYTES:
+            raise ServiceError(
+                f"Chapter '{book_slug}/{chapter_id}' translation_xml exceeds {MAX_MCP_XML_BYTES}-byte cap",
+                status_code=413,
+            )
+        segs = parse_segments(source_xml)
+        seg_range = (
+            f"{segs[0]['id']}..{segs[-1]['id']}"
+            if len(segs) > 1
+            else (segs[0]["id"] if segs else "S-0001")
+        )
+        sha_val = glossary_sha or _compute_glossary_sha({})
+        synthetic_body = (
+            "- **Agent**: mcpbot\n"
+            "- **Engine/Model**: trusted-import\n"
+            f"- **Source Language**: {source_lang}\n"
+            "- **Target Language**: vi\n"
+            f"- **Book**: {book_slug}\n"
+            f"- **Chunk ID**: {book_slug}-{chapter_id}\n"
+            "- **Issue**: #1\n"
+            f"- **Glossary SHA**: {sha_val}\n"
+            f"- **Segments**: {seg_range}\n"
+        )
+        val_res = validate_translation_pr(
+            head_ref=f"translate/{book_slug}-{chapter_id}-mcpbot",
+            author_login="mcpbot",
+            body=synthetic_body,
+            changed_files=[f"runs/{book_slug}/{chapter_id}/translation.xml"],
+            source_xml_text=source_xml,
+            translation_xml_text=translation_xml,
+            expected_glossary_sha=sha_val,
+            additions_data=None,
+            manifest=manifest,
+            expected_issue_number=1,
+            bot_login=None,
+            is_seed_pr=False,
+            translation_xml_bytes=xml_bytes,
+        )
+        inj_flags = list(val_res.get("injection_flags") or [])
+        if inj_flags:
+            raise ServiceError(
+                f"Chapter '{book_slug}/{chapter_id}' rejected by prompt-injection scanner",
+                status_code=422,
+                details={"defects": inj_flags, "chapter_id": chapter_id},
+            )
+        if not val_res["valid"]:
+            raise ServiceError(
+                f"Chapter '{book_slug}/{chapter_id}' failed deterministic structural validation",
+                status_code=422,
+                details={"defects": list(val_res["defects"]), "chapter_id": chapter_id},
+            )
+        lang_probe = enforce_language_detection(
+            {"verdict": "PASS", "scores": {"fidelity": 5.0, "fluency": 5.0, "register": 5.0, "completeness": 5.0}, "issues": []},
+            translation_xml,
+            source_lang=source_lang,
+        )
+        if lang_probe.get("verdict") != "PASS":
+            raise ServiceError(
+                f"Chapter '{book_slug}/{chapter_id}' failed Vietnamese target-language detection",
+                status_code=422,
+                details={"defects": [str(i) for i in lang_probe.get("issues", [])], "chapter_id": chapter_id},
+            )
+        return _render_final_txt(translation_xml)
+
+    def _persist_imported_submission(
+        self,
+        ctx: AuthContext,
+        *,
+        book_slug: str,
+        chapter_id: str,
+        translation_xml: str,
+        final_txt: str,
+        engine_model: str,
+        approval_mode: str,
+        existing_sub: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        """Insert or idempotently update an imported pre-translated chapter into peer/admin review."""
+        target_status = "pending_admin_approval" if approval_mode == "manual" else "pending_review"
+        summary_msg = f"Imported curated pre-translation by {ctx.handle} ({engine_model}); awaiting {target_status.replace('_', ' ')}."
+        if existing_sub is not None:
+            hist = list(existing_sub.get("rounds_history") or [])
+            next_round = int(existing_sub.get("round_number") or 0) + 1
+            hist.append(
+                {
+                    "round_number": next_round,
+                    "type": "trusted_import",
+                    "engine_model": engine_model,
+                    "verdict": "IMPORTED",
+                    "stage_status": target_status.upper(),
+                    "judge_summary": summary_msg,
+                    "open_findings": [],
+                    "translation_xml": translation_xml,
+                }
+            )
+            return self.store.update_submission(
+                existing_sub["id"],
+                status=target_status,
+                round_number=next_round,
+                workstream_id="",
+                translation_xml=translation_xml,
+                final_txt=final_txt,
+                additions={"proposals": []},
+                open_findings=[],
+                security_flags=[],
+                judge_summary=summary_msg,
+                rounds_history=hist,
+            )
+
+        _raw_rt, rt_sha = mint_revision_token()
+        hist = [
+            {
+                "round_number": 1,
+                "type": "trusted_import",
+                "engine_model": engine_model,
+                "verdict": "IMPORTED",
+                "stage_status": target_status.upper(),
+                "judge_summary": summary_msg,
+                "open_findings": [],
+                "translation_xml": translation_xml,
+            }
+        ]
+        return self.store.create_submission(
+            book_slug=book_slug,
+            chapter_id=chapter_id,
+            author_actor_id=ctx.actor_id,
+            author_handle=ctx.handle,
+            author_ip_hash=ctx.client_ip_hash,
+            engine_model=engine_model,
+            status=target_status,
+            round_number=1,
+            max_rounds=self.cfg.max_revise_rounds,
+            workstream_id="",
+            revision_token_sha256=rt_sha,
+            translation_xml=translation_xml,
+            final_txt=final_txt,
+            additions={"proposals": []},
+            open_findings=[],
+            security_flags=[],
+            judge_summary=summary_msg,
+            rounds_history=hist,
+        )
+
     def submit_book_proposal(
         self,
         ctx: AuthContext,
@@ -915,6 +1147,8 @@ class CollabMcpService:
         book_record: Optional[dict[str, Any]] = None,
         brief: Optional[dict[str, Any]] = None,
         approval_mode: Optional[str] = None,
+        unlock_all_chapters: bool = False,
+        queue_for_parse: bool = False,
     ) -> dict[str, Any]:
         self._check_write_rate(ctx)
         clean_slug = slug.strip().lower()
@@ -928,13 +1162,22 @@ class CollabMcpService:
             raise ServiceError("license_url must be a valid https:// URL", status_code=400)
         eff_approval_mode = _normalize_approval_mode(approval_mode) if approval_mode else "peer"
 
-        norm_chapters, ch_bytes, ch_scan_text = _normalize_proposed_chapters(chapters)
+        trusted = _is_trusted_submitter(ctx)
+        norm_chapters, ch_bytes, ch_scan_text, ch_direct_inj = _normalize_proposed_chapters(chapters)
+        if not trusted and any(c.get("translation_xml") for c in norm_chapters):
+            raise AuthError(
+                "Only ADMIN or promoted agent_admin callers may import pre-translated chapters",
+                status_code=403,
+            )
+
         raw_bytes = len(source_text.encode("utf-8"))
         total_bytes = raw_bytes + ch_bytes
         if total_bytes == 0:
             raise ServiceError("Either source_text or non-empty chapters is required", status_code=400)
-        if total_bytes > MAX_BOOK_PROPOSAL_BYTES:
-            raise ServiceError("Book proposal payload exceeds 5 MiB cap via MCP", status_code=413)
+        cap_bytes = MAX_TRUSTED_BOOK_PROPOSAL_BYTES if trusted else MAX_BOOK_PROPOSAL_BYTES
+        if total_bytes > cap_bytes:
+            cap_mb = cap_bytes // (1024 * 1024)
+            raise ServiceError(f"Book proposal payload exceeds {cap_mb} MiB cap via MCP", status_code=413)
         if self.store.get_book(clean_slug) is not None:
             raise ServiceError(f"Book '{clean_slug}' already exists", status_code=409)
 
@@ -950,8 +1193,7 @@ class CollabMcpService:
         }
         merged_record, rec_inj = _merge_initial_book_record(base_record, book_record)
         norm_brief, brief_inj = _normalize_brief(brief, default_genre=genre.strip() or "fiction")
-        inj = detect_prompt_injection(f"{title}\n{author}\n{source_text[:32000]}\n{ch_scan_text}") + rec_inj + brief_inj
-        init_status = "flagged_security" if inj else "pending_approval"
+        inj = detect_prompt_injection(f"{title}\n{author}\n{source_text[:32000]}\n{ch_scan_text}") + rec_inj + brief_inj + ch_direct_inj
         manifest = {
             "slug": clean_slug,
             "title": title.strip(),
@@ -962,6 +1204,80 @@ class CollabMcpService:
             "license": license_id,
             "license_url": license_url.strip(),
         }
+
+        if inj or not trusted:
+            init_status = "flagged_security" if inj else "pending_approval"
+            book = self.store.upsert_book(
+                slug=clean_slug,
+                title=title.strip(),
+                author=author.strip(),
+                source_lang=source_lang,
+                target_lang=target_lang,
+                genre=genre.strip() or "fiction",
+                license_id=license_id,
+                license_url=license_url.strip(),
+                status=init_status,
+                glossary_sha="",
+                book_record=merged_record,
+                brief=norm_brief,
+                approval_mode=eff_approval_mode,
+                manifest=manifest,
+                proposed_by=ctx.handle,
+                source_text=source_text,
+                source_filename=source_filename.strip() or f"{clean_slug}.md",
+                proposed_chapters=norm_chapters,
+            )
+            out = dict(book)
+            out.pop("source_text", None)
+            out.pop("proposed_chapters", None)
+            out["proposed_chapter_count"] = len(norm_chapters)
+            return out
+
+        # Trusted submitter (ADMIN or promoted agent_admin) without security flags -> auto-approve
+        imported_rows: list[tuple[str, str, str]] = []
+        glossary_sha = ""
+        extracted: list[dict[str, Any]] = []
+        should_unlock = False
+        init_status = "approved_pending_parse"
+
+        if norm_chapters and not queue_for_parse:
+            extracted = self.git_sync.prepare_book_files(
+                slug=clean_slug,
+                manifest=manifest,
+                source_filename=source_filename.strip() or f"{clean_slug}.md",
+                source_text=source_text,
+                proposed_chapters=norm_chapters,
+                initial_book_record=merged_record,
+                initial_brief=norm_brief,
+                overwrite_record=True,
+            )
+            if not extracted:
+                raise ServiceError(f"Zero chapters extracted for '{clean_slug}'", status_code=422)
+            has_translations = any(bool(c.get("translation_xml")) for c in norm_chapters)
+            should_unlock = bool(unlock_all_chapters or _has_curated_book_record(merged_record) or has_translations)
+            glossary_sha = _compute_glossary_sha(merged_record) if should_unlock else ""
+            src_by_ch = {str(item["chapter_id"]): str(item["source_xml"]) for item in extracted}
+            for item in norm_chapters:
+                tr_xml = str(item.get("translation_xml") or "")
+                if not tr_xml:
+                    continue
+                ch_id = str(item["chapter_id"])
+                try:
+                    final_txt = self._validate_chapter_import_item(
+                        book_slug=clean_slug,
+                        chapter_id=ch_id,
+                        source_lang=source_lang,
+                        manifest=manifest,
+                        glossary_sha=glossary_sha,
+                        source_xml=src_by_ch[ch_id],
+                        translation_xml=tr_xml,
+                    )
+                except ServiceError:
+                    self.git_sync.cleanup_untracked_book_files(slug=clean_slug)
+                    raise
+                imported_rows.append((ch_id, tr_xml, final_txt))
+            init_status = "active" if should_unlock else "seeding"
+
         book = self.store.upsert_book(
             slug=clean_slug,
             title=title.strip(),
@@ -972,7 +1288,7 @@ class CollabMcpService:
             license_id=license_id,
             license_url=license_url.strip(),
             status=init_status,
-            glossary_sha="",
+            glossary_sha=glossary_sha,
             book_record=merged_record,
             brief=norm_brief,
             approval_mode=eff_approval_mode,
@@ -982,10 +1298,31 @@ class CollabMcpService:
             source_filename=source_filename.strip() or f"{clean_slug}.md",
             proposed_chapters=norm_chapters,
         )
+        if extracted:
+            self.store.replace_unaccepted_chapters(
+                book_slug=clean_slug,
+                chapters=extracted,
+                unlock_all=should_unlock,
+            )
+        imported_ids: list[str] = []
+        for ch_id, tr_xml, final_txt in imported_rows:
+            saved_sub = self._persist_imported_submission(
+                ctx,
+                book_slug=clean_slug,
+                chapter_id=ch_id,
+                translation_xml=tr_xml,
+                final_txt=final_txt,
+                engine_model="trusted-import",
+                approval_mode=eff_approval_mode,
+            )
+            imported_ids.append(str(saved_sub["id"]))
+
         out = dict(book)
         out.pop("source_text", None)
         out.pop("proposed_chapters", None)
         out["proposed_chapter_count"] = len(norm_chapters)
+        if imported_ids:
+            out["imported_submission_ids"] = imported_ids
         return out
 
     def submit_book_parse(
@@ -993,10 +1330,11 @@ class CollabMcpService:
         ctx: AuthContext,
         *,
         book_slug: str,
-        chapters: Any,
+        chapters: Any = None,
         brief: Any = None,
         book_record: Any = None,
         parse_notes: str = "",
+        unlock_all_chapters: bool = False,
     ) -> dict[str, Any]:
         """Accept parsed chapters, Brief, and initial book_record from agent_admin or ADMIN."""
         self._check_write_rate(ctx)
@@ -1005,7 +1343,13 @@ class CollabMcpService:
         if book is None:
             raise ServiceError(f"Book '{book_slug}' not found", status_code=404)
         self._assert_book_work_access(ctx, book)
-        if book["status"] not in {"approved_pending_parse", "seeding", "seed_failed"}:
+        if book["status"] == "pending_approval":
+            if ctx.tier != "ADMIN" and book.get("proposed_by") != ctx.handle:
+                raise AuthError(
+                    "Only ADMIN or the agent_admin who proposed this book may parse a pending_approval proposal directly",
+                    status_code=403,
+                )
+        elif book["status"] not in {"approved_pending_parse", "seeding", "seed_failed"}:
             raise ServiceError(
                 f"Book '{book_slug}' in status '{book['status']}' cannot be parsed",
                 status_code=409,
@@ -1017,15 +1361,16 @@ class CollabMcpService:
                 status_code=409,
             )
 
-        norm_chapters, ch_bytes, ch_scan_text = _normalize_proposed_chapters(chapters)
+        effective_chapters = book.get("proposed_chapters") or [] if chapters is None else chapters
+        norm_chapters, ch_bytes, ch_scan_text, ch_direct_inj = _normalize_proposed_chapters(effective_chapters)
         if not norm_chapters:
             raise ServiceError("chapters must contain at least one chapter object", status_code=400)
-        if ch_bytes > MAX_BOOK_PROPOSAL_BYTES:
-            raise ServiceError("Parsed chapters payload exceeds 5 MiB cap", status_code=413)
+        if ch_bytes > MAX_TRUSTED_BOOK_PROPOSAL_BYTES:
+            raise ServiceError("Parsed chapters payload exceeds 10 MiB cap", status_code=413)
 
         norm_brief, brief_inj = _normalize_brief(brief, default_genre=book.get("genre") or "fiction")
         merged_record, rec_inj = _merge_initial_book_record(book.get("book_record") or {}, book_record)
-        inj = detect_prompt_injection(f"{ch_scan_text}\n{parse_notes[:4000]}") + brief_inj + rec_inj
+        inj = detect_prompt_injection(f"{ch_scan_text}\n{parse_notes[:4000]}") + brief_inj + rec_inj + ch_direct_inj
         if inj:
             raise ServiceError(
                 "Parsed book package rejected by prompt-injection scanner",
@@ -1046,16 +1391,250 @@ class CollabMcpService:
         if not extracted:
             raise ServiceError(f"Zero chapters extracted for '{book_slug}'", status_code=422)
 
-        self.store.replace_unaccepted_chapters(book_slug=book_slug, chapters=extracted)
+        has_translations = any(bool(c.get("translation_xml")) for c in norm_chapters)
+        should_unlock = bool(unlock_all_chapters or has_translations)
+        new_sha = _compute_glossary_sha(merged_record) if should_unlock else ""
+        src_by_ch = {str(item["chapter_id"]): str(item["source_xml"]) for item in extracted}
+        imported_rows: list[tuple[str, str, str]] = []
+        for item in norm_chapters:
+            tr_xml = str(item.get("translation_xml") or "")
+            if not tr_xml:
+                continue
+            ch_id = str(item["chapter_id"])
+            final_txt = self._validate_chapter_import_item(
+                book_slug=book_slug,
+                chapter_id=ch_id,
+                source_lang=str(book["source_lang"]),
+                manifest=book["manifest"],
+                glossary_sha=new_sha,
+                source_xml=src_by_ch[ch_id],
+                translation_xml=tr_xml,
+            )
+            imported_rows.append((ch_id, tr_xml, final_txt))
+
+        self.store.replace_unaccepted_chapters(
+            book_slug=book_slug,
+            chapters=extracted,
+            unlock_all=should_unlock,
+        )
         self.store.set_book_brief_and_record(
             slug=book_slug,
             brief=norm_brief,
             book_record=merged_record,
+            glossary_sha=new_sha if should_unlock else None,
         )
-        self.store.set_book_status(slug=book_slug, status="seeding")
+        self.store.set_book_status(slug=book_slug, status="active" if should_unlock else "seeding")
+        app_mode = str(book.get("approval_mode") or "peer")
+        imported_ids: list[str] = []
+        for ch_id, tr_xml, final_txt in imported_rows:
+            saved_sub = self._persist_imported_submission(
+                ctx,
+                book_slug=book_slug,
+                chapter_id=ch_id,
+                translation_xml=tr_xml,
+                final_txt=final_txt,
+                engine_model="trusted-import",
+                approval_mode=app_mode,
+            )
+            imported_ids.append(str(saved_sub["id"]))
+
         res = self.get_book(ctx, book_slug=book_slug)
         res["parse_notes"] = parse_notes.strip()
+        if imported_ids:
+            res["imported_submission_ids"] = imported_ids
         return res
+
+    def import_chapter_translations(
+        self,
+        ctx: AuthContext,
+        *,
+        book_slug: str,
+        chapters: Any,
+        engine_model: str = "trusted-import",
+        unlock_all_chapters: bool = True,
+    ) -> dict[str, Any]:
+        """Validate and import a batch of pre-translated chapters directly into peer/admin review."""
+        self._check_write_rate(ctx)
+        self._sweep_stale_evaluating()
+        assert_agent_admin_or_admin(ctx)
+
+        book = self.store.get_book(book_slug)
+        if book is None:
+            raise ServiceError(f"Book '{book_slug}' not found", status_code=404)
+        self._assert_book_work_access(ctx, book)
+        if book["status"] == "rejected":
+            raise ServiceError(f"Book '{book_slug}' is rejected", status_code=409)
+        if book["status"] == "pending_approval" and ctx.tier != "ADMIN" and book.get("proposed_by") != ctx.handle:
+            raise AuthError(
+                "Only ADMIN or the agent_admin who proposed this book may import translations before intake approval",
+                status_code=403,
+            )
+
+        if not isinstance(chapters, list) or not chapters:
+            raise ServiceError("chapters must be a non-empty list of chapter objects", status_code=400)
+        if len(chapters) > MAX_IMPORT_CHAPTERS_BATCH:
+            raise ServiceError(
+                f"chapters batch exceeds maximum of {MAX_IMPORT_CHAPTERS_BATCH} items",
+                status_code=400,
+            )
+
+        normalized_items: list[dict[str, str]] = []
+        seen_ids: set[str] = set()
+        batch_bytes = 0
+        for idx, raw in enumerate(chapters):
+            if not isinstance(raw, dict):
+                raise ServiceError(f"chapters[{idx}] must be an object", status_code=400)
+            ch_id = str(raw.get("chapter_id") or "").strip().lower()
+            if not _PROPOSED_CHAPTER_ID_RE.match(ch_id) or ch_id in seen_ids:
+                raise ServiceError(
+                    f"Invalid or duplicate chapter_id '{ch_id}' in batch",
+                    status_code=400,
+                )
+            seen_ids.add(ch_id)
+            tr_xml = str(raw.get("translation_xml") or "")
+            if not tr_xml.strip():
+                raise ServiceError(
+                    f"Chapter '{ch_id}' must supply non-empty translation_xml",
+                    status_code=400,
+                )
+            tr_bytes = len(tr_xml.encode("utf-8"))
+            if tr_bytes > MAX_MCP_XML_BYTES:
+                raise ServiceError(
+                    f"Chapter '{book_slug}/{ch_id}' translation_xml exceeds {MAX_MCP_XML_BYTES}-byte cap",
+                    status_code=413,
+                )
+            batch_bytes += tr_bytes
+            if batch_bytes > MAX_BOOK_PROPOSAL_BYTES:
+                raise ServiceError("Batch import payload exceeds 5 MiB cap", status_code=413)
+            normalized_items.append({"chapter_id": ch_id, "translation_xml": tr_xml})
+
+        # Auto-unpack proposed chapters if book was waiting in approved_pending_parse or own pending_approval
+        existing_chapters = self.store.list_chapters(book_slug)
+        if not existing_chapters:
+            prop_chs = book.get("proposed_chapters") or []
+            if prop_chs or (book.get("source_text") or "").strip():
+                extracted = self.git_sync.prepare_book_files(
+                    slug=book_slug,
+                    manifest=book["manifest"],
+                    source_filename=book.get("source_filename") or f"{book_slug}.md",
+                    source_text=book.get("source_text") or "",
+                    proposed_chapters=prop_chs or None,
+                    initial_book_record=book.get("book_record") or None,
+                    initial_brief=book.get("brief") or None,
+                )
+                if not extracted:
+                    raise ServiceError(f"Zero chapters extracted for '{book_slug}'", status_code=422)
+                self.store.replace_unaccepted_chapters(
+                    book_slug=book_slug,
+                    chapters=extracted,
+                    unlock_all=bool(unlock_all_chapters),
+                )
+                existing_chapters = self.store.list_chapters(book_slug)
+
+        ch_by_id = {c["chapter_id"]: c for c in existing_chapters}
+        eff_sha = str(book.get("glossary_sha") or "") or _compute_glossary_sha(book.get("book_record") or {})
+        eff_engine = (engine_model or "trusted-import").strip() or "trusted-import"
+
+        # Phase 1: Validate ALL chapters before mutating any submission row (atomic rollback on error)
+        staged: list[tuple[dict[str, Any], str, str, Optional[dict[str, Any]]]] = []
+        for item in normalized_items:
+            ch_id = item["chapter_id"]
+            ch_row = ch_by_id.get(ch_id)
+            if ch_row is None:
+                raise ServiceError(f"Chapter '{book_slug}/{ch_id}' not found", status_code=404)
+            if ch_row["status"] == "accepted":
+                raise ServiceError(f"Chapter '{book_slug}/{ch_id}' is already accepted", status_code=409)
+
+            subs_for_ch = self.store.list_submissions(book_slug=book_slug, chapter_id=ch_id)
+            eval_sub = next((s for s in subs_for_ch if s["status"] == "evaluating"), None)
+            if eval_sub is not None:
+                raise ServiceError(
+                    f"Chapter '{book_slug}/{ch_id}' is actively evaluating in submission '{eval_sub['id']}'",
+                    status_code=409,
+                )
+            other_active = next(
+                (
+                    s
+                    for s in subs_for_ch
+                    if s["status"] in {"pending_review", "pending_admin_approval"}
+                    and s["author_actor_id"] != ctx.actor_id
+                ),
+                None,
+            )
+            if other_active is not None:
+                raise ServiceError(
+                    f"Chapter '{book_slug}/{ch_id}' already has an active submission '{other_active['id']}' by '{other_active['author_handle']}'",
+                    status_code=409,
+                )
+
+            final_txt = self._validate_chapter_import_item(
+                book_slug=book_slug,
+                chapter_id=ch_id,
+                source_lang=str(book["source_lang"]),
+                manifest=book["manifest"],
+                glossary_sha=eff_sha,
+                source_xml=str(ch_row["source_xml"]),
+                translation_xml=item["translation_xml"],
+            )
+            own_existing = next(
+                (
+                    s
+                    for s in subs_for_ch
+                    if s["author_actor_id"] == ctx.actor_id
+                    and s["status"] in {"pending_review", "pending_admin_approval", "remediation_required"}
+                ),
+                None,
+            )
+            staged.append((ch_row, item["translation_xml"], final_txt, own_existing))
+
+        # Phase 2: Lock glossary, unlock locked_seed chapters if requested, activate book, and persist submissions
+        if not book.get("glossary_sha"):
+            self.store.set_book_brief_and_record(slug=book_slug, glossary_sha=eff_sha)
+        if unlock_all_chapters:
+            for c in existing_chapters:
+                if c["status"] == "locked_seed":
+                    self.store.upsert_chapter(
+                        book_slug=book_slug,
+                        chapter_id=c["chapter_id"],
+                        chapter_num=int(c["chapter_num"]),
+                        title=c["title"],
+                        source_xml=c["source_xml"],
+                        status="open",
+                        opened_at=time.time(),
+                    )
+        if book["status"] != "published":
+            self.store.set_book_status(slug=book_slug, status="active")
+
+        app_mode = str(book.get("approval_mode") or "peer")
+        imported_cnt = 0
+        updated_cnt = 0
+        saved_subs: list[dict[str, Any]] = []
+        for ch_row, tr_xml, final_txt, own_existing in staged:
+            saved = self._persist_imported_submission(
+                ctx,
+                book_slug=book_slug,
+                chapter_id=ch_row["chapter_id"],
+                translation_xml=tr_xml,
+                final_txt=final_txt,
+                engine_model=eff_engine,
+                approval_mode=app_mode,
+                existing_sub=own_existing,
+            )
+            if own_existing is not None:
+                updated_cnt += 1
+            else:
+                imported_cnt += 1
+            saved_subs.append(_sanitize_submission_public(saved))
+
+        fresh_book = self.store.get_book(book_slug) or book
+        return {
+            "book_slug": book_slug,
+            "book_status": fresh_book["status"],
+            "glossary_sha": fresh_book["glossary_sha"],
+            "imported_count": imported_cnt,
+            "updated_count": updated_cnt,
+            "submissions": saved_subs,
+        }
 
     def update_book_record(
         self,
@@ -1545,9 +2124,8 @@ class CollabMcpService:
         proposals = (submission.get("additions") or {}).get("proposals") or []
         updated_record = _merge_proposals_into_record(book["book_record"], proposals)
         glossary_sha = book["glossary_sha"]
-        if chapter_id == "ch01" or not glossary_sha:
-            canonical_bytes = json.dumps(updated_record, sort_keys=True, ensure_ascii=False).encode("utf-8")
-            glossary_sha = hashlib.sha256(canonical_bytes).hexdigest()
+        if not glossary_sha:
+            glossary_sha = _compute_glossary_sha(updated_record)
 
         self.store.mark_chapter_accepted(
             book_slug=slug,
@@ -1581,7 +2159,11 @@ class CollabMcpService:
         new_book_status = "published" if all_done else "active"
 
         peer_revs = self.store.list_peer_reviews(submission["id"])
-        rev_handles = [r["reviewer_handle"] for r in peer_revs] + ["review-vinhthang-dev"]
+        rev_handles = [r["reviewer_handle"] for r in peer_revs]
+        if submission.get("workstream_id"):
+            rev_handles.append("review-vinhthang-dev")
+        elif not rev_handles:
+            rev_handles.append("admin-override")
         avg_score = (
             sum(float(r["weighted_score"]) for r in peer_revs) / len(peer_revs)
             if peer_revs
@@ -2031,6 +2613,7 @@ class CollabMcpService:
         hold_for_review: bool = False,
         background: bool = False,
         queue_for_parse: bool = False,
+        unlock_all_chapters: bool = False,
     ) -> dict[str, Any]:
         assert_admin(ctx)
         book = self.store.get_book(book_slug)
@@ -2048,6 +2631,7 @@ class CollabMcpService:
             self.store.set_book_status(slug=book_slug, status="approved_pending_parse")
             return self.get_book(ctx, book_slug=book_slug)
 
+        should_unlock = bool(unlock_all_chapters and not auto_seed)
         existing_chapters = self.store.list_chapters(book_slug)
         if not existing_chapters:
             extracted = self.git_sync.prepare_book_files(
@@ -2063,7 +2647,7 @@ class CollabMcpService:
                 raise ServiceError(f"Zero chapters extracted for '{book_slug}'", status_code=422)
 
             for ch_item in extracted:
-                st = "open" if ch_item["chapter_id"] == "ch01" else "locked_seed"
+                st = "open" if (should_unlock or ch_item["chapter_id"] == "ch01") else "locked_seed"
                 self.store.upsert_chapter(
                     book_slug=book_slug,
                     chapter_id=ch_item["chapter_id"],
@@ -2072,6 +2656,18 @@ class CollabMcpService:
                     source_xml=ch_item["source_xml"],
                     status=st,
                 )
+        elif should_unlock:
+            for ch_item in existing_chapters:
+                if ch_item["status"] == "locked_seed":
+                    self.store.upsert_chapter(
+                        book_slug=book_slug,
+                        chapter_id=ch_item["chapter_id"],
+                        chapter_num=int(ch_item["chapter_num"]),
+                        title=ch_item["title"],
+                        source_xml=ch_item["source_xml"],
+                        status="open",
+                        opened_at=time.time(),
+                    )
 
         if auto_seed:
             return self.seed_book(
@@ -2079,6 +2675,11 @@ class CollabMcpService:
                 book_slug=book_slug,
                 hold_for_review=hold_for_review,
                 background=background,
+            )
+        if should_unlock and not book.get("glossary_sha"):
+            self.store.set_book_brief_and_record(
+                slug=book_slug,
+                glossary_sha=_compute_glossary_sha(book.get("book_record") or {}),
             )
         self.store.set_book_status(slug=book_slug, status="active")
         return self.get_book(ctx, book_slug=book_slug)

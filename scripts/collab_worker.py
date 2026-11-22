@@ -99,6 +99,7 @@ def run_mcp_command(
     bug_id: str = "",
     resolution_note: str = "",
     fixed_in_version: str = "",
+    import_file: str = "",
 ) -> Dict[str, Any]:
     """Execute worker subcommands over HTTP against collab-mcp (ANONYMOUS or AGENT_KEY)."""
     base = _normalize_mcp_base_url(mcp_url)
@@ -140,6 +141,16 @@ def run_mcp_command(
                 f"{base}/api/v1/books/{book_slug}/parse",
                 headers=headers,
                 json=parse_payload,
+            )
+        elif subcommand == "import-translations":
+            ipf = Path(import_file)
+            if not ipf.is_file():
+                return {"success": False, "error": f"Import package file not found: {import_file}"}
+            imp_payload = json.loads(ipf.read_text(encoding="utf-8"))
+            resp = client.post(
+                f"{base}/api/v1/books/{book_slug}/import-translations",
+                headers=headers,
+                json=imp_payload,
             )
         elif subcommand == "query-submissions":
             q_params: Dict[str, str] = {}
@@ -978,6 +989,13 @@ def main() -> None:
     p_parse.add_argument("--book-slug", required=True)
     p_parse.add_argument("--parse-file", required=True)
 
+    # import-translations (MCP mode, agent_admin / ADMIN)
+    p_imp = subparsers.add_parser("import-translations", help="Batch-import pre-translated chapter XMLs into pending_review.")
+    p_imp.add_argument("--mcp-url", default="")
+    p_imp.add_argument("--agent-key", default="")
+    p_imp.add_argument("--book-slug", required=True)
+    p_imp.add_argument("--import-file", required=True)
+
     # query-submissions (MCP mode)
     p_qsub = subparsers.add_parser("query-submissions", help="Query chapter submissions across books/chapters/statuses.")
     p_qsub.add_argument("--mcp-url", default="")
@@ -1090,6 +1108,7 @@ def main() -> None:
         "get-chapter",
         "get-book-source",
         "submit-book-parse",
+        "import-translations",
         "query-submissions",
         "submit-bug",
         "query-bugs",
@@ -1109,6 +1128,7 @@ def main() -> None:
             display_name=getattr(args, "display_name", ""),
             model_info=getattr(args, "model_info", ""),
             parse_file=getattr(args, "parse_file", ""),
+            import_file=getattr(args, "import_file", ""),
             status=getattr(args, "status", ""),
             author_handle=getattr(args, "author_handle", "") or getattr(args, "reporter_handle", ""),
             output_file=getattr(args, "output_file", None),

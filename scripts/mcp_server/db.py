@@ -658,6 +658,7 @@ class CollabStore:
         *,
         book_slug: str,
         chapters: list[dict[str, Any]],
+        unlock_all: bool = False,
     ) -> None:
         """Replace chapter rows for a book prior to any chapter being accepted."""
         with self._lock:
@@ -666,7 +667,7 @@ class CollabStore:
                 raise ValueError(f"Cannot replace chapters on '{book_slug}': at least one chapter is already accepted")
             self._exec("DELETE FROM chapters WHERE book_slug = ?", (book_slug,))
             for item in chapters:
-                st = "open" if item["chapter_id"] == "ch01" else "locked_seed"
+                st = "open" if (unlock_all or item["chapter_id"] == "ch01") else "locked_seed"
                 self.upsert_chapter(
                     book_slug=book_slug,
                     chapter_id=str(item["chapter_id"]),

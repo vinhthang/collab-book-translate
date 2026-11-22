@@ -39,17 +39,17 @@ _REQ_CLIENT_IP: contextvars.ContextVar[str] = contextvars.ContextVar(
 
 MCP_SERVER_INSTRUCTIONS = """You are connected to Collab Books (https://collab.vinhthang.dev/mcp), a collaborative multi-agent book translation hub (EN/ZH -> VI) synced to vinhthang/collab-books.
 
-Quick Autonomous Workflow (v4.1.0):
+Quick Autonomous Workflow (v4.2.0):
 1. Identity (Automatic): Call register_agent(model_info="<your-model>") once with no required handle to receive a permanent, easy-to-read 3-word AGENT_KEY (e.g. amber-fox-river). Save it and pass agent_key="<your-3-word-key>" on all future calls. If skipped on a public book, an AGENT_KEY is auto-assigned on your first claim_chapter or submit_translation.
-2. Agent Admin Parsing & Curation (role="agent_admin"): Human /admin promotes trusted 3-word AGENT_KEYs to agent_admin. When Human /admin clicks Approve (Queue for Agent Admin Parse), the book enters approved_pending_parse. An agent_admin calls list_tasks(role="agent_admin", agent_key=...), fetches the raw manuscript via get_book_source(book_slug, agent_key=...), runs its own LLM + local Python script (never uploaded/executed on the server) to strip boilerplate, split chapters, and author brief + rich book_record (names, terms, pronouns), uploads via submit_book_parse(...), and seeds ch01 (seeding books reserve ch01 strictly for agent_admin/ADMIN). Pre-lock updates use update_book_record(...).
+2. Trusted Intake, Agent Admin Parsing & Curation (role="agent_admin" or ADMIN): Human /admin promotes trusted 3-word AGENT_KEYs to agent_admin. Trusted submitters (ADMIN or agent_admin) calling submit_book_proposal bypass pending_approval automatically: raw manuscripts enter approved_pending_parse, while pre-split chapters with a curated book_record (or unlock_all_chapters=True / translation_xml drafts) lock glossary_sha, open ch01..chNN, and stage imported chapters directly in pending_review. Untrusted contributor/ANONYMOUS proposals still queue in pending_approval. For raw manuscripts, fetch source via get_book_source, parse/curate via submit_book_parse / update_book_record, or use import_chapter_translations(book_slug, chapters, ...) for fast validated batch uploads (1..50 chapters per call) into pending_review.
 3. Discover & Full-Transparency Work Querying: Call list_tasks(role="translator"|"reviewer"|"agent_admin"|"all", agent_key=...). Call get_book, get_chapter(book_slug, chapter_id, include_neighbors=True, agent_key=...) for <segment id="S-NNNN"> source XML, brief, book_record, and continuity neighbors (prev_chapter source/translated tails, next_chapter source head, ch01 seed voice), query_submissions(...) across chapters, or get_submission_status(submission_id, include_context=True, include_workstream=True, agent_key=...) for rounds_history and specialist findings. Restricted books require your 3-word AGENT_KEY on the book allowlist.
-4. Proposing Books: Call submit_book_proposal(...) with raw source_text (for agent_admin parsing after /admin approval) OR pre-split chapters=[{"chapter_id":"ch01","title":"...","source_text|source_xml":"..."}] plus optional brief and book_record. New proposals default to approval_mode="peer".
+4. Proposing Books: Call submit_book_proposal(...) with raw source_text OR pre-split chapters=[{"chapter_id":"ch01","title":"...","source_text|source_xml":"...","translation_xml?":"..."}] plus optional brief, book_record, and unlock_all_chapters. New proposals default to approval_mode="peer".
 5. Translate Strictly to Contract:
    - Output every <segment id="S-NNNN" type="..."> in exact 1:1 ID order.
    - Keep <original>...</original>, fenced code blocks (```...```), and Markdown image links (![...](...)) 100% byte-identical.
    - Add natural literary Vietnamese inside <translate>...</translate> honoring brief.json and book_record.json.
    - For Chinese sources (source_lang="zh"), also include non-empty <hanviet>...</hanviet> in every segment.
-6. Submit, Revise & Peer Adjudicate: Call submit_translation(...). If status is remediation_required, inspect open_findings and re-submit using submission_id (+ your agent_key or revision_token) with fixed XML and/or rebuttals=[{"findingKey":"...","rationale":"..."}]. On approval_mode="peer" books, passing review.vinhthang.dev enters pending_review: an independent peer reviewer (reviewer != author) calls submit_review(submission_id, body_md, verdict="APPROVE"|"CHANGES_REQUESTED"|"COMMENT", issues=[...], agent_key=...) with at least one S-NNNN note and all 6 scores (1.0-5.0: Fidelity, Fluency, Terminology, Register, Structure, Completeness). APPROVE with weighted_score >= 4.0 and zero critical issues merges to accepted; CHANGES_REQUESTED returns the submission to remediation_required.
+6. Submit, Revise & Peer Adjudicate: Call submit_translation(...) (or import_chapter_translations for agent_admin/ADMIN pre-translated batches). If status is remediation_required, inspect open_findings and re-submit using submission_id (+ your agent_key or revision_token) with fixed XML and/or rebuttals=[{"findingKey":"...","rationale":"..."}]. On approval_mode="peer" books, passing review.vinhthang.dev or imported chapters enter pending_review: an independent peer reviewer (reviewer != author) calls submit_review(submission_id, body_md, verdict="APPROVE"|"CHANGES_REQUESTED"|"COMMENT", issues=[...], agent_key=...) with at least one S-NNNN note and all 6 scores (1.0-5.0: Fidelity, Fluency, Terminology, Register, Structure, Completeness). APPROVE with weighted_score >= 4.0 and zero critical issues merges to accepted; CHANGES_REQUESTED returns the submission to remediation_required.
 7. Bug Reporting & Triage: Check query_bug_reports(...) before filing duplicates, report reproducible hub defects via submit_bug_report(title, body_md, severity="P1", ...), and agent_admin/ADMIN triage open_bug_reports via triage_bug_report(bug_id, status="accepted"|"fixed"|"declined", resolution_note, fixed_in_version?)."""
 
 
@@ -86,7 +86,7 @@ class RequestContextMiddleware:
 
 def _render_llms_txt(cfg: McpServerConfig) -> str:
     base = cfg.public_base_url
-    return f"""# Collab Books MCP & REST Hub (v4.1.0)
+    return f"""# Collab Books MCP & REST Hub (v4.2.0)
 
 > Public multi-agent literary & technical book translation hub ({cfg.books_repo_full_name}). Supports zero-credential `ANONYMOUS` access, automatically generated easy-to-read 3-word `AGENT_KEY`s (e.g. `amber-fox-river`), scoped `agent_admin` parsing & curation, full-transparency continuity & workstream queries, per-book write-restricted allowlists, peer/manual/auto chapter approval (`approval_mode`), and automated multi-specialist Vietnamese translation review via `https://review.vinhthang.dev`.
 
@@ -129,8 +129,9 @@ def _render_llms_txt(cfg: McpServerConfig) -> str:
 - `list_books(include_pending?, agent_key?, admin_token?)`
 - `get_book(book_slug, agent_key?, admin_token?)` — Includes `brief`, `book_record`, `collab_ledger`, `pending_additions`.
 - `get_book_source(book_slug, agent_key?)` — Fetch full raw manuscript (`source_text`) for parsing/reference.
-- `submit_book_parse(book_slug, chapters, brief?, book_record?, parse_notes?, agent_key?)` (`agent_admin` / `ADMIN`)
-- `update_book_record(book_slug, brief?, book_record?, additions?, agent_key?)` (`agent_admin` / `ADMIN`)
+- `submit_book_parse(book_slug, chapters?, brief?, book_record?, parse_notes?, unlock_all_chapters?, agent_key?, admin_token?)` (`agent_admin` / `ADMIN`)
+- `import_chapter_translations(book_slug, chapters, engine_model?, unlock_all_chapters?, agent_key?, admin_token?)` (`agent_admin` / `ADMIN` batch import into `pending_review`)
+- `update_book_record(book_slug, brief?, book_record?, additions?, agent_key?, admin_token?)` (`agent_admin` / `ADMIN`)
 - `list_tasks(role?, book_slug?, agent_key?)` (`translator` | `reviewer` | `agent_admin` | `all`)
 - `get_chapter(book_slug, chapter_id, include_neighbors?, neighbor_segments?, agent_key?)` — Includes `brief`, `book_record`, `neighbors`, and chapter `submissions`.
 - `claim_chapter(book_slug, chapter_id, agent_key?)`
@@ -436,6 +437,26 @@ document.querySelectorAll('.js-approve-open').forEach(btn => {
     if (out.ok) {
       msg.style.color = '#6ee7b7';
       msg.textContent = 'Approved & opened ch01 for agents. Reloading...';
+      setTimeout(() => location.reload(), 700);
+    }
+  });
+});
+
+document.querySelectorAll('.js-approve-open-all').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const slug = btn.dataset.slug;
+    const msg = document.getElementById('prop-msg-' + slug);
+    btn.disabled = true;
+    const out = await postJson(
+      '/admin/books/' + encodeURIComponent(slug) + '/approve',
+      { auto_seed: false, unlock_all_chapters: true },
+      msg,
+      'Locking glossary and opening all chapters for agents/import...'
+    );
+    btn.disabled = false;
+    if (out.ok) {
+      msg.style.color = '#6ee7b7';
+      msg.textContent = 'Approved & opened all chapters! Reloading...';
       setTimeout(() => location.reload(), 700);
     }
   });
@@ -773,6 +794,8 @@ def _render_admin_proposal_card(b: dict[str, Any]) -> str:
         if preview
         else ""
     )
+    parse_btn_cls = "btn btn-sec" if presplit_cnt > 0 else "btn"
+    open_all_btn_cls = "btn" if presplit_cnt > 0 else "btn btn-sec"
     return f"""<div class="card card-action">
       <div class="row-flex">
         <div>
@@ -784,7 +807,8 @@ def _render_admin_proposal_card(b: dict[str, Any]) -> str:
       {presplit_details}
       {preview_block}
       <div class="btn-row">
-        <button class="btn js-approve-queue-parse" data-slug="{esc_slug}">Approve (Queue for Agent Admin Parse)</button>
+        <button class="{open_all_btn_cls} js-approve-open-all" data-slug="{esc_slug}">Approve &amp; Open All Chapters</button>
+        <button class="{parse_btn_cls} js-approve-queue-parse" data-slug="{esc_slug}">Approve (Queue for Agent Admin Parse)</button>
         <button class="btn btn-sec js-approve-seed-review" data-hold="1" data-slug="{esc_slug}">Approve &amp; Seed to Review</button>
         <button class="btn btn-sec js-approve-seed" data-hold="0" data-slug="{esc_slug}">Approve &amp; Seed (Auto-Merge)</button>
         <button class="btn btn-sec js-approve-open" data-slug="{esc_slug}">Approve &amp; Open ch01 (for Agents)</button>
@@ -1217,7 +1241,7 @@ def create_app(
     mcp = MCPServer(
         "collab-books",
         title="Collab Books Multi-Agent Translation Hub",
-        version="4.1.0",
+        version="4.2.0",
         website_url=eff_cfg.public_base_url,
         instructions=MCP_SERVER_INSTRUCTIONS,
     )
@@ -1362,20 +1386,23 @@ def create_app(
     @_mcp_safe
     def submit_book_parse(
         book_slug: str,
-        chapters: list[dict[str, Any]],
+        chapters: Optional[list[dict[str, Any]]] = None,
         brief: Optional[dict[str, Any]] = None,
         book_record: Optional[dict[str, Any]] = None,
         parse_notes: str = "",
+        unlock_all_chapters: bool = False,
         agent_key: str = "",
+        admin_token: str = "",
     ) -> dict[str, Any]:
-        """AGENT_ADMIN / ADMIN: Upload locally parsed chapters=[{'chapter_id','title','source_text'|'source_xml'}], brief={genre,register,audience,style_rules,strategy}, and rich book_record={names,terms,pronouns|characters,pronoun_pairs} for an approved_pending_parse (or pre-lock seeding/seed_failed) book, transitioning it to seeding with ch01 open."""
+        """AGENT_ADMIN / ADMIN: Upload locally parsed chapters=[{'chapter_id','title','source_text'|'source_xml','translation_xml'?}], brief, and rich book_record. Set unlock_all_chapters=True (or supply translation_xml drafts) to lock glossary_sha and open ch01..chNN immediately."""
         book = eff_service.submit_book_parse(
-            _ctx(agent_key or None),
+            _ctx(agent_key or None, admin_token or None),
             book_slug=book_slug,
             chapters=chapters,
             brief=brief,
             book_record=book_record,
             parse_notes=parse_notes,
+            unlock_all_chapters=unlock_all_chapters,
         )
         return {"book": book}
 
@@ -1387,10 +1414,11 @@ def create_app(
         book_record: Optional[dict[str, Any]] = None,
         additions: Optional[dict[str, Any]] = None,
         agent_key: str = "",
+        admin_token: str = "",
     ) -> dict[str, Any]:
         """AGENT_ADMIN / ADMIN: Curate or extend a book's brief and book_record (full replacement allowed before ch01 glossary_sha lock; additive additions={'proposals':[...]} thereafter)."""
         book = eff_service.update_book_record(
-            _ctx(agent_key or None),
+            _ctx(agent_key or None, admin_token or None),
             book_slug=book_slug,
             brief=brief,
             book_record=book_record,
@@ -1456,11 +1484,14 @@ def create_app(
         book_record: Optional[dict[str, Any]] = None,
         approval_mode: str = "",
         genre: str = "fiction",
+        unlock_all_chapters: bool = False,
+        queue_for_parse: bool = False,
         agent_key: str = "",
+        admin_token: str = "",
     ) -> dict[str, Any]:
-        """Propose a public-domain or permissively licensed book (held in pending_approval until Admin approves; defaults approval_mode='peer'). Supports flat source_text (for external agent_admin parsing) OR pre-split chapters=[{'chapter_id','title','source_text'|'source_xml'}] plus optional brief and book_record."""
+        """Propose a book (trusted ADMIN / agent_admin bypasses pending_approval automatically; contributor / ANONYMOUS waits in pending_approval; defaults approval_mode='peer'). Supports raw source_text OR pre-split chapters=[{'chapter_id','title','source_text'|'source_xml','translation_xml'?}], brief, book_record, and unlock_all_chapters."""
         return eff_service.submit_book_proposal(
-            _ctx(agent_key or None),
+            _ctx(agent_key or None, admin_token or None),
             slug=slug,
             title=title,
             author=author,
@@ -1474,6 +1505,27 @@ def create_app(
             brief=brief,
             book_record=book_record,
             approval_mode=approval_mode or None,
+            unlock_all_chapters=unlock_all_chapters,
+            queue_for_parse=queue_for_parse,
+        )
+
+    @mcp.tool()
+    @_mcp_safe
+    def import_chapter_translations(
+        book_slug: str,
+        chapters: list[dict[str, Any]],
+        engine_model: str = "trusted-import",
+        unlock_all_chapters: bool = True,
+        agent_key: str = "",
+        admin_token: str = "",
+    ) -> dict[str, Any]:
+        """AGENT_ADMIN / ADMIN: Deterministically validate and batch-import 1..50 pre-translated chapters=[{'chapter_id','translation_xml'}] directly into pending_review (or pending_admin_approval on manual books), auto-unlocking chapters and locking glossary_sha."""
+        return eff_service.import_chapter_translations(
+            _ctx(agent_key or None, admin_token or None),
+            book_slug=book_slug,
+            chapters=chapters,
+            engine_model=engine_model,
+            unlock_all_chapters=unlock_all_chapters,
         )
 
     @mcp.tool()
@@ -1489,10 +1541,11 @@ def create_app(
         rebuttals: Optional[list[dict[str, str]]] = None,
         background: bool = False,
         agent_key: str = "",
+        admin_token: str = "",
     ) -> dict[str, Any]:
         """Submit or revise chapter translation XML and run automated review.vinhthang.dev critique (pass background=True on long chapters to return status='evaluating' immediately and poll via get_submission_status). Requirements: exact 1:1 <segment id='S-NNNN'> order, byte-identical <original>, fenced code blocks, and ![...](...) images, natural Vietnamese inside <translate>, plus non-empty <hanviet> on every segment when source_lang='zh'. For Round 2/3 revisions, pass submission_id + your agent_key (or revision_token) and optional rebuttals=[{'findingKey','rationale'}]. Passing chapters enter pending_review on approval_mode='peer' books, auto-commit on 'auto', or enter pending_admin_approval on 'manual'."""
         _, payload = eff_service.submit_translation(
-            _ctx(agent_key or None),
+            _ctx(agent_key or None, admin_token or None),
             book_slug=book_slug,
             chapter_id=chapter_id,
             translation_xml=translation_xml,
@@ -1623,9 +1676,10 @@ def create_app(
         auto_seed: bool = True,
         hold_for_review: bool = False,
         background: bool = False,
+        unlock_all_chapters: bool = False,
         admin_token: str = "",
     ) -> dict[str, Any]:
-        """ADMIN: Approve a proposed book. Set queue_for_parse=True to place it in approved_pending_parse for external agent_admin parsing; otherwise extract chapters and auto-seed ch01 (auto_seed=True) or open ch01 directly (auto_seed=False)."""
+        """ADMIN: Approve a proposed book. Set queue_for_parse=True for agent_admin parsing; otherwise extract chapters and auto-seed ch01 (auto_seed=True), open ch01 (auto_seed=False), or unlock all chapters (auto_seed=False, unlock_all_chapters=True)."""
         return eff_service.approve_book_intake(
             _ctx(admin_token=admin_token or None),
             book_slug=book_slug,
@@ -1633,6 +1687,7 @@ def create_app(
             auto_seed=auto_seed,
             hold_for_review=hold_for_review,
             background=background,
+            unlock_all_chapters=unlock_all_chapters,
         )
 
     @mcp.tool()
@@ -1829,7 +1884,7 @@ def create_app(
             {
                 "status": "ok",
                 "service": "collab-mcp",
-                "version": "4.1.0",
+                "version": "4.2.0",
                 "books_repo": eff_cfg.books_repo_full_name,
             }
         )
@@ -1870,7 +1925,11 @@ def create_app(
             body = await _parse_json_body(request)
 
             def _work() -> dict[str, Any]:
-                ctx = _req_ctx(request, agent_key=body.get("agent_key"))
+                ctx = _req_ctx(
+                    request,
+                    agent_key=body.get("agent_key"),
+                    admin_token=body.get("admin_token"),
+                )
                 return eff_service.submit_book_proposal(
                     ctx,
                     slug=str(body.get("slug") or ""),
@@ -1887,6 +1946,8 @@ def create_app(
                     brief=body.get("brief"),
                     book_record=body.get("book_record"),
                     approval_mode=body.get("approval_mode"),
+                    unlock_all_chapters=bool(body.get("unlock_all_chapters", False)),
+                    queue_for_parse=bool(body.get("queue_for_parse", False)),
                 )
 
             return JSONResponse({"book": await _run_sync(_work)}, status_code=201)
@@ -1936,13 +1997,38 @@ def create_app(
                 return eff_service.submit_book_parse(
                     ctx,
                     book_slug=slug,
-                    chapters=raw_chapters or [],
+                    chapters=raw_chapters,
                     brief=body.get("brief"),
                     book_record=body.get("book_record"),
                     parse_notes=str(body.get("parse_notes") or ""),
+                    unlock_all_chapters=bool(body.get("unlock_all_chapters", False)),
                 )
 
             return JSONResponse({"book": await _run_sync(_work)})
+        except Exception as exc:
+            return _error_response(exc)
+
+    @mcp.custom_route("/api/v1/books/{slug}/import-translations", methods=["POST"])
+    async def api_import_chapter_translations(request: Request) -> Response:
+        try:
+            body = await _parse_json_body(request)
+
+            def _work() -> dict[str, Any]:
+                ctx = _req_ctx(
+                    request,
+                    agent_key=body.get("agent_key"),
+                    admin_token=body.get("admin_token"),
+                )
+                slug = str(request.path_params["slug"])
+                return eff_service.import_chapter_translations(
+                    ctx,
+                    book_slug=slug,
+                    chapters=body.get("chapters"),
+                    engine_model=str(body.get("engine_model") or "trusted-import"),
+                    unlock_all_chapters=bool(body.get("unlock_all_chapters", True)),
+                )
+
+            return JSONResponse(await _run_sync(_work))
         except Exception as exc:
             return _error_response(exc)
 
@@ -2047,7 +2133,11 @@ def create_app(
             body = await _parse_json_body(request)
 
             def _work() -> tuple[int, dict[str, Any]]:
-                ctx = _req_ctx(request, agent_key=body.get("agent_key"))
+                ctx = _req_ctx(
+                    request,
+                    agent_key=body.get("agent_key"),
+                    admin_token=body.get("admin_token"),
+                )
                 return eff_service.submit_translation(
                     ctx,
                     book_slug=str(body.get("book_slug") or ""),
@@ -2212,6 +2302,7 @@ def create_app(
                     auto_seed=bool(body.get("auto_seed", True)),
                     hold_for_review=bool(body.get("hold_for_review", False)),
                     background=bool(body.get("background", False)),
+                    unlock_all_chapters=bool(body.get("unlock_all_chapters", False)),
                 )
 
             book = await _run_sync(_work)
