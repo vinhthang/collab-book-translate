@@ -58,6 +58,13 @@ VALID_STRATEGIES = frozenset({"faithful", "idiomatic", "register-matched"})
 VALID_REVIEW_VERDICTS = frozenset({"COMMENT", "APPROVE", "CHANGES_REQUESTED"})
 VALID_BUG_SEVERITIES = frozenset({"P0", "P1", "P2", "P3"})
 VALID_BUG_STATUSES = frozenset({"open", "accepted", "fixed", "declined"})
+VALID_SECTION_TYPES = frozenset({"body", "front_matter", "back_matter", "boilerplate"})
+_SECTION_SORT_RANK = {
+    "body": 0,
+    "front_matter": 1,
+    "back_matter": 2,
+    "boilerplate": 3,
+}
 ACTIONABLE_SUBMISSION_STATUSES = frozenset(
     {"pending_review", "pending_admin_approval", "flagged_security", "escalated_to_admin"}
 )
@@ -71,6 +78,120 @@ _SUBMISSION_SORT_RANK = {
     "rejected": 6,
     "superseded": 7,
 }
+
+
+_XML_TAG_STRIP_RE = re.compile(r"<[^>]+>")
+_IMAGE_ONLY_LINE_RE = re.compile(r"^(?:!\[[^\]]*\]\([^)]+\)\s*)+$")
+
+
+def _classify_chapter_section_type(
+    chapter_id: str,
+    title: str,
+    source_xml: str,
+    *,
+    explicit: str = "",
+) -> str:
+    """Deterministically classify a chapter into body, front_matter, back_matter, or boilerplate."""
+    clean_exp = (explicit or "").strip().lower()
+    if clean_exp:
+        if clean_exp not in VALID_SECTION_TYPES:
+            raise ServiceError(
+                f"Invalid section_type '{explicit}' on '{chapter_id}' (expected one of body, front_matter, back_matter, boilerplate)",
+                status_code=400,
+            )
+        return clean_exp
+
+    clean_title = (title or "").strip()
+    low_title = clean_title.lower().strip("*_# ")
+    plain = " ".join(_XML_TAG_STRIP_RE.sub(" ", source_xml or "").split())
+    low_plain = plain.lower()
+    words = len(plain.split())
+
+    # 1. Pure publishing boilerplate (low-value to human/agent peer review)
+    if (
+        low_title in {"cover", "bìa sách", "bìa sách (cover)"}
+        or low_title.startswith("cover:")
+        or low_title.startswith("cover ")
+        or "title page" in low_title
+        or "trang nhan đề" in low_title
+        or _IMAGE_ONLY_LINE_RE.match(plain.strip())
+        or ("![cover:" in low_plain and words <= 60)
+    ):
+        return "boilerplate"
+
+    if (
+        "thank you for downloading this" in low_title
+        or "we hope you enjoyed reading this" in low_title
+        or "thank you for downloading this simon & schuster" in low_plain
+        or "we hope you enjoyed reading this simon & schuster" in low_plain
+        or "ebook-signup" in low_plain
+    ) and words <= 250:
+        return "boilerplate"
+
+    if (
+        low_title.startswith("avid reader press")
+        or ("isbn" in low_plain and ("copyright ©" in low_plain or "simon & schuster" in low_plain) and words <= 450)
+        or (low_title == "copyright" and words <= 350)
+    ):
+        return "boilerplate"
+
+    if (low_title.startswith("also from ") or low_title.startswith("also by ")) and words <= 350:
+        return "boilerplate"
+
+    if (
+        words <= 40
+        and re.match(r"^(?:part|phần)\s+[ivxlcdm0-9]+\b", low_title)
+        and "chapter" not in low_title
+        and "chương" not in low_title
+    ):
+        return "boilerplate"
+
+    # 2. Substantive front & back matter (still reviewed, ordered after body)
+    if (
+        low_title in {"dedication", "with appreciation", "how to read this book", "foreword", "preface"}
+        or low_title.startswith("why i’m sharing")
+        or low_title.startswith("why i'm sharing")
+        or low_title.startswith("note: my failure to cover")
+        or low_title == "the past is prologue"
+        or (
+            words <= 120
+            and low_title.startswith("dedication")
+            and "introduction" not in low_title
+        )
+    ):
+        return "front_matter"
+
+    if (
+        low_title.startswith("about the author")
+        or low_title.startswith("về tác giả")
+        or low_title in {"image descriptions", "acknowledgments", "acknowledgements", "bibliography", "index", "glossary", "endnotes"}
+    ):
+        return "back_matter"
+
+    return "body"
+
+
+def _attach_chapter_section_types(
+    extracted: list[dict[str, Any]],
+    proposed_chapters: Optional[list[dict[str, Any]]] = None,
+) -> list[dict[str, Any]]:
+    explicit_map = {
+        str(item.get("chapter_id") or ""): str(item.get("section_type") or "")
+        for item in (proposed_chapters or [])
+        if isinstance(item, dict) and item.get("chapter_id")
+    }
+    enriched: list[dict[str, Any]] = []
+    for item in extracted:
+        row = dict(item)
+        ch_id = str(row.get("chapter_id") or "")
+        row["section_type"] = _classify_chapter_section_type(
+            ch_id,
+            str(row.get("title") or ""),
+            str(row.get("source_xml") or ""),
+            explicit=explicit_map.get(ch_id, ""),
+        )
+        enriched.append(row)
+    return enriched
 
 
 def _normalize_approval_mode(approval_mode: str) -> str:
@@ -222,12 +343,20 @@ def _normalize_proposed_chapters(
 
         total_bytes += len(src_text.encode("utf-8")) + len(src_xml.encode("utf-8")) + len(tr_bytes)
         scan_chunks.append(f"{title}\n{src_text[:4000]}\n{src_scan}\n{tr_scan}")
+        explicit_sec = str(raw.get("section_type") or "").strip().lower()
+        if explicit_sec and explicit_sec not in VALID_SECTION_TYPES:
+            raise ServiceError(
+                f"Chapter '{ch_id}' has invalid section_type '{raw.get('section_type')}'",
+                status_code=400,
+            )
         entry: dict[str, str] = {
             "chapter_id": ch_id,
             "title": title,
             "source_text": src_text,
             "source_xml": src_xml,
         }
+        if explicit_sec:
+            entry["section_type"] = explicit_sec
         if tr_xml.strip():
             entry["translation_xml"] = tr_xml
         normalized.append(entry)
@@ -392,6 +521,11 @@ def _merge_proposals_into_record(
     merged = json.loads(json.dumps(book_record or {}))
     chars = merged.setdefault("characters", {})
     terms = merged.setdefault("terms", {})
+    names_list = merged.get("names") if isinstance(merged.get("names"), list) else None
+    term_entries = merged.get("term_entries") if isinstance(merged.get("term_entries"), list) else None
+    seen_names = {str(n.get("source") or "").strip() for n in (names_list or []) if isinstance(n, dict)}
+    seen_terms = {str(t.get("source") or "").strip() for t in (term_entries or []) if isinstance(t, dict)}
+
     for item in proposals:
         if not isinstance(item, dict):
             continue
@@ -402,16 +536,94 @@ def _merge_proposals_into_record(
         cat = str(item.get("category") or "term").lower()
         if "char" in cat or "name" in cat or "person" in cat:
             chars.setdefault(src, tgt)
+            if names_list is None:
+                names_list = merged.setdefault("names", [])
+            if src not in seen_names:
+                names_list.append(
+                    {
+                        "source": src,
+                        "target": tgt,
+                        "also_referred_to_as": [],
+                        "notes": str(item.get("notes") or "").strip(),
+                    }
+                )
+                seen_names.add(src)
         else:
             terms.setdefault(src, tgt)
+            if term_entries is None:
+                term_entries = merged.setdefault("term_entries", [])
+            if src not in seen_terms:
+                term_entries.append(
+                    {
+                        "source": src,
+                        "target": tgt,
+                        "match": str(item.get("match") or "word"),
+                        "case_sensitive": bool(item.get("case_sensitive", False)),
+                        "variants": [],
+                    }
+                )
+                seen_terms.add(src)
     return merged
 
 
-def _sanitize_submission_public(sub: dict[str, Any]) -> dict[str, Any]:
+def _sanitize_submission_public(sub: dict[str, Any], *, include_xml: bool = True) -> dict[str, Any]:
     out = dict(sub)
     out.pop("revision_token_sha256", None)
     out.pop("author_ip_hash", None)
+    out["submission_id"] = str(out.get("id") or "")
+    hist = out.get("rounds_history")
+    if isinstance(hist, list):
+        cleaned_hist: list[Any] = []
+        for entry in hist:
+            if isinstance(entry, dict):
+                c_entry = dict(entry)
+                c_entry.pop("translation_xml", None)
+                c_entry.pop("final_txt", None)
+                cleaned_hist.append(c_entry)
+            else:
+                cleaned_hist.append(entry)
+        out["rounds_history"] = cleaned_hist
+    if not include_xml:
+        out.pop("translation_xml", None)
+        out.pop("final_txt", None)
+        out.pop("rounds_history", None)
     return out
+
+
+def _summarize_submission_task(
+    sub: dict[str, Any],
+    book: dict[str, Any],
+    ch: Optional[dict[str, Any]],
+) -> dict[str, Any]:
+    """Return compact submission task metadata with full 36-char UUIDs and zero bulky XML payloads."""
+    xml_blob = str(sub.get("translation_xml") or (ch or {}).get("source_xml") or "")
+    ch_num = int((ch or {}).get("chapter_num") or 0)
+    if ch_num <= 0:
+        m_num = re.search(r"(\d+)", str(sub.get("chapter_id") or ""))
+        if m_num:
+            ch_num = int(m_num.group(1))
+    return {
+        "id": str(sub["id"]),
+        "submission_id": str(sub["id"]),
+        "book_slug": str(sub["book_slug"]),
+        "book_title": str(book.get("title") or sub["book_slug"]),
+        "chapter_id": str(sub["chapter_id"]),
+        "chapter_num": ch_num,
+        "chapter_title": str((ch or {}).get("title") or sub["chapter_id"]),
+        "section_type": str((ch or {}).get("section_type") or "body"),
+        "author_actor_id": str(sub.get("author_actor_id") or ""),
+        "author_handle": str(sub.get("author_handle") or ""),
+        "engine_model": str(sub.get("engine_model") or ""),
+        "status": str(sub.get("status") or ""),
+        "round_number": int(sub.get("round_number") or 0),
+        "max_rounds": int(sub.get("max_rounds") or 3),
+        "workstream_id": str(sub.get("workstream_id") or ""),
+        "segment_count": len(SEGMENT_BLOCK_RE.findall(xml_blob)),
+        "open_findings": list(sub.get("open_findings") or []),
+        "judge_summary": str(sub.get("judge_summary") or ""),
+        "created_at": str(sub.get("created_at") or ""),
+        "updated_at": str(sub.get("updated_at") or ""),
+    }
 
 
 def _sanitize_bug_public(bug: dict[str, Any], *, include_body: bool = True) -> dict[str, Any]:
@@ -468,6 +680,28 @@ class CollabMcpService:
             reason="Evaluation interrupted by server restart; please re-submit.",
         )
         self.store.supersede_all_accepted_chapter_drafts()
+        self._backfill_chapter_section_types()
+
+    def _backfill_chapter_section_types(self) -> int:
+        updated = 0
+        for bk in self.store.list_books(include_pending=True):
+            for ch in self.store.list_chapters(bk["slug"]):
+                cur_sec = str(ch.get("section_type") or "body").strip() or "body"
+                if cur_sec != "body":
+                    continue
+                inferred = _classify_chapter_section_type(
+                    str(ch["chapter_id"]),
+                    str(ch.get("title") or ""),
+                    str(ch.get("source_xml") or ""),
+                )
+                if inferred != cur_sec:
+                    self.store.update_chapter_section_type(
+                        book_slug=bk["slug"],
+                        chapter_id=str(ch["chapter_id"]),
+                        section_type=inferred,
+                    )
+                    updated += 1
+        return updated
 
     def _sweep_stale_evaluating(self) -> int:
         return self.store.recover_stale_evaluating_submissions(
@@ -643,6 +877,7 @@ class CollabMcpService:
                 "chapter_id": c["chapter_id"],
                 "chapter_num": c["chapter_num"],
                 "title": c["title"],
+                "section_type": str(c.get("section_type") or "body"),
                 "status": c["status"],
                 "claimed_by": c["claimed_by"],
                 "claim_expires_at": c["claim_expires_at"],
@@ -701,9 +936,21 @@ class CollabMcpService:
         *,
         role: str = "all",
         book_slug: Optional[str] = None,
+        section_type: Optional[str] = None,
+        include_matter: bool = True,
+        limit: int = 200,
+        offset: int = 0,
     ) -> dict[str, Any]:
         self._check_read_rate(ctx)
         self._sweep_stale_evaluating()
+        clean_sec = (section_type or "").strip().lower()
+        if clean_sec and clean_sec not in VALID_SECTION_TYPES:
+            raise ServiceError(
+                f"Invalid section_type '{section_type}' (expected body, front_matter, back_matter, or boilerplate)",
+                status_code=400,
+            )
+        eff_limit = max(1, min(int(limit), 500))
+        eff_offset = max(0, int(offset))
         now = time.time()
         is_coord = _is_coord(ctx)
         books = [self.store.get_book(book_slug)] if book_slug else self.store.list_books(include_pending=is_coord)
@@ -732,6 +979,7 @@ class CollabMcpService:
             slug = b["slug"]
             subs = self.store.list_submissions(book_slug=slug)
             book_chapters = self.store.list_chapters(slug)
+            ch_by_id = {c["chapter_id"]: c for c in book_chapters}
             ch_status_by_id = {c["chapter_id"]: c["status"] for c in book_chapters}
 
             if is_coord and role in {"all", "agent_admin"}:
@@ -772,6 +1020,11 @@ class CollabMcpService:
                 for c in book_chapters:
                     if c["status"] != "open" or c["chapter_id"] in pending_gate_chapters:
                         continue
+                    c_sec = str(c.get("section_type") or "body")
+                    if clean_sec and c_sec != clean_sec:
+                        continue
+                    if not include_matter and c_sec != "body":
+                        continue
                     claimed_other = (
                         bool(c["claimed_by"])
                         and c["claimed_by"] != ctx.actor_id
@@ -785,11 +1038,18 @@ class CollabMcpService:
                             "approval_mode": b["approval_mode"],
                             "chapter_id": c["chapter_id"],
                             "chapter_title": c["title"],
+                            "section_type": c_sec,
                             "claimed": claimed_other,
                             "claimed_by": c["claimed_by"] if claimed_other else "",
                         }
                     )
             for sub in subs:
+                ch_row = ch_by_id.get(sub["chapter_id"])
+                ch_sec = str((ch_row or {}).get("section_type") or "body")
+                if clean_sec and ch_sec != clean_sec:
+                    continue
+                if not include_matter and ch_sec != "body":
+                    continue
                 ch_open = ch_status_by_id.get(sub["chapter_id"]) == "open"
                 if (
                     b["status"] in {"active", "published", "seeding"}
@@ -798,26 +1058,38 @@ class CollabMcpService:
                     and sub["author_actor_id"] == ctx.actor_id
                     and sub["status"] == "remediation_required"
                 ):
-                    revisions_needed.append(_sanitize_submission_public(sub))
+                    revisions_needed.append(_summarize_submission_task(sub, b, ch_row))
                 if (
                     role in {"all", "reviewer"}
                     and sub["author_actor_id"] != ctx.actor_id
                     and (
                         (ch_open and sub["status"] in {"pending_review", "remediation_required", "pending_admin_approval"})
-                        or sub["status"] == "accepted"
+                        or (sub["status"] == "accepted" and ch_sec != "boilerplate")
                     )
                 ):
-                    review_targets.append(_sanitize_submission_public(sub))
+                    review_targets.append(_summarize_submission_task(sub, b, ch_row))
 
-        review_targets.sort(key=lambda s: _SUBMISSION_SORT_RANK.get(str(s.get("status") or ""), 99))
-        rev_cap = 200 if book_slug else 50
+        review_targets.sort(
+            key=lambda s: (
+                _SUBMISSION_SORT_RANK.get(str(s.get("status") or ""), 99),
+                _SECTION_SORT_RANK.get(str(s.get("section_type") or "body"), 99),
+                str(s.get("book_slug") or ""),
+                int(s.get("chapter_num") or 0),
+            )
+        )
+        total_reviews = len(review_targets)
+        paged_reviews = review_targets[eff_offset : eff_offset + eff_limit]
         return {
             "caller": {"tier": ctx.tier, "handle": ctx.handle, "agent_role": ctx.agent_role},
             "books_pending_parse": books_pending_parse,
             "books_pending_seed": books_pending_seed,
             "open_chapters": open_chapters,
             "revisions_needed": revisions_needed,
-            "peer_review_candidates": review_targets[:rev_cap],
+            "peer_review_candidates": paged_reviews,
+            "peer_review_total": total_reviews,
+            "peer_review_limit": eff_limit,
+            "peer_review_offset": eff_offset,
+            "peer_review_has_more": (eff_offset + len(paged_reviews)) < total_reviews,
             "open_bug_reports": open_bug_reports,
         }
 
@@ -915,6 +1187,7 @@ class CollabMcpService:
             "chapter_id": ch["chapter_id"],
             "chapter_num": ch["chapter_num"],
             "title": ch["title"],
+            "section_type": str(ch.get("section_type") or "body"),
             "status": ch["status"],
             "claimed_by": ch.get("claimed_by") or "",
             "claim_expires_at": ch.get("claim_expires_at") or 0,
@@ -1062,25 +1335,32 @@ class CollabMcpService:
         engine_model: str,
         approval_mode: str,
         existing_sub: Optional[dict[str, Any]] = None,
+        auto_accept: bool = False,
     ) -> dict[str, Any]:
-        """Insert or idempotently update an imported pre-translated chapter into peer/admin review."""
-        target_status = "pending_admin_approval" if approval_mode == "manual" else "pending_review"
-        summary_msg = f"Imported curated pre-translation by {ctx.handle} ({engine_model}); awaiting {target_status.replace('_', ' ')}."
+        """Insert or idempotently update an imported pre-translated chapter into peer/admin review or accepted."""
+        target_status = (
+            "accepted"
+            if auto_accept
+            else ("pending_admin_approval" if approval_mode == "manual" else "pending_review")
+        )
+        summary_msg = (
+            f"Auto-accepted low-value boilerplate by {ctx.handle} ({engine_model}); skipped peer review queue."
+            if auto_accept
+            else f"Imported curated pre-translation by {ctx.handle} ({engine_model}); awaiting {target_status.replace('_', ' ')}."
+        )
+        hist_entry = {
+            "round_number": (int(existing_sub.get("round_number") or 0) + 1) if existing_sub is not None else 1,
+            "type": "auto_boilerplate" if auto_accept else "trusted_import",
+            "engine_model": engine_model,
+            "verdict": "AUTO_ACCEPTED_BOILERPLATE" if auto_accept else "IMPORTED",
+            "stage_status": target_status.upper(),
+            "judge_summary": summary_msg,
+            "open_findings": [],
+        }
         if existing_sub is not None:
             hist = list(existing_sub.get("rounds_history") or [])
-            next_round = int(existing_sub.get("round_number") or 0) + 1
-            hist.append(
-                {
-                    "round_number": next_round,
-                    "type": "trusted_import",
-                    "engine_model": engine_model,
-                    "verdict": "IMPORTED",
-                    "stage_status": target_status.upper(),
-                    "judge_summary": summary_msg,
-                    "open_findings": [],
-                    "translation_xml": translation_xml,
-                }
-            )
+            next_round = int(hist_entry["round_number"])
+            hist.append(hist_entry)
             return self.store.update_submission(
                 existing_sub["id"],
                 status=target_status,
@@ -1096,18 +1376,7 @@ class CollabMcpService:
             )
 
         _raw_rt, rt_sha = mint_revision_token()
-        hist = [
-            {
-                "round_number": 1,
-                "type": "trusted_import",
-                "engine_model": engine_model,
-                "verdict": "IMPORTED",
-                "stage_status": target_status.upper(),
-                "judge_summary": summary_msg,
-                "open_findings": [],
-                "translation_xml": translation_xml,
-            }
-        ]
+        hist = [hist_entry]
         return self.store.create_submission(
             book_slug=book_slug,
             chapter_id=chapter_id,
@@ -1129,6 +1398,46 @@ class CollabMcpService:
             rounds_history=hist,
         )
 
+    def _persist_and_maybe_auto_accept_import(
+        self,
+        ctx: AuthContext,
+        *,
+        book_slug: str,
+        ch_row: dict[str, Any],
+        translation_xml: str,
+        final_txt: str,
+        engine_model: str,
+        approval_mode: str,
+        auto_approve_boilerplate: bool,
+        existing_sub: Optional[dict[str, Any]] = None,
+    ) -> tuple[dict[str, Any], bool]:
+        should_auto = (
+            bool(auto_approve_boilerplate)
+            and approval_mode != "manual"
+            and str(ch_row.get("section_type") or "body") == "boilerplate"
+        )
+        saved = self._persist_imported_submission(
+            ctx,
+            book_slug=book_slug,
+            chapter_id=str(ch_row["chapter_id"]),
+            translation_xml=translation_xml,
+            final_txt=final_txt,
+            engine_model=engine_model,
+            approval_mode=approval_mode,
+            existing_sub=existing_sub,
+            auto_accept=should_auto,
+        )
+        if should_auto:
+            fresh_book = self.store.get_book(book_slug)
+            if fresh_book is not None:
+                self._finalize_accepted_chapter(
+                    book=fresh_book,
+                    ch=ch_row,
+                    submission=saved,
+                    default_reviewer="auto-boilerplate",
+                )
+        return saved, should_auto
+
     def submit_book_proposal(
         self,
         ctx: AuthContext,
@@ -1149,6 +1458,7 @@ class CollabMcpService:
         approval_mode: Optional[str] = None,
         unlock_all_chapters: bool = False,
         queue_for_parse: bool = False,
+        auto_approve_boilerplate: bool = True,
     ) -> dict[str, Any]:
         self._check_write_rate(ctx)
         clean_slug = slug.strip().lower()
@@ -1253,6 +1563,7 @@ class CollabMcpService:
             )
             if not extracted:
                 raise ServiceError(f"Zero chapters extracted for '{clean_slug}'", status_code=422)
+            extracted = _attach_chapter_section_types(extracted, norm_chapters)
             has_translations = any(bool(c.get("translation_xml")) for c in norm_chapters)
             should_unlock = bool(unlock_all_chapters or _has_curated_book_record(merged_record) or has_translations)
             glossary_sha = _compute_glossary_sha(merged_record) if should_unlock else ""
@@ -1304,25 +1615,34 @@ class CollabMcpService:
                 chapters=extracted,
                 unlock_all=should_unlock,
             )
+        ch_row_by_id = {c["chapter_id"]: c for c in self.store.list_chapters(clean_slug)}
         imported_ids: list[str] = []
+        auto_accepted: list[str] = []
         for ch_id, tr_xml, final_txt in imported_rows:
-            saved_sub = self._persist_imported_submission(
+            ch_row = ch_row_by_id[ch_id]
+            saved_sub, did_auto = self._persist_and_maybe_auto_accept_import(
                 ctx,
                 book_slug=clean_slug,
-                chapter_id=ch_id,
+                ch_row=ch_row,
                 translation_xml=tr_xml,
                 final_txt=final_txt,
                 engine_model="trusted-import",
                 approval_mode=eff_approval_mode,
+                auto_approve_boilerplate=auto_approve_boilerplate,
             )
             imported_ids.append(str(saved_sub["id"]))
+            if did_auto:
+                auto_accepted.append(ch_id)
 
-        out = dict(book)
+        out = dict(self.store.get_book(clean_slug) or book)
         out.pop("source_text", None)
         out.pop("proposed_chapters", None)
         out["proposed_chapter_count"] = len(norm_chapters)
         if imported_ids:
             out["imported_submission_ids"] = imported_ids
+        if auto_accepted:
+            out["auto_accepted_chapters"] = auto_accepted
+            out["auto_accepted_count"] = len(auto_accepted)
         return out
 
     def submit_book_parse(
@@ -1390,6 +1710,7 @@ class CollabMcpService:
         )
         if not extracted:
             raise ServiceError(f"Zero chapters extracted for '{book_slug}'", status_code=422)
+        extracted = _attach_chapter_section_types(extracted, norm_chapters)
 
         has_translations = any(bool(c.get("translation_xml")) for c in norm_chapters)
         should_unlock = bool(unlock_all_chapters or has_translations)
@@ -1425,16 +1746,18 @@ class CollabMcpService:
         )
         self.store.set_book_status(slug=book_slug, status="active" if should_unlock else "seeding")
         app_mode = str(book.get("approval_mode") or "peer")
+        ch_row_by_id = {c["chapter_id"]: c for c in self.store.list_chapters(book_slug)}
         imported_ids: list[str] = []
         for ch_id, tr_xml, final_txt in imported_rows:
-            saved_sub = self._persist_imported_submission(
+            saved_sub, _ = self._persist_and_maybe_auto_accept_import(
                 ctx,
                 book_slug=book_slug,
-                chapter_id=ch_id,
+                ch_row=ch_row_by_id[ch_id],
                 translation_xml=tr_xml,
                 final_txt=final_txt,
                 engine_model="trusted-import",
                 approval_mode=app_mode,
+                auto_approve_boilerplate=True,
             )
             imported_ids.append(str(saved_sub["id"]))
 
@@ -1452,6 +1775,7 @@ class CollabMcpService:
         chapters: Any,
         engine_model: str = "trusted-import",
         unlock_all_chapters: bool = True,
+        auto_approve_boilerplate: bool = True,
     ) -> dict[str, Any]:
         """Validate and import a batch of pre-translated chapters directly into peer/admin review."""
         self._check_write_rate(ctx)
@@ -1506,7 +1830,13 @@ class CollabMcpService:
             batch_bytes += tr_bytes
             if batch_bytes > MAX_BOOK_PROPOSAL_BYTES:
                 raise ServiceError("Batch import payload exceeds 5 MiB cap", status_code=413)
-            normalized_items.append({"chapter_id": ch_id, "translation_xml": tr_xml})
+            explicit_sec = str(raw.get("section_type") or "").strip().lower()
+            if explicit_sec and explicit_sec not in VALID_SECTION_TYPES:
+                raise ServiceError(
+                    f"Chapter '{ch_id}' has invalid section_type '{raw.get('section_type')}'",
+                    status_code=400,
+                )
+            normalized_items.append({"chapter_id": ch_id, "translation_xml": tr_xml, "section_type": explicit_sec})
 
         # Auto-unpack proposed chapters if book was waiting in approved_pending_parse or own pending_approval
         existing_chapters = self.store.list_chapters(book_slug)
@@ -1524,6 +1854,7 @@ class CollabMcpService:
                 )
                 if not extracted:
                     raise ServiceError(f"Zero chapters extracted for '{book_slug}'", status_code=422)
+                extracted = _attach_chapter_section_types(extracted, prop_chs or None)
                 self.store.replace_unaccepted_chapters(
                     book_slug=book_slug,
                     chapters=extracted,
@@ -1576,6 +1907,14 @@ class CollabMcpService:
                 source_xml=str(ch_row["source_xml"]),
                 translation_xml=item["translation_xml"],
             )
+            if item.get("section_type") and item["section_type"] != ch_row.get("section_type"):
+                ch_row = dict(ch_row)
+                ch_row["section_type"] = item["section_type"]
+                self.store.update_chapter_section_type(
+                    book_slug=book_slug,
+                    chapter_id=ch_id,
+                    section_type=item["section_type"],
+                )
             own_existing = next(
                 (
                     s
@@ -1600,6 +1939,7 @@ class CollabMcpService:
                         title=c["title"],
                         source_xml=c["source_xml"],
                         status="open",
+                        section_type=str(c.get("section_type") or "body"),
                         opened_at=time.time(),
                     )
         if book["status"] != "published":
@@ -1608,22 +1948,26 @@ class CollabMcpService:
         app_mode = str(book.get("approval_mode") or "peer")
         imported_cnt = 0
         updated_cnt = 0
+        auto_accepted_chapters: list[str] = []
         saved_subs: list[dict[str, Any]] = []
         for ch_row, tr_xml, final_txt, own_existing in staged:
-            saved = self._persist_imported_submission(
+            saved, did_auto = self._persist_and_maybe_auto_accept_import(
                 ctx,
                 book_slug=book_slug,
-                chapter_id=ch_row["chapter_id"],
+                ch_row=ch_row,
                 translation_xml=tr_xml,
                 final_txt=final_txt,
                 engine_model=eff_engine,
                 approval_mode=app_mode,
+                auto_approve_boilerplate=auto_approve_boilerplate,
                 existing_sub=own_existing,
             )
             if own_existing is not None:
                 updated_cnt += 1
             else:
                 imported_cnt += 1
+            if did_auto:
+                auto_accepted_chapters.append(str(ch_row["chapter_id"]))
             saved_subs.append(_sanitize_submission_public(saved))
 
         fresh_book = self.store.get_book(book_slug) or book
@@ -1633,6 +1977,8 @@ class CollabMcpService:
             "glossary_sha": fresh_book["glossary_sha"],
             "imported_count": imported_cnt,
             "updated_count": updated_cnt,
+            "auto_accepted_count": len(auto_accepted_chapters),
+            "auto_accepted_chapters": auto_accepted_chapters,
             "submissions": saved_subs,
         }
 
@@ -1656,9 +2002,9 @@ class CollabMcpService:
         locked = bool(book.get("glossary_sha")) or any(
             c["status"] == "accepted" for c in self.store.list_chapters(book_slug)
         )
-        if locked and ctx.tier != "ADMIN" and (brief is not None or book_record is not None):
+        if locked and ctx.tier != "ADMIN" and book_record is not None:
             raise ServiceError(
-                "glossary_sha is already locked; agent_admin may only submit additive additions",
+                "glossary_sha is already locked; agent_admin may update brief or submit additive additions",
                 status_code=409,
             )
 
@@ -2118,6 +2464,7 @@ class CollabMcpService:
         book: dict[str, Any],
         ch: dict[str, Any],
         submission: dict[str, Any],
+        default_reviewer: str = "admin-override",
     ) -> None:
         slug = book["slug"]
         chapter_id = ch["chapter_id"]
@@ -2151,6 +2498,7 @@ class CollabMcpService:
                         title=other["title"],
                         source_xml=other["source_xml"],
                         status="open",
+                        section_type=str(other.get("section_type") or "body"),
                         opened_at=time.time(),
                     )
 
@@ -2163,7 +2511,7 @@ class CollabMcpService:
         if submission.get("workstream_id"):
             rev_handles.append("review-vinhthang-dev")
         elif not rev_handles:
-            rev_handles.append("admin-override")
+            rev_handles.append(default_reviewer)
         avg_score = (
             sum(float(r["weighted_score"]) for r in peer_revs) / len(peer_revs)
             if peer_revs
@@ -2230,7 +2578,7 @@ class CollabMcpService:
                     release_url=rel_info["release_url"],
                 )
 
-    def query_submissions(
+    def query_submissions_page(
         self,
         ctx: AuthContext,
         *,
@@ -2238,19 +2586,30 @@ class CollabMcpService:
         chapter_id: Optional[str] = None,
         status: Optional[str] = None,
         author_handle: Optional[str] = None,
-        limit: int = 50,
-    ) -> list[dict[str, Any]]:
-        """Query sanitized submissions across books accessible to the caller."""
+        section_type: Optional[str] = None,
+        include_xml: bool = True,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """Query paginated sanitized submissions across books accessible to the caller."""
         self._check_read_rate(ctx)
         self._sweep_stale_evaluating()
+        clean_sec = (section_type or "").strip().lower()
+        if clean_sec and clean_sec not in VALID_SECTION_TYPES:
+            raise ServiceError(
+                f"Invalid section_type '{section_type}' (expected body, front_matter, back_matter, or boilerplate)",
+                status_code=400,
+            )
         rows = self.store.list_submissions(
             book_slug=book_slug,
             chapter_id=chapter_id,
             status=status,
         )
         book_cache: dict[str, Optional[dict[str, Any]]] = {}
-        capped = max(1, min(int(limit), 200))
-        out: list[dict[str, Any]] = []
+        ch_cache: dict[tuple[str, str], Optional[dict[str, Any]]] = {}
+        eff_limit = max(1, min(int(limit), 500))
+        eff_offset = max(0, int(offset))
+        filtered: list[dict[str, Any]] = []
         for s in rows:
             slug = s["book_slug"]
             if slug not in book_cache:
@@ -2260,14 +2619,55 @@ class CollabMcpService:
                 continue
             if author_handle and s.get("author_handle") != author_handle.strip():
                 continue
-            item = _sanitize_submission_public(s)
+            c_key = (slug, str(s["chapter_id"]))
+            if c_key not in ch_cache:
+                ch_cache[c_key] = self.store.get_chapter(slug, str(s["chapter_id"]))
+            ch_row = ch_cache[c_key]
+            ch_sec = str((ch_row or {}).get("section_type") or "body")
+            if clean_sec and ch_sec != clean_sec:
+                continue
+            item = _sanitize_submission_public(s, include_xml=include_xml)
+            item["section_type"] = ch_sec
             revs = self.store.list_peer_reviews(s["id"])
             item["peer_reviews"] = revs
             item["peer_review_count"] = len(revs)
-            out.append(item)
-            if len(out) >= capped:
-                break
-        return out
+            filtered.append(item)
+
+        total = len(filtered)
+        paged = filtered[eff_offset : eff_offset + eff_limit]
+        return {
+            "submissions": paged,
+            "total": total,
+            "limit": eff_limit,
+            "offset": eff_offset,
+            "has_more": (eff_offset + len(paged)) < total,
+        }
+
+    def query_submissions(
+        self,
+        ctx: AuthContext,
+        *,
+        book_slug: Optional[str] = None,
+        chapter_id: Optional[str] = None,
+        status: Optional[str] = None,
+        author_handle: Optional[str] = None,
+        section_type: Optional[str] = None,
+        include_xml: bool = True,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Query sanitized submissions as a flat list for direct callers."""
+        return self.query_submissions_page(
+            ctx,
+            book_slug=book_slug,
+            chapter_id=chapter_id,
+            status=status,
+            author_handle=author_handle,
+            section_type=section_type,
+            include_xml=include_xml,
+            limit=limit,
+            offset=offset,
+        )["submissions"]
 
     def get_submission_status(
         self,
@@ -2292,6 +2692,8 @@ class CollabMcpService:
         }
         if include_context and book is not None:
             ch = self.store.get_chapter(sub["book_slug"], sub["chapter_id"])
+            eff_brief = book.get("brief") or {}
+            eff_rec = book.get("book_record") or {}
             out["book_context"] = {
                 "slug": book["slug"],
                 "title": book["title"],
@@ -2300,14 +2702,18 @@ class CollabMcpService:
                 "target_lang": book["target_lang"],
                 "approval_mode": book["approval_mode"],
                 "glossary_sha": book["glossary_sha"],
-                "brief": book.get("brief") or {},
-                "book_record": book["book_record"],
+                "brief": eff_brief,
+                "book_record": eff_rec,
             }
+            out["book_record"] = eff_rec
+            out["brief"] = eff_brief
+            ch_ctx: Optional[dict[str, Any]] = None
             if ch is not None:
-                out["chapter_context"] = {
+                ch_ctx = {
                     "chapter_id": ch["chapter_id"],
                     "chapter_num": ch["chapter_num"],
                     "title": ch["title"],
+                    "section_type": str(ch.get("section_type") or "body"),
                     "status": ch["status"],
                     "source_xml": ch["source_xml"],
                     "neighbors": self._build_chapter_neighbors(
@@ -2315,6 +2721,25 @@ class CollabMcpService:
                         chapter_id=sub["chapter_id"],
                     ),
                 }
+                out["chapter_context"] = ch_ctx
+            out["context"] = {
+                "book_slug": book["slug"],
+                "book_title": book["title"],
+                "author": book["author"],
+                "source_lang": book["source_lang"],
+                "target_lang": book["target_lang"],
+                "approval_mode": book["approval_mode"],
+                "glossary_sha": book["glossary_sha"],
+                "brief": eff_brief,
+                "book_record": eff_rec,
+                "chapter_id": ch_ctx["chapter_id"] if ch_ctx else str(sub["chapter_id"]),
+                "chapter_num": ch_ctx["chapter_num"] if ch_ctx else 0,
+                "chapter_title": ch_ctx["title"] if ch_ctx else str(sub["chapter_id"]),
+                "section_type": ch_ctx["section_type"] if ch_ctx else "body",
+                "chapter_status": ch_ctx["status"] if ch_ctx else "",
+                "source_xml": ch_ctx["source_xml"] if ch_ctx else "",
+                "neighbors": ch_ctx["neighbors"] if ch_ctx else {},
+            }
         if include_workstream and sub.get("workstream_id") and hasattr(self.review_client, "get_workstream"):
             try:
                 ws_raw = self.review_client.get_workstream(workstream_id=sub["workstream_id"])
@@ -2645,6 +3070,7 @@ class CollabMcpService:
             )
             if not extracted:
                 raise ServiceError(f"Zero chapters extracted for '{book_slug}'", status_code=422)
+            extracted = _attach_chapter_section_types(extracted, book.get("proposed_chapters") or None)
 
             for ch_item in extracted:
                 st = "open" if (should_unlock or ch_item["chapter_id"] == "ch01") else "locked_seed"
@@ -2655,6 +3081,7 @@ class CollabMcpService:
                     title=ch_item["title"],
                     source_xml=ch_item["source_xml"],
                     status=st,
+                    section_type=str(ch_item.get("section_type") or "body"),
                 )
         elif should_unlock:
             for ch_item in existing_chapters:
@@ -2666,6 +3093,7 @@ class CollabMcpService:
                         title=ch_item["title"],
                         source_xml=ch_item["source_xml"],
                         status="open",
+                        section_type=str(ch_item.get("section_type") or "body"),
                         opened_at=time.time(),
                     )
 
@@ -2921,8 +3349,13 @@ class CollabMcpService:
         rows.sort(key=lambda s: _SUBMISSION_SORT_RANK.get(str(s.get("status") or ""), 99))
         capped = max(1, min(int(limit), 200))
         out: list[dict[str, Any]] = []
+        ch_cache: dict[tuple[str, str], Optional[dict[str, Any]]] = {}
         for s in rows[:capped]:
             item = _sanitize_submission_public(s)
+            c_key = (str(s["book_slug"]), str(s["chapter_id"]))
+            if c_key not in ch_cache:
+                ch_cache[c_key] = self.store.get_chapter(c_key[0], c_key[1])
+            item["section_type"] = str((ch_cache[c_key] or {}).get("section_type") or "body")
             item["peer_reviews"] = self.store.list_peer_reviews(s["id"])
             out.append(item)
         return out

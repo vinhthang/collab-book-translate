@@ -53,7 +53,7 @@ Persist bug reports in SQLite/PostgreSQL with input bounds, prompt-injection sca
 - `AC-059-3`: `triage_bug_report` requires `agent_admin` or `ADMIN` (`ADMIN`-only for `flagged_security` overrides), validates `status in {"open", "accepted", "fixed", "declined"}`, requires non-empty `resolution_note` for `"fixed"` / `"declined"`, and records `triaged_by`, `resolution_note`, `fixed_in_version`, and `updated_at`.
 
 ### `REQ-060`: Bug Triage MCP Surface, REST API, `/admin` UI, & CLI
-- Current contract: Changed by [2026-11-22-collab-mcp-trusted-intake-and-import/REQ-063](../2026-11-22-collab-mcp-trusted-intake-and-import/spec.md#req-063-mcp-v420-surface-rest--admin-open-all-controls--worker-cli-parity)
+- Current contract: Changed by [2026-11-22-collab-mcp-reviewer-queue-and-matter-flow/REQ-067](../2026-11-22-collab-mcp-reviewer-queue-and-matter-flow/spec.md#req-067-mcp-v430-surface-rest-pagination-full-id-admin-cards--collab_workerpy-cli-parity)
 Expose bug reporting and triage across MCP, REST, `/admin`, CLI, and agent instructions, and align versions to `4.1.0`.
 
 - `AC-060-1`: MCP exposes `28` tools (`submit_bug_report`, `query_bug_reports`, `triage_bug_report` added), `4` prompts (`triage_open_bugs` added), `list_tasks(role="agent_admin")` `open_bug_reports` queue, and server/health/`llms.txt`/`plugin.json` version `"4.1.0"`.

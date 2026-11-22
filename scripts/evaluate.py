@@ -105,7 +105,8 @@ def enforce_language_detection(
 
     if segs:
         for s in segs:
-            if s.get("type") not in ("figure", "code"):
+            orig_s = str(s.get("original", "") or "").strip()
+            if s.get("type") not in ("figure", "code") and not re.match(r"^(?:!\[[^\]]*\]\([^)]+\)\s*)+$", orig_s):
                 t = s.get("translate", "")
                 if t:
                     trans_texts.append(t)

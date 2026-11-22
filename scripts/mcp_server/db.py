@@ -63,6 +63,7 @@ SCHEMA_STATEMENTS_COMMON = (
         chapter_id TEXT NOT NULL,
         chapter_num INTEGER NOT NULL,
         title TEXT NOT NULL,
+        section_type TEXT NOT NULL DEFAULT 'body',
         source_xml TEXT NOT NULL,
         status TEXT NOT NULL,
         claimed_by TEXT NOT NULL DEFAULT '',
@@ -229,6 +230,7 @@ class CollabStore:
                         cur.execute("ALTER TABLE books ADD COLUMN IF NOT EXISTS allowed_agents_json TEXT NOT NULL DEFAULT '[]'")
                         cur.execute("ALTER TABLE books ADD COLUMN IF NOT EXISTS approval_mode TEXT NOT NULL DEFAULT 'auto'")
                         cur.execute("ALTER TABLE books ADD COLUMN IF NOT EXISTS proposed_chapters_json TEXT NOT NULL DEFAULT '[]'")
+                        cur.execute("ALTER TABLE chapters ADD COLUMN IF NOT EXISTS section_type TEXT NOT NULL DEFAULT 'body'")
                         cur.execute("ALTER TABLE submissions ADD COLUMN IF NOT EXISTS author_ip_hash TEXT NOT NULL DEFAULT ''")
                         cur.execute("ALTER TABLE submissions ADD COLUMN IF NOT EXISTS rounds_history_json TEXT NOT NULL DEFAULT '[]'")
                         cur.execute("ALTER TABLE peer_reviews ADD COLUMN IF NOT EXISTS reviewer_role TEXT NOT NULL DEFAULT 'contributor'")
@@ -256,6 +258,9 @@ class CollabStore:
                     conn.execute("ALTER TABLE books ADD COLUMN approval_mode TEXT NOT NULL DEFAULT 'auto'")
                 if "proposed_chapters_json" not in book_cols:
                     conn.execute("ALTER TABLE books ADD COLUMN proposed_chapters_json TEXT NOT NULL DEFAULT '[]'")
+                ch_cols = {r["name"] for r in conn.execute("PRAGMA table_info(chapters)").fetchall()}
+                if "section_type" not in ch_cols:
+                    conn.execute("ALTER TABLE chapters ADD COLUMN section_type TEXT NOT NULL DEFAULT 'body'")
                 sub_cols = {r["name"] for r in conn.execute("PRAGMA table_info(submissions)").fetchall()}
                 if "author_ip_hash" not in sub_cols:
                     conn.execute("ALTER TABLE submissions ADD COLUMN author_ip_hash TEXT NOT NULL DEFAULT ''")
@@ -604,21 +609,24 @@ class CollabStore:
         title: str,
         source_xml: str,
         status: str,
+        section_type: str = "body",
         final_txt: str = "",
         translation_xml: str = "",
         opened_at: Optional[float] = None,
     ) -> None:
         now_iso = _utc_iso()
         opened = time.time() if opened_at is None else opened_at
+        eff_sec = (section_type or "body").strip() or "body"
         self._exec(
             """
             INSERT INTO chapters (
-                book_slug, chapter_id, chapter_num, title, source_xml, status,
+                book_slug, chapter_id, chapter_num, title, section_type, source_xml, status,
                 final_txt, translation_xml, opened_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(book_slug, chapter_id) DO UPDATE SET
                 chapter_num = excluded.chapter_num,
                 title = excluded.title,
+                section_type = excluded.section_type,
                 source_xml = excluded.source_xml,
                 status = excluded.status,
                 final_txt = CASE WHEN excluded.final_txt != '' THEN excluded.final_txt ELSE chapters.final_txt END,
@@ -630,6 +638,7 @@ class CollabStore:
                 chapter_id,
                 chapter_num,
                 title,
+                eff_sec,
                 source_xml,
                 status,
                 final_txt,
@@ -637,6 +646,19 @@ class CollabStore:
                 opened,
                 now_iso,
             ),
+        )
+
+    def update_chapter_section_type(
+        self,
+        *,
+        book_slug: str,
+        chapter_id: str,
+        section_type: str,
+    ) -> None:
+        """Persist classified section_type on an existing chapter without disturbing status/claims."""
+        self._exec(
+            "UPDATE chapters SET section_type = ?, updated_at = ? WHERE book_slug = ? AND chapter_id = ?",
+            (section_type, _utc_iso(), book_slug, chapter_id),
         )
 
     def get_chapter(self, book_slug: str, chapter_id: str) -> Optional[dict[str, Any]]:
@@ -675,6 +697,7 @@ class CollabStore:
                     title=str(item["title"]),
                     source_xml=str(item["source_xml"]),
                     status=st,
+                    section_type=str(item.get("section_type") or "body"),
                 )
 
     def claim_chapter(

@@ -100,6 +100,13 @@ def run_mcp_command(
     resolution_note: str = "",
     fixed_in_version: str = "",
     import_file: str = "",
+    limit: int = 200,
+    offset: int = 0,
+    section_type: str = "",
+    include_matter: bool = True,
+    include_xml: bool = True,
+    include_context: bool = True,
+    include_workstream: bool = False,
 ) -> Dict[str, Any]:
     """Execute worker subcommands over HTTP against collab-mcp (ANONYMOUS or AGENT_KEY)."""
     base = _normalize_mcp_base_url(mcp_url)
@@ -118,9 +125,16 @@ def run_mcp_command(
                 json={"handle": handle, "display_name": display_name, "model_info": model_info},
             )
         elif subcommand == "list-tasks":
-            params: Dict[str, str] = {"role": role}
+            params: Dict[str, str] = {
+                "role": role,
+                "limit": str(limit),
+                "offset": str(offset),
+                "include_matter": "true" if include_matter else "false",
+            }
             if book_slug:
                 params["book_slug"] = book_slug
+            if section_type:
+                params["section_type"] = section_type
             resp = client.get(f"{base}/api/v1/tasks", headers=headers, params=params)
         elif subcommand == "get-chapter":
             resp = client.get(
@@ -153,19 +167,37 @@ def run_mcp_command(
                 json=imp_payload,
             )
         elif subcommand == "query-submissions":
-            q_params: Dict[str, str] = {}
+            q_params: Dict[str, str] = {
+                "limit": str(limit),
+                "offset": str(offset),
+                "include_xml": "true" if include_xml else "false",
+            }
             if book_slug:
                 q_params["book_slug"] = book_slug
             if chapter:
                 q_params["chapter_id"] = chapter
             if status:
                 q_params["status"] = status
+            if section_type:
+                q_params["section_type"] = section_type
             if author_handle or author:
                 q_params["author_handle"] = author_handle or author
             resp = client.get(
                 f"{base}/api/v1/submissions",
                 headers=headers,
                 params=q_params,
+            )
+        elif subcommand == "get-submission":
+            if not submission_id:
+                return {"success": False, "error": "--submission-id is required"}
+            gs_params = {
+                "include_context": "true" if include_context else "false",
+                "include_workstream": "true" if include_workstream else "false",
+            }
+            resp = client.get(
+                f"{base}/api/v1/submissions/{submission_id}",
+                headers=headers,
+                params=gs_params,
             )
         elif subcommand == "submit-book":
             sf = Path(source_file)
@@ -1004,6 +1036,18 @@ def main() -> None:
     p_qsub.add_argument("--chapter")
     p_qsub.add_argument("--status", default="")
     p_qsub.add_argument("--author-handle", default="")
+    p_qsub.add_argument("--section-type", default="")
+    p_qsub.add_argument("--limit", type=int, default=100)
+    p_qsub.add_argument("--offset", type=int, default=0)
+    p_qsub.add_argument("--no-xml", action="store_true")
+
+    # get-submission (MCP mode)
+    p_gsub = subparsers.add_parser("get-submission", help="Fetch submission status with unified reviewer context and peer reviews.")
+    p_gsub.add_argument("--mcp-url", default="")
+    p_gsub.add_argument("--agent-key", default="")
+    p_gsub.add_argument("--submission-id", required=True)
+    p_gsub.add_argument("--no-context", action="store_true")
+    p_gsub.add_argument("--include-workstream", action="store_true")
 
     # list-tasks
     p_list = subparsers.add_parser("list-tasks", help="List tasks filtered by role.")
@@ -1012,6 +1056,10 @@ def main() -> None:
     p_list.add_argument("--mcp-url", default="")
     p_list.add_argument("--agent-key", default="")
     p_list.add_argument("--book-slug")
+    p_list.add_argument("--section-type", default="")
+    p_list.add_argument("--no-matter", action="store_true")
+    p_list.add_argument("--limit", type=int, default=200)
+    p_list.add_argument("--offset", type=int, default=0)
     p_list.add_argument("--workers", help="Comma-separated logins for sharding.")
     p_list.add_argument("--mode", choices=["sharded", "compete"], default="sharded")
     p_list.add_argument("--config")
@@ -1110,6 +1158,7 @@ def main() -> None:
         "submit-book-parse",
         "import-translations",
         "query-submissions",
+        "get-submission",
         "submit-bug",
         "query-bugs",
         "triage-bug",
@@ -1142,6 +1191,12 @@ def main() -> None:
             bug_id=getattr(args, "bug_id", ""),
             resolution_note=getattr(args, "resolution_note", ""),
             fixed_in_version=getattr(args, "fixed_in_version", ""),
+            limit=getattr(args, "limit", 100),
+            offset=getattr(args, "offset", 0),
+            section_type=getattr(args, "section_type", ""),
+            include_xml=not getattr(args, "no_xml", False),
+            include_context=not getattr(args, "no_context", False),
+            include_workstream=getattr(args, "include_workstream", False),
         )
         print(json.dumps(res, indent=2, ensure_ascii=False))
         if not res.get("success"):
@@ -1180,6 +1235,10 @@ def main() -> None:
                 review_file=getattr(args, "review_file", ""),
                 verdict=eff_verdict,
                 issues_file=getattr(args, "issues_file", None),
+                limit=getattr(args, "limit", 200),
+                offset=getattr(args, "offset", 0),
+                section_type=getattr(args, "section_type", ""),
+                include_matter=not getattr(args, "no_matter", False),
             )
             print(json.dumps(res, indent=2, ensure_ascii=False))
             if not res.get("success"):

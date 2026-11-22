@@ -36,6 +36,7 @@ Inspected at `/Users/thanghoang/github/collab-book-translate` (`0702b91`):
 
 ### REQ-061: Trusted Submitter Auto-Approve & Curated Glossary Chapter Unlock
 
+- Current contract: Changed by [2026-11-22-collab-mcp-reviewer-queue-and-matter-flow/REQ-064](../2026-11-22-collab-mcp-reviewer-queue-and-matter-flow/spec.md#req-064-chapter-section_type-classification-persistence-backfill--trusted-boilerplate-auto-accept)
 - Changes: [2026-11-20-collab-mcp-seed-review-and-presplit/REQ-051](../2026-11-20-collab-mcp-seed-review-and-presplit/spec.md#req-051-pre-split-chapters--initial-book_record-in-submit_book_proposal), [2026-11-21-collab-mcp-workflow-v2/REQ-052](../2026-11-21-collab-mcp-workflow-v2/spec.md#req-052-scoped-agent_admin-role-on-3-word-agent_keys--authority-boundaries), [2026-11-21-collab-mcp-workflow-v2/REQ-053](../2026-11-21-collab-mcp-workflow-v2/spec.md#req-053-approved_pending_parse-queue-submit_book_parse--rich-brief--book_record-curation)
 - Source intent: Verbatim prompt (*"I do not want to manual do these approve if I manual submit these books, need to change the process"*) and Q1/Q2 (`A1`, `A2`).
 - Previous contract: All `submit_book_proposal` callers entered `pending_approval`; pre-split `approve_book_intake` and `submit_book_parse` always set `ch02..chNN` to `locked_seed`; `submit_book_parse` rejected `pending_approval` books.
@@ -45,6 +46,7 @@ Inspected at `/Users/thanghoang/github/collab-book-translate` (`0702b91`):
 
 ### REQ-062: Batch Pre-Translated Chapter Import (`import_chapter_translations`) & Reviewer Continuity
 
+- Current contract: Changed by [2026-11-22-collab-mcp-reviewer-queue-and-matter-flow/REQ-065](../2026-11-22-collab-mcp-reviewer-queue-and-matter-flow/spec.md#req-065-paginated-compact-reviewer-queue-limit200-full-uuid-submission_id--body-first-natural-sort)
 - Changes: [2026-11-21-collab-mcp-workflow-v2/REQ-054](../2026-11-21-collab-mcp-workflow-v2/spec.md#req-054-full-transparency-work-querying-for-translators-reviewers--agent_admin), [2026-11-21-collab-mcp-workflow-v2/REQ-055](../2026-11-21-collab-mcp-workflow-v2/spec.md#req-055-actionable-peer--agent_admin-chapter-gate-approval_modepeer--auto--manual)
 - Source intent: Enable migrating pre-split, already-translated books (including books already in `approved_pending_parse` or caller-proposed `pending_approval`, totaling `87` chapters across 3 Ray Dalio books) into `pending_review` in fast validated batches and ensure peer reviewers see complete lists and neighbor context.
 - Previous contract: Only single-chapter `submit_translation` (running synchronous `review.vinhthang.dev` LLM critique) existed; `list_tasks` capped `peer_review_candidates` globally at `25`; `_build_chapter_neighbors` read `translation_xml` only from `accepted` chapters.
@@ -54,6 +56,7 @@ Inspected at `/Users/thanghoang/github/collab-book-translate` (`0702b91`):
 
 ### REQ-063: MCP `v4.2.0` Surface, REST & `/admin` Open-All Controls, & Worker CLI Parity
 
+- Current contract: Changed by [2026-11-22-collab-mcp-reviewer-queue-and-matter-flow/REQ-067](../2026-11-22-collab-mcp-reviewer-queue-and-matter-flow/spec.md#req-067-mcp-v430-surface-rest-pagination-full-id-admin-cards--collab_workerpy-cli-parity)
 - Changes: [2026-11-21-collab-mcp-bug-triage-and-hardening/REQ-060](../2026-11-21-collab-mcp-bug-triage-and-hardening/spec.md#req-060-bug-triage-mcp-surface-rest-api-admin-ui--cli)
 - Source intent: Expose the trusted intake and batch import flow consistently across MCP (`v4.2.0`), REST, `/admin`, `collab_worker.py`, and agent/skill documentation without introducing hygiene regressions.
 - Previous contract: `collab-mcp` exposed `28` tools at version `"4.1.0"`, `/api/v1/books/{slug}/import-translations` and `/admin` `Approve & Open All Chapters` did not exist, and `submit_book_proposal`/`submit_book_parse`/`update_book_record`/`submit_translation` lacked optional `admin_token`.
