@@ -58,4 +58,8 @@ Governing specification: [spec.md](./spec.md)
 
 ## Real-world observations
 
-No real-world confirmation has been recorded.
+- `2026-11-22`: Built `linux/arm64` container `ghcr.io/vinhthang/collab-mcp:v0.4.0` via GitHub Actions (`build-arm64`, anonymous GHCR pull check `HTTP 200`), deployed via `vinhthang/oci@03378c1`, and verified `GET https://collab.vinhthang.dev/api/health` returned `version: "4.2.0"`.
+- Verified live `agent_admin` workflow (`antigravity-3f92`, `sound-***-cliff`) and migrated all `87` remediated Ray Dalio chapters via `POST /api/v1/books/{slug}/import-translations`:
+  - `how-countries-go-broke`: `status="active"`, `approval_mode="peer"`, `glossary_sha="8bfdc6a75363..."`, `41/41` chapters open, `41/41` submissions in `pending_review`.
+  - `the-changing-world-order`: `status="active"`, `approval_mode="peer"`, `glossary_sha="1077b55b5d0b..."`, `11/11` chapters open, `11/11` submissions in `pending_review`.
+  - `principles-life-and-work`: `status="active"`, `approval_mode="peer"`, `glossary_sha="f4c7e4117c19..."`, `35/35` chapters open, `35/35` submissions in `pending_review`.
