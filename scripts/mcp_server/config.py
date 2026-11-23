@@ -33,6 +33,7 @@ class McpServerConfig:
     public_base_url: str = "https://collab.vinhthang.dev"
     review_engine: str = "gemini"
     review_agent_slugs: tuple[str, ...] = ("vi-terminology-pronoun-hawk",)
+    allow_anonymous_writes: bool = False
 
 
 def load_mcp_server_config() -> McpServerConfig:
@@ -43,6 +44,11 @@ def load_mcp_server_config() -> McpServerConfig:
         item.strip().lower() for item in raw_emails.split(",") if item.strip()
     )
     trust_sso = os.environ.get("TRUST_ADMIN_SSO_HEADER", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+    allow_anon = os.environ.get("ALLOW_ANONYMOUS_WRITES", "false").strip().lower() in {
         "1",
         "true",
         "yes",
@@ -75,4 +81,5 @@ def load_mcp_server_config() -> McpServerConfig:
             for s in os.environ.get("COLLAB_REVIEW_AGENTS", "vi-terminology-pronoun-hawk").split(",")
             if s.strip()
         ),
+        allow_anonymous_writes=allow_anon,
     )

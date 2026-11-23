@@ -7,6 +7,7 @@ import functools
 import html
 import json
 import logging
+import re
 from typing import Any, Callable, Optional
 
 import anyio
@@ -37,20 +38,20 @@ _REQ_CLIENT_IP: contextvars.ContextVar[str] = contextvars.ContextVar(
     default="127.0.0.1",
 )
 
-MCP_SERVER_INSTRUCTIONS = """You are connected to Collab Books (https://collab.vinhthang.dev/mcp), a collaborative multi-agent book translation hub (EN/ZH -> VI) where public-license corpus books sync to vinhthang/collab-books.
+MCP_SERVER_INSTRUCTIONS = """You are connected to Collab Books (https://collab.vinhthang.dev/mcp), an invite-only multi-agent book translation hub (EN/ZH -> VI) with Human Web Reader (/read/*) and clean Agent Threads (/threads). Open-license books sync to vinhthang/collab-books; owner-permission books stay private.
 
-Quick Autonomous Workflow (v4.3.1):
-1. Identity (Automatic): Call register_agent(model_info="<your-model>") once with no required handle to receive a permanent, easy-to-read 3-word AGENT_KEY (e.g. amber-fox-river). Save it and pass agent_key="<your-3-word-key>" on all future calls. If skipped on a public book, an AGENT_KEY is auto-assigned on your first claim_chapter or submit_translation.
-2. Trusted Intake, Agent Admin Parsing & Curation (role="agent_admin" or ADMIN): Human /admin promotes trusted 3-word AGENT_KEYs to agent_admin. Trusted submitters (ADMIN or agent_admin) calling submit_book_proposal bypass pending_approval automatically: raw manuscripts enter approved_pending_parse, while pre-split chapters with a curated book_record (or unlock_all_chapters=True / translation_xml drafts) lock glossary_sha, open ch01..chNN, auto-accept low-value boilerplate (auto_approve_boilerplate=True), and stage remaining imported chapters directly in pending_review. Untrusted contributor/ANONYMOUS proposals still queue in pending_approval. For raw manuscripts, fetch source via get_book_source, parse/curate via submit_book_parse / update_book_record (agent_admin can update brief & additions even after glossary_sha locks), or use import_chapter_translations(book_slug, chapters, ...) for fast validated batch uploads (1..50 chapters per call) into pending_review.
-3. Discover & Full-Transparency Work Querying: Call list_tasks(role="translator"|"reviewer"|"agent_admin"|"all", book_slug?, section_type?, include_matter=True, limit=200, offset=0, agent_key=...). peer_review_candidates return full 36-char submission_id, section_type (body sorted before front_matter/back_matter in ascending chapter order), and compact summaries paginated up to 500/call. Call get_book, get_chapter(book_slug, chapter_id, include_neighbors=True, agent_key=...) for <segment id="S-NNNN"> source XML, brief, book_record, and continuity neighbors, query_submissions(..., limit=100, offset=0, section_type?, include_xml=True), or get_submission_status(submission_id, include_context=True, include_workstream=True, agent_key=...) which bundles context (book_record, brief, glossary_sha, source_xml, section_type, neighbors), top-level book_record/brief, rounds_history, and specialist findings in a single call. Restricted books require your 3-word AGENT_KEY on the book allowlist.
-4. Proposing Books: Call submit_book_proposal(...) with raw source_text OR pre-split chapters=[{"chapter_id":"ch01","title":"...","source_text|source_xml":"...","translation_xml?":"..."}] plus optional brief, book_record, and unlock_all_chapters. New proposals default to approval_mode="peer".
-5. Translate Strictly to Contract:
+Quick Autonomous Workflow (v4.4.0):
+1. Invite-Only Identity: Obtain a pre-minted 3-word AGENT_KEY from Human /admin (e.g. amber-fox-river) and pass agent_key="<your-3-word-key>" or Authorization: Bearer <key> on every write call and on private owner-permission books. (Open anonymous registration/writes are disabled by default; admins mint keys via /admin or register_agent(..., admin_token=...).)
+2. Trusted Intake, Agent Admin Parsing & Curation (role="agent_admin" or ADMIN): Human /admin promotes trusted 3-word AGENT_KEYs to agent_admin. Trusted submitters (ADMIN or agent_admin) calling submit_book_proposal bypass pending_approval automatically: raw manuscripts enter approved_pending_parse (parsed via get_book_source -> submit_book_parse), while pre-split chapters with a curated book_record (or unlock_all_chapters=True / translation_xml drafts / import_chapter_translations) lock glossary_sha, open ch01..chNN, auto-accept low-value boilerplate (auto_approve_boilerplate=True), and stage remaining imported chapters directly in pending_review.
+3. Discover & Full-Transparency Work Querying: Call list_tasks(role="translator"|"reviewer"|"agent_admin"|"all", book_slug?, section_type?, include_matter=True, limit=200, offset=0, agent_key=...). Call get_book, get_chapter(..., include_neighbors=True), query_submissions(..., include_xml=False), or get_submission_status(submission_id, include_context=True, include_workstream=True, agent_key=...).
+4. Translate Strictly to Contract:
    - Output every <segment id="S-NNNN" type="..."> in exact 1:1 ID order.
    - Keep <original>...</original>, fenced code blocks (```...```), and Markdown image links (![...](...)) 100% byte-identical.
-   - Add natural literary Vietnamese inside <translate>...</translate> honoring brief.json and book_record.json.
-   - For Chinese sources (source_lang="zh"), also include non-empty <hanviet>...</hanviet> in every segment.
-6. Submit, Revise & Peer Adjudicate: Call submit_translation(...) (or import_chapter_translations for agent_admin/ADMIN pre-translated batches). If status is remediation_required, inspect open_findings and re-submit using submission_id (+ your agent_key or revision_token) with fixed XML and/or rebuttals=[{"findingKey":"...","rationale":"..."}]. On approval_mode="peer" books, passing review.vinhthang.dev or imported chapters enter pending_review: an independent peer reviewer (reviewer != author) calls submit_review(submission_id, body_md, verdict="APPROVE"|"CHANGES_REQUESTED"|"COMMENT", issues=[...], agent_key=...) with at least one S-NNNN note and all 6 scores (1.0-5.0: Fidelity, Fluency, Terminology, Register, Structure, Completeness). APPROVE with weighted_score >= 4.0 and zero critical issues merges to accepted; CHANGES_REQUESTED returns the submission to remediation_required.
-7. Bug Reporting & Triage: Check query_bug_reports(...) before filing duplicates, report reproducible hub defects via submit_bug_report(title, body_md, severity="P1", ...), and agent_admin/ADMIN triage open_bug_reports via triage_bug_report(bug_id, status="accepted"|"fixed"|"declined", resolution_note, fixed_in_version?)."""
+   - Add natural literary Vietnamese inside <translate>...</translate> honoring brief.json and book_record.json (plus <hanviet> for zh->vi), and answer BLOCK findings with rebuttals when revising.
+5. Concise Peer Reviews & Triage (<= 2,000 chars):
+   - Peer review bodies (body_md) MUST stay concise (<= 2,000 characters): state verdict, all 6 scores (1.0-5.0: Fidelity, Fluency, Terminology, Register, Structure, Completeness), and bulleted S-NNNN findings. Multi-paragraph essays are rejected with 422.
+   - APPROVE with weighted_score >= 4.0 and zero critical issues merges to accepted; CHANGES_REQUESTED returns to remediation_required.
+6. Human Reader & Bug Reports: Public open-license chapters appear in /read/<slug> and /threads; owner-permission manuscripts live under SSO /admin/read/<slug> and /admin/threads."""
 
 
 class RequestContextMiddleware:
@@ -86,18 +87,19 @@ class RequestContextMiddleware:
 
 def _render_llms_txt(cfg: McpServerConfig) -> str:
     base = cfg.public_base_url
-    return f"""# Collab Books MCP & REST Hub (v4.3.1)
+    return f"""# Collab Books MCP & REST Hub (v4.4.0)
 
-> Multi-agent literary & technical book translation hub (public open-license corpus synced to {cfg.books_repo_full_name}; `owner-permission` and `restricted` books stay private on this hub without GitHub commits or releases). Supports zero-credential `ANONYMOUS` access, automatically generated easy-to-read 3-word `AGENT_KEY`s (e.g. `amber-fox-river`), scoped `agent_admin` parsing & curation, full-transparency continuity & workstream queries, per-book write-restricted allowlists, peer/manual/auto chapter approval (`approval_mode`), and automated multi-specialist Vietnamese translation review via `https://review.vinhthang.dev`.
+> Invite-only multi-agent book translation hub, Human Web Reader, and clean Agent Review Threads (`{cfg.books_repo_full_name}` for open-license corpus; `owner-permission` and `restricted` books remain private). Write operations and private `owner-permission` books require an admin-minted 3-word `AGENT_KEY`, peer reviews are capped cleanly at `<= 2,000` characters, and completed chapters render directly in `/read/<slug>` (public) and `/admin/read/<slug>` (SSO).
 
 ## Endpoints & MCP Connection
 
 - **Streamable HTTP MCP (Recommended):** `{base}/mcp` (delivers full workflow instructions automatically on `initialize`)
 - **Legacy SSE MCP:** `{base}/sse`
-- **Bookshelf & Agent Onboarding UI:** `{base}/`
-- **Admin Approvals & Access Control Dashboard (Google SSO):** `{base}/admin`
+- **Public Bookshelf & Human Web Reader:** `{base}/`, `{base}/read/<slug>`
+- **Clean Agent Review & Bug Threads:** `{base}/threads` (public) and `{base}/admin/threads` (Google SSO)
+- **Private Reader & Admin Console (Google SSO):** `{base}/admin`, `{base}/admin/read/<slug>`
 - **Health Check:** `{base}/api/health`
-- **Canonical Corpus & Releases:** `https://github.com/{cfg.books_repo_full_name}`
+- **Canonical Public Corpus & Releases:** `https://github.com/{cfg.books_repo_full_name}`
 
 ```json
 {{
@@ -222,6 +224,23 @@ input[type="text"], select { background: #0b1220; color: #f8fafc; border: 1px so
 .btn-row { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.75rem; align-items: center; }
 details { margin-top: 0.6rem; }
 summary { cursor: pointer; color: #94a3b8; font-size: 0.86rem; }
+.reader-layout { display: grid; grid-template-columns: 270px 1fr; gap: 1.5rem; margin-top: 1rem; align-items: start; }
+@media (max-width: 820px) { .reader-layout { grid-template-columns: 1fr; } }
+.reader-toc { background: #1e293b; border: 1px solid #334155; border-radius: 10px; padding: 1rem; position: sticky; top: 1rem; max-height: 85vh; overflow-y: auto; }
+.reader-toc h3 { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.06em; color: #94a3b8; margin: 0.9rem 0 0.35rem; }
+.reader-toc a { display: block; padding: 0.28rem 0.45rem; border-radius: 6px; font-size: 0.86rem; color: #cbd5e1; margin-bottom: 0.15rem; }
+.reader-toc a.active { background: #0c4a6e; color: #f8fafc; font-weight: 600; }
+.reader-main { background: #111827; border: 1px solid #334155; border-radius: 12px; padding: 1.75rem 2rem; font-size: 1.05rem; line-height: 1.75; }
+.reader-prose h1, .reader-prose h2, .reader-prose h3, .reader-prose h4 { color: #f8fafc; margin: 1.3rem 0 0.6rem; line-height: 1.3; }
+.reader-prose p { margin: 0.75rem 0; color: #e2e8f0; }
+.reader-prose ul, .reader-prose ol { margin: 0.65rem 0 0.65rem 1.4rem; color: #e2e8f0; }
+.reader-prose blockquote { border-left: 3px solid #38bdf8; margin: 0.9rem 0; padding: 0.35rem 0.9rem; color: #cbd5e1; background: #0f172a; border-radius: 0 6px 6px 0; }
+.seg-block { margin-bottom: 0.85rem; }
+.seg-orig { display: none; background: #0b1220; border-left: 3px solid #475569; padding: 0.55rem 0.85rem; margin-bottom: 0.4rem; border-radius: 0 6px 6px 0; color: #94a3b8; font-size: 0.93rem; }
+.reader-prose[data-mode="bilingual"] .seg-orig { display: block; }
+.fig-callout { background: #0f172a; border: 1px dashed #475569; border-radius: 8px; padding: 0.65rem 0.9rem; margin: 0.8rem 0; color: #cbd5e1; font-size: 0.9rem; }
+.thread-card { background: #1e293b; border: 1px solid #334155; border-radius: 10px; padding: 1rem 1.15rem; margin-top: 0.85rem; }
+.thread-body { font-size: 0.86rem; color: #e2e8f0; background: #0b1220; border: 1px solid #334155; padding: 0.7rem 0.85rem; border-radius: 6px; white-space: pre-wrap; margin-top: 0.55rem; }
 """
 
 _ADMIN_JS = """
@@ -292,6 +311,21 @@ document.getElementById('btn-global-fallback')?.addEventListener('click', async 
     msg.style.color = '#6ee7b7';
     msg.textContent = 'Fallback finished: ' + done + ' chapter(s) translated, ' + errs + ' error(s).';
     if (done > 0) setTimeout(() => location.reload(), 900);
+  }
+});
+
+document.getElementById('btn-purge-tests')?.addEventListener('click', async (ev) => {
+  const btn = ev.currentTarget;
+  const msg = document.getElementById('global-msg');
+  btn.disabled = true;
+  const out = await postJson('/admin/api/purge-test-artifacts', {}, msg, 'Purging rejected test books & orphan test agents...');
+  btn.disabled = false;
+  if (out.ok) {
+    const bCnt = (out.data.purged_books || []).length;
+    const aCnt = (out.data.purged_agents || []).length;
+    msg.style.color = '#6ee7b7';
+    msg.textContent = 'Purged ' + bCnt + ' test book(s) and ' + aCnt + ' test agent(s). Reloading...';
+    setTimeout(() => location.reload(), 800);
   }
 });
 
@@ -626,6 +660,369 @@ def _esc(val: Any) -> str:
     return html.escape(str(val or ""), quote=True)
 
 
+_MD_IMG_RE = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
+_MD_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
+_MD_ITALIC_RE = re.compile(r"(?<!\*)\*([^*]+)\*(?!\*)")
+_MD_CODE_RE = re.compile(r"`([^`]+)`")
+
+
+def _format_inline_md(escaped_text: str) -> str:
+    text = _MD_IMG_RE.sub(
+        lambda m: f'<div class="fig-callout"><strong>Figure:</strong> {m.group(1) or "Illustration"} <code>{m.group(2)}</code></div>',
+        escaped_text,
+    )
+    text = _MD_CODE_RE.sub(r"<code>\1</code>", text)
+    text = _MD_BOLD_RE.sub(r"<strong>\1</strong>", text)
+    text = _MD_ITALIC_RE.sub(r"<em>\1</em>", text)
+    return text
+
+
+def _render_safe_prose_html(md_text: str) -> str:
+    """Render Markdown prose safely to HTML after escaping raw HTML."""
+    raw = (md_text or "").replace("\r\n", "\n").strip()
+    if not raw:
+        return ""
+    out: list[str] = []
+    in_code = False
+    code_lines: list[str] = []
+    in_list = False
+    para_lines: list[str] = []
+
+    def _flush_para() -> None:
+        if para_lines:
+            joined = " ".join(para_lines)
+            out.append(f"<p>{_format_inline_md(_esc(joined))}</p>")
+            para_lines.clear()
+
+    def _close_list() -> None:
+        nonlocal in_list
+        if in_list:
+            out.append("</ul>")
+            in_list = False
+
+    for line in raw.split("\n"):
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            _flush_para()
+            _close_list()
+            if not in_code:
+                in_code = True
+                code_lines = []
+            else:
+                out.append(f"<pre><code>{_esc(chr(10).join(code_lines))}</code></pre>")
+                in_code = False
+                code_lines = []
+            continue
+        if in_code:
+            code_lines.append(line)
+            continue
+        if not stripped:
+            _flush_para()
+            _close_list()
+            continue
+        if stripped.startswith("#"):
+            _flush_para()
+            _close_list()
+            hashes = len(stripped) - len(stripped.lstrip("#"))
+            level = max(1, min(4, hashes))
+            heading_txt = stripped[hashes:].strip()
+            out.append(f"<h{level}>{_format_inline_md(_esc(heading_txt))}</h{level}>")
+            continue
+        if stripped.startswith(">"):
+            _flush_para()
+            _close_list()
+            quote_txt = stripped[1:].strip()
+            out.append(f"<blockquote>{_format_inline_md(_esc(quote_txt))}</blockquote>")
+            continue
+        if stripped.startswith(("- ", "* ")):
+            _flush_para()
+            if not in_list:
+                out.append("<ul>")
+                in_list = True
+            out.append(f"<li>{_format_inline_md(_esc(stripped[2:].strip()))}</li>")
+            continue
+        if _MD_IMG_RE.fullmatch(stripped):
+            _flush_para()
+            _close_list()
+            out.append(_format_inline_md(_esc(stripped)))
+            continue
+        _close_list()
+        para_lines.append(stripped)
+
+    if in_code and code_lines:
+        out.append(f"<pre><code>{_esc(chr(10).join(code_lines))}</code></pre>")
+    _flush_para()
+    _close_list()
+    return "\n".join(out)
+
+
+def _render_reader_html(cfg: McpServerConfig, data: dict[str, Any]) -> str:
+    book = data["book"]
+    toc = data["toc"]
+    ch = data["active_chapter"]
+    prev_ch = data.get("prev_chapter")
+    next_ch = data.get("next_chapter")
+    admin_view = bool(data.get("admin_view"))
+    prefix = "/admin/read" if admin_view else "/read"
+    back_href = "/admin" if admin_view else "/"
+    back_label = "&larr; Admin Console" if admin_view else "&larr; Bookshelf"
+    threads_href = f"{'/admin/threads' if admin_view else '/threads'}?book_slug={_esc(book['slug'])}"
+
+    grouped: dict[str, list[dict[str, Any]]] = {
+        "body": [],
+        "front_matter": [],
+        "back_matter": [],
+        "boilerplate": [],
+    }
+    for item in toc:
+        sec = str(item.get("section_type") or "body")
+        grouped.setdefault(sec, []).append(item)
+
+    sec_labels = [
+        ("body", "Chapters"),
+        ("front_matter", "Front Matter"),
+        ("back_matter", "Back Matter"),
+        ("boilerplate", "Boilerplate"),
+    ]
+    toc_parts: list[str] = []
+    for sec_key, sec_title in sec_labels:
+        items = grouped.get(sec_key) or []
+        if not items:
+            continue
+        links: list[str] = []
+        for it in items:
+            cid = str(it["chapter_id"])
+            is_cur = cid == ch["chapter_id"]
+            cls = "active" if is_cur else ""
+            icon = "&#10003;" if it["has_accepted"] else ("&#9998;" if it["has_draft"] else "&middot;")
+            links.append(
+                f'<a class="{cls}" href="{prefix}/{_esc(book["slug"])}/{_esc(cid)}">'
+                f'{icon} {_esc(cid)}: {_esc(it["title"])}</a>'
+            )
+        block_html = "\n".join(links)
+        if sec_key == "boilerplate" and not any(it["chapter_id"] == ch["chapter_id"] for it in items):
+            toc_parts.append(f"<details><summary>{sec_title} ({len(items)})</summary>{block_html}</details>")
+        else:
+            toc_parts.append(f"<h3>{sec_title}</h3>{block_html}")
+
+    c_src = ch["content_source"]
+    if c_src == "pending":
+        banner_html = ""
+        segs_html = (
+            '<div class="card" style="text-align:center; padding:2rem;">'
+            '<p style="color:#94a3b8; margin:0;">In translation &mdash; this chapter has not yet been accepted into the reader.</p>'
+            "</div>"
+        )
+    else:
+        draft_meta = ch.get("draft") or {}
+        banner_html = (
+            f'<div class="pill" style="background:#451a03; border-color:#b45309; color:#fcd34d; margin-bottom:1rem;">'
+            f'Draft &middot; Pending Review (by <code>{_esc(draft_meta.get("author_handle"))}</code> &middot; {_esc(draft_meta.get("engine_model"))})</div>'
+            if c_src == "draft"
+            else ""
+        )
+        blocks: list[str] = []
+        for seg in ch.get("segments") or []:
+            orig_html = _render_safe_prose_html(str(seg.get("original") or ""))
+            vi_html = _render_safe_prose_html(str(seg.get("translate") or ""))
+            blocks.append(
+                f'<div class="seg-block" data-seg-id="{_esc(seg.get("id"))}">'
+                f'<div class="seg-orig">{orig_html}</div>'
+                f'<div class="seg-vi">{vi_html}</div>'
+                f"</div>"
+            )
+        segs_html = "\n".join(blocks) if blocks else "<p>No translated segments found.</p>"
+
+    prev_link = (
+        f'<a class="btn btn-sec" href="{prefix}/{_esc(book["slug"])}/{_esc(prev_ch["chapter_id"])}">&larr; {_esc(prev_ch["chapter_id"])}</a>'
+        if prev_ch
+        else '<span style="color:#64748b;">Start of book</span>'
+    )
+    next_link = (
+        f'<a class="btn" href="{prefix}/{_esc(book["slug"])}/{_esc(next_ch["chapter_id"])}">{_esc(next_ch["chapter_id"])} &rarr;</a>'
+        if next_ch
+        else '<span style="color:#64748b;">End of book</span>'
+    )
+    pub_badge = (
+        '<span class="badge badge-public">public</span>'
+        if book.get("public_corpus")
+        else f'<span class="badge badge-restricted">private &middot; {_esc(book.get("license"))}</span>'
+    )
+
+    return f"""<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>{_esc(book['title'])} &mdash; {_esc(ch['title'])}</title>
+  <style>{_SHARED_CSS}</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="row-flex">
+      <div>
+        <a class="pill" href="{back_href}">{back_label}</a>
+        <a class="pill" href="{threads_href}">Activity Threads</a>
+        {pub_badge}
+      </div>
+      <div style="display:flex; gap:0.5rem; align-items:center;">
+        <button id="btn-mode-vi" class="btn" type="button">Vietnamese Only</button>
+        <button id="btn-mode-bi" class="btn btn-sec" type="button">Bilingual EN&ndash;VI</button>
+      </div>
+    </div>
+    <h1 style="margin:0.75rem 0 0.25rem;">{_esc(book['title'])}</h1>
+    <p style="margin:0; color:#94a3b8; font-size:0.92rem;">{_esc(book['author'])} &middot; <code>{_esc(ch['chapter_id'])}</code> &middot; {_esc(ch['title'])}</p>
+    <div class="reader-layout">
+      <aside class="reader-toc">
+        <strong style="font-size:0.92rem;">Table of Contents ({len(toc)})</strong>
+        {"".join(toc_parts)}
+      </aside>
+      <main class="reader-main">
+        {banner_html}
+        <div id="reader-body" class="reader-prose" data-mode="vi">
+          {segs_html}
+        </div>
+        <div class="row-flex" style="margin-top:1.75rem; padding-top:1rem; border-top:1px solid #334155;">
+          {prev_link}
+          {next_link}
+        </div>
+      </main>
+    </div>
+  </div>
+  <script>
+const readerEl = document.getElementById('reader-body');
+const btnVi = document.getElementById('btn-mode-vi');
+const btnBi = document.getElementById('btn-mode-bi');
+function applyReaderMode(mode) {{
+  if (!readerEl) return;
+  const clean = mode === 'bilingual' ? 'bilingual' : 'vi';
+  readerEl.dataset.mode = clean;
+  try {{ localStorage.setItem('collab_reader_mode', clean); }} catch (_e) {{}}
+  if (btnVi && btnBi) {{
+    btnVi.className = clean === 'vi' ? 'btn' : 'btn btn-sec';
+    btnBi.className = clean === 'bilingual' ? 'btn' : 'btn btn-sec';
+  }}
+}}
+btnVi?.addEventListener('click', () => applyReaderMode('vi'));
+btnBi?.addEventListener('click', () => applyReaderMode('bilingual'));
+try {{
+  const saved = localStorage.getItem('collab_reader_mode');
+  if (saved) applyReaderMode(saved);
+}} catch (_e) {{}}
+  </script>
+</body>
+</html>"""
+
+
+def _render_threads_html(cfg: McpServerConfig, data: dict[str, Any]) -> str:
+    admin_view = bool(data.get("admin_view"))
+    base_path = "/admin/threads" if admin_view else "/threads"
+    read_prefix = "/admin/read" if admin_view else "/read"
+    back_href = "/admin" if admin_view else "/"
+    back_label = "&larr; Admin Console" if admin_view else "&larr; Bookshelf"
+    sel_book = str(data.get("selected_book") or "")
+    kind = str(data.get("kind") or "all")
+    books = data.get("books") or []
+    items = data.get("items") or []
+
+    opts = [f'<option value=""{" selected" if not sel_book else ""}>All Books</option>']
+    for b in books:
+        s = str(b["slug"])
+        selected = " selected" if s == sel_book else ""
+        tag = "" if b.get("public_corpus") else " [private]"
+        opts.append(f'<option value="{_esc(s)}"{selected}>{_esc(b["title"])} ({_esc(s)}){tag}</option>')
+
+    def _tab_link(k: str, label: str) -> str:
+        qs = f"?kind={k}" + (f"&book_slug={_esc(sel_book)}" if sel_book else "")
+        cls = "btn" if kind == k else "btn btn-sec"
+        return f'<a class="{cls}" href="{base_path}{qs}">{label}</a>'
+
+    cards: list[str] = []
+    for it in items:
+        body = str(it.get("body_md") or "").strip()
+        if len(body) > 400:
+            preview = _esc(body[:280]) + "..."
+            body_html = (
+                f'<p style="margin:0.5rem 0 0; color:#cbd5e1; font-size:0.88rem;">{preview}</p>'
+                f'<details><summary>Expand full entry ({len(body)} chars)</summary>'
+                f'<pre class="thread-body">{_esc(body)}</pre></details>'
+            )
+        else:
+            body_html = f'<pre class="thread-body">{_esc(body)}</pre>' if body else ""
+
+        if it["thread_type"] == "review":
+            verdict = str(it.get("verdict") or "COMMENT")
+            v_cls = "badge-ok" if verdict == "APPROVE" else ("badge-warn" if verdict == "CHANGES_REQUESTED" else "badge-info")
+            score_val = float(it.get("weighted_score") or 0.0)
+            read_href = f"{read_prefix}/{_esc(it['book_slug'])}/{_esc(it['chapter_id'])}"
+            cards.append(
+                f'<div class="thread-card">'
+                f'<div class="row-flex"><div>'
+                f'<span class="badge {v_cls}">{_esc(verdict)} &middot; {score_val:.2f}/5</span> '
+                f'<a href="{read_href}"><strong>{_esc(it["book_title"])} / <code>{_esc(it["chapter_id"])}</code></strong></a> '
+                f'<small style="color:#94a3b8;">by <code>{_esc(it.get("author_handle"))}</code> &middot; reviewed by <code>{_esc(it.get("actor_handle"))}</code></small>'
+                f'</div><small style="color:#64748b;">{_esc(it.get("created_at")[:19])}</small></div>'
+                f'{body_html}'
+                f'</div>'
+            )
+        else:
+            sev = str(it.get("severity") or "P1")
+            st = str(it.get("status") or "open")
+            st_cls = _STATUS_BADGE_CLASS.get(st, "badge-info")
+            loc = (
+                f' &middot; <a href="{read_prefix}/{_esc(it["book_slug"])}"><code>{_esc(it["book_slug"])}</code></a>'
+                if it.get("book_slug")
+                else ""
+            )
+            triage_html = (
+                f'<p style="margin:0.45rem 0 0; font-size:0.84rem; color:#6ee7b7;">Resolution: {_esc(it.get("resolution_note"))}</p>'
+                if it.get("resolution_note")
+                else ""
+            )
+            cards.append(
+                f'<div class="thread-card">'
+                f'<div class="row-flex"><div>'
+                f'<span class="badge {st_cls}">{_esc(sev)} &middot; {_esc(st)}</span> '
+                f'<strong>{_esc(it.get("title"))}</strong>{loc} '
+                f'<small style="color:#94a3b8;">reported by <code>{_esc(it.get("actor_handle"))}</code></small>'
+                f'</div><small style="color:#64748b;">{_esc(it.get("created_at")[:19])}</small></div>'
+                f'{body_html}{triage_html}'
+                f'</div>'
+            )
+
+    cards_html = "\n".join(cards) if cards else '<div class="card"><small style="color:#94a3b8;">No threads recorded for this filter yet.</small></div>'
+    title_suffix = " (All Books · SSO)" if admin_view else " (Public Corpus)"
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Collab Books &mdash; Activity Threads</title>
+  <style>{_SHARED_CSS}</style>
+</head>
+<body>
+  <div class="wrap">
+    <p><a class="pill" href="{back_href}">{back_label}</a></p>
+    <h1>Agent Review &amp; Bug Threads{title_suffix}</h1>
+    <form method="get" action="{base_path}" class="row-flex" style="margin-bottom:0.5rem;">
+      <div style="display:flex; gap:0.5rem; flex-wrap:wrap;">
+        {_tab_link("all", "All Activity")}
+        {_tab_link("reviews", "Peer Reviews")}
+        {_tab_link("bugs", "Bug Reports")}
+      </div>
+      <div style="display:flex; gap:0.5rem; align-items:center;">
+        <input type="hidden" name="kind" value="{_esc(kind)}"/>
+        <select name="book_slug" onchange="this.form.submit()">
+          {"".join(opts)}
+        </select>
+      </div>
+    </form>
+    {cards_html}
+  </div>
+</body>
+</html>"""
+
+
 def _render_bookshelf_html(cfg: McpServerConfig, books: list[dict[str, Any]]) -> str:
     base = _esc(cfg.public_base_url)
     pending_books_cnt = sum(
@@ -671,36 +1068,36 @@ def _render_bookshelf_html(cfg: McpServerConfig, books: list[dict[str, Any]]) ->
 
         rows_html.append(
             f"<tr>"
-            f"<td><strong>{_esc(b['title'])}</strong><br/><small style='color:#94a3b8;'><code>{_esc(b['slug'])}</code> · {_esc(b['author'])}</small></td>"
+            f"<td><strong>{_esc(b['title'])}</strong><br/><small style='color:#94a3b8;'><code>{_esc(b['slug'])}</code> &middot; {_esc(b['author'])}</small></td>"
             f"<td><code>{_esc(b['source_lang'])} -&gt; {_esc(b['target_lang'])}</code></td>"
             f"<td>{access_badge}{approval_badge}</td>"
             f"<td><span class='badge {badge_cls}'>{_esc(status_str)}</span></td>"
             f"<td>{done} / {int(b['total_chapters'])} ({pct}%)</td>"
-            f"<td>{rel_cell}</td>"
+            f"<td><a class='pill' href='/read/{_esc(b['slug'])}'>Read &rarr;</a> {rel_cell}</td>"
             f"</tr>"
         )
-    table_body = "\n".join(rows_html) if rows_html else "<tr><td colspan='6'>No books indexed yet.</td></tr>"
+    table_body = "\n".join(rows_html) if rows_html else "<tr><td colspan='6'>No public books indexed yet.</td></tr>"
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>Collab Books — Multi-Agent Translation Hub</title>
+  <title>Collab Books &mdash; Human Reader &amp; Translation Hub</title>
   <style>{_SHARED_CSS}</style>
 </head>
 <body>
   <div class="wrap">
-    <h1>Collab Books — Multi-Agent Translation Hub</h1>
+    <h1>Collab Books &mdash; Reader &amp; Translation Hub</h1>
     <p>
+      <span class="pill"><a href="/threads">Activity Threads</a></span>
       <span class="pill">MCP: <code>{base}/mcp</code></span>
-      <span class="pill">Auto 3-word <code>AGENT_KEY</code></span>
       <span class="pill"><a href="/llms.txt">/llms.txt</a></span>
       <span class="pill"><a href="/admin">Admin Approvals &amp; Access (SSO)</a>{pending_pill}</span>
       <span class="pill"><a href="https://github.com/{_esc(cfg.books_repo_full_name)}">GitHub: {_esc(cfg.books_repo_full_name)}</a></span>
     </p>
     <table>
       <thead>
-        <tr><th>Book</th><th>Pair</th><th>Access &amp; Policy</th><th>Status</th><th>Chapters</th><th>Release / Action</th></tr>
+        <tr><th>Book</th><th>Pair</th><th>Access &amp; Policy</th><th>Status</th><th>Chapters</th><th>Read &amp; Release</th></tr>
       </thead>
       <tbody>
         {table_body}
@@ -708,41 +1105,12 @@ def _render_bookshelf_html(cfg: McpServerConfig, books: list[dict[str, Any]]) ->
     </table>
 
     <div class="card">
-      <h2 style="margin:0 0 0.35rem; font-size:1.15rem;">Connect Any AI Agent in 10 Seconds (Zero Prompt Boilerplate)</h2>
+      <h2 style="margin:0 0 0.35rem; font-size:1.1rem;">Invite-Only Agent Collaboration</h2>
       <p style="margin:0; color:#94a3b8; font-size:0.92rem;">
-        This MCP server sends its own workflow instructions automatically during <code>initialize</code> and mints an easy-to-read 3-word <code>AGENT_KEY</code> (e.g. <code>amber-fox-river</code>) on first registration or write.
+        Open anonymous writes and self-registration are disabled on this hub. Contributors require an admin-minted 3-word <code>AGENT_KEY</code> from <a href="/admin">/admin</a>, and review comments are capped cleanly at 2,000 characters. Private copyright-restricted manuscripts are accessible strictly behind Google SSO at <code>/admin/read/&lt;slug&gt;</code>.
       </p>
-      <div class="grid">
-        <div>
-          <div class="snippet-head"><strong>MCP JSON (Antigravity / Cursor / Codex)</strong><button class="copy-btn" onclick="copyText('snip-json', this)">Copy</button></div>
-          <pre id="snip-json">{{
-  "mcpServers": {{
-    "collab-books": {{
-      "url": "{base}/mcp"
-    }}
-  }}
-}}</pre>
-        </div>
-        <div>
-          <div class="snippet-head"><strong>Claude Code CLI</strong><button class="copy-btn" onclick="copyText('snip-cli', this)">Copy</button></div>
-          <pre id="snip-cli">claude mcp add --transport http collab-books {base}/mcp</pre>
-          <div class="snippet-head" style="margin-top:0.85rem;"><strong>1-Line Agent Prompt</strong><button class="copy-btn" onclick="copyText('snip-prompt', this)">Copy</button></div>
-          <pre id="snip-prompt">Use the collab-books MCP to register your agent key and help translate an open chapter.</pre>
-        </div>
-      </div>
     </div>
   </div>
-  <script>
-    function copyText(id, btn) {{
-      const el = document.getElementById(id);
-      if (!el) return;
-      navigator.clipboard.writeText(el.textContent.trim()).then(() => {{
-        const orig = btn.textContent;
-        btn.textContent = "Copied!";
-        setTimeout(() => {{ btn.textContent = orig; }}, 1200);
-      }});
-    }}
-  </script>
 </body>
 </html>"""
 
@@ -990,7 +1358,9 @@ def _render_admin_book_card(b: dict[str, Any], agents: list[dict[str, Any]]) -> 
 
     pub_corpus = bool(b.get("public_corpus", True))
     corpus_badge = "" if pub_corpus else ' <span class="badge badge-restricted">private &middot; no GitHub sync</span>'
-    extra_btns: list[str] = []
+    extra_btns: list[str] = [
+        f'<a class="pill" href="/admin/read/{esc_slug}">Open Reader &rarr;</a>'
+    ]
     if status_str == "active":
         extra_btns.append(f'<button class="btn btn-sec js-book-fallback" data-slug="{esc_slug}">Run Fallback</button>')
     safe_rel = _safe_http_url(str(b.get("release_url") or ""))
@@ -1100,7 +1470,7 @@ def _render_admin_html(
 </head>
 <body>
   <div class="wrap">
-    <p><a href="/">&larr; Back to Bookshelf</a></p>
+    <p><a class="pill" href="/">&larr; Back to Bookshelf</a> <a class="pill" href="/admin/threads">Agent Threads (All Books)</a></p>
     <h1>Collab Books Admin — Approvals &amp; Access Control</h1>
     <p style="color:#94a3b8;">Approve book proposals, promote 3-word <code>AGENT_KEY</code>s to <code>agent_admin</code>, review or merge chapter submissions, toggle per-book peer/manual/auto policy &amp; restricted allowlists on <code>{_esc(cfg.public_base_url)}</code>.</p>
 
@@ -1111,7 +1481,10 @@ def _render_admin_html(
         <span class="pill">Open Bug Reports: <strong>{open_bugs}</strong></span>
         <span class="pill">Registered Agents: <strong>{len(agents)}</strong></span>
       </div>
-      <button id="btn-global-fallback" class="btn btn-sec">Run Starved Fallback</button>
+      <div style="display:flex; gap:0.5rem; flex-wrap:wrap;">
+        <button id="btn-purge-tests" class="btn btn-sec">Purge Test Clutter</button>
+        <button id="btn-global-fallback" class="btn btn-sec">Run Starved Fallback</button>
+      </div>
     </div>
     <div id="global-msg" class="status-msg"></div>
 
@@ -1256,7 +1629,7 @@ def create_app(
     mcp = MCPServer(
         "collab-books",
         title="Collab Books Multi-Agent Translation Hub",
-        version="4.3.1",
+        version="4.4.0",
         website_url=eff_cfg.public_base_url,
         instructions=MCP_SERVER_INSTRUCTIONS,
     )
@@ -1356,10 +1729,11 @@ def create_app(
         handle: str = "",
         display_name: str = "",
         model_info: str = "",
+        admin_token: str = "",
     ) -> dict[str, Any]:
-        """Self-serve agent registration with zero required arguments. Mints an easy-to-read 3-word AGENT_KEY (e.g. amber-fox-river) and returns your handle. Save the returned agent_key and pass it on future calls (or share it with the admin to access restricted books or promote to agent_admin)."""
+        """Mint an easy-to-read 3-word AGENT_KEY (e.g. amber-fox-river). Invite-only by default (requires admin_token / ADMIN unless ALLOW_ANONYMOUS_WRITES=true)."""
         return eff_service.register_agent(
-            _ctx(),
+            _ctx(None, admin_token or None),
             handle=handle,
             display_name=display_name,
             model_info=model_info,
@@ -1893,6 +2267,80 @@ def create_app(
         except Exception as exc:
             return _error_response(exc)
 
+    @mcp.custom_route("/read/{slug}", methods=["GET"])
+    @mcp.custom_route("/read/{slug}/{chapter_id}", methods=["GET"])
+    async def public_reader(request: Request) -> Response:
+        def _work() -> str:
+            ctx = _req_ctx(request)
+            slug = str(request.path_params["slug"])
+            ch_id = request.path_params.get("chapter_id")
+            data = eff_service.get_reader_book_view(
+                ctx,
+                book_slug=slug,
+                chapter_id=str(ch_id) if ch_id else None,
+                admin_view=False,
+            )
+            return _render_reader_html(eff_cfg, data)
+
+        try:
+            return HTMLResponse(await _run_sync(_work))
+        except Exception as exc:
+            return _error_response(exc)
+
+    @mcp.custom_route("/admin/read/{slug}", methods=["GET"])
+    @mcp.custom_route("/admin/read/{slug}/{chapter_id}", methods=["GET"])
+    async def admin_reader(request: Request) -> Response:
+        def _work() -> str:
+            ctx = _req_ctx(request)
+            slug = str(request.path_params["slug"])
+            ch_id = request.path_params.get("chapter_id")
+            data = eff_service.get_reader_book_view(
+                ctx,
+                book_slug=slug,
+                chapter_id=str(ch_id) if ch_id else None,
+                admin_view=True,
+            )
+            return _render_reader_html(eff_cfg, data)
+
+        try:
+            return HTMLResponse(await _run_sync(_work))
+        except Exception as exc:
+            return _error_response(exc)
+
+    @mcp.custom_route("/threads", methods=["GET"])
+    async def public_threads(request: Request) -> Response:
+        def _work() -> str:
+            ctx = _req_ctx(request)
+            data = eff_service.list_activity_threads(
+                ctx,
+                book_slug=request.query_params.get("book_slug") or None,
+                kind=request.query_params.get("kind") or "all",
+                admin_view=False,
+            )
+            return _render_threads_html(eff_cfg, data)
+
+        try:
+            return HTMLResponse(await _run_sync(_work))
+        except Exception as exc:
+            return _error_response(exc)
+
+    @mcp.custom_route("/admin/threads", methods=["GET"])
+    async def admin_threads(request: Request) -> Response:
+        def _work() -> str:
+            ctx = _req_ctx(request)
+            data = eff_service.list_activity_threads(
+                ctx,
+                book_slug=request.query_params.get("book_slug") or None,
+                kind=request.query_params.get("kind") or "all",
+                admin_view=True,
+            )
+            return _render_threads_html(eff_cfg, data)
+
+        try:
+            return HTMLResponse(await _run_sync(_work))
+        except Exception as exc:
+            return _error_response(exc)
+
     @mcp.custom_route("/admin", methods=["GET"])
     @mcp.custom_route("/admin/", methods=["GET"])
     async def admin_dashboard(request: Request) -> Response:
@@ -1909,6 +2357,20 @@ def create_app(
         except Exception as exc:
             return _error_response(exc)
 
+    @mcp.custom_route("/admin/api/purge-test-artifacts", methods=["POST"])
+    @mcp.custom_route("/api/v1/admin/purge-test-artifacts", methods=["POST"])
+    async def api_admin_purge_tests(request: Request) -> Response:
+        try:
+            body = await _parse_json_body(request)
+
+            def _work() -> dict[str, Any]:
+                ctx = _req_ctx(request, admin_token=body.get("admin_token"))
+                return eff_service.purge_test_artifacts(ctx)
+
+            return JSONResponse(await _run_sync(_work))
+        except Exception as exc:
+            return _error_response(exc)
+
     @mcp.custom_route("/llms.txt", methods=["GET"])
     @mcp.custom_route("/api/llms.txt", methods=["GET"])
     async def llms_txt_route(_request: Request) -> Response:
@@ -1920,7 +2382,7 @@ def create_app(
             {
                 "status": "ok",
                 "service": "collab-mcp",
-                "version": "4.3.1",
+                "version": "4.4.0",
                 "books_repo": eff_cfg.books_repo_full_name,
             }
         )
@@ -1931,7 +2393,7 @@ def create_app(
             body = await _parse_json_body(request)
 
             def _work() -> dict[str, Any]:
-                ctx = _req_ctx(request)
+                ctx = _req_ctx(request, admin_token=body.get("admin_token"))
                 return eff_service.register_agent(
                     ctx,
                     handle=str(body.get("handle") or ""),

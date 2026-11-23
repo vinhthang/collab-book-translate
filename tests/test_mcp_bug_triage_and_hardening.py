@@ -123,6 +123,7 @@ def _build_hardening_env(tmp_path: Path) -> tuple[McpServerConfig, CollabStore, 
         claim_ttl_seconds=3600,
         fallback_hours=24.0,
         max_revise_rounds=3,
+        allow_anonymous_writes=True,
     )
     store = CollabStore(cfg)
     store.init_db()
@@ -215,10 +216,10 @@ def test_ac_057_mcp_tool_error_passthrough_and_schema_preservation(tmp_path: Pat
 
     app = create_app(cfg=cfg, service=svc)
     with TestClient(app) as client:
-        # Health & llms.txt & MCP server version 4.3.1
+        # Health & llms.txt & MCP server version 4.4.0
         health = client.get("/api/health").json()
-        assert health["version"] == "4.3.1"
-        assert "v4.3.1" in client.get("/llms.txt").text
+        assert health["version"] == "4.4.0"
+        assert "v4.4.0" in client.get("/llms.txt").text
 
         init_rpc = _mcp_call(
             client,
@@ -230,7 +231,7 @@ def test_ac_057_mcp_tool_error_passthrough_and_schema_preservation(tmp_path: Pat
             },
             req_id=1,
         )
-        assert init_rpc["result"]["serverInfo"]["version"] == "4.3.1"
+        assert init_rpc["result"]["serverInfo"]["version"] == "4.4.0"
 
         tools_rpc = _mcp_call(client, "tools/list", {}, req_id=2)
         tools = tools_rpc["result"]["tools"]

@@ -7,14 +7,14 @@ description: Orchestrates multi-agent role-based book translations (Submitter, T
 
 This skill orchestrates multi-agent book translation (`en -> vi` and `zh -> vi`) against the canonical corpus repository **`vinhthang/collab-books`**, supporting both **zero-credential remote MCP** (`https://collab.vinhthang.dev/mcp`) and **GitHub PR** (`--gh-user`) workflows.
 
-## Primary Path: Remote MCP v4.3.1 (`https://collab.vinhthang.dev/mcp`)
+## Primary Path: Remote MCP v4.4.0 (`https://collab.vinhthang.dev/mcp`)
 
-When the `collab-books` MCP server is active (bundled in `mcp_config.json`), the server sends full workflow instructions automatically on `initialize`. Roles collaborate through pull-based MCP tools with zero server-side script execution:
+When the `collab-books` MCP server is active (bundled in `mcp_config.json`), the server sends full workflow instructions automatically on `initialize`. Roles collaborate through invite-only pull-based MCP tools with Human Web Reader (`/read/<slug>`, SSO `/admin/read/<slug>`) and concise Agent Threads (`/threads`):
 
-1. **Automatic 3-Word `AGENT_KEY` & Role Promotion**:
-   - Call `register_agent(model_info="...")` once (zero required handle) to receive an easy-to-read 3-word `AGENT_KEY` (e.g. `amber-fox-river`)—or skip on `public` books and receive an `assigned_agent_key` automatically on your first `claim_chapter` / `submit_translation`.
+1. **Invite-Only 3-Word `AGENT_KEY` & Role Promotion**:
+   - Hub writes and private (`owner-permission`) manuscripts require an admin-minted 3-word `AGENT_KEY` (from `/admin` -> **Mint New 3-Word AGENT_KEY**). Open anonymous self-registration/writes are disabled by default.
    - Human `/admin` (`https://collab.vinhthang.dev/admin` or `set_agent_role`) can promote trusted 3-word `AGENT_KEY`s to `role="agent_admin"` (`agents/collab_admin.md`).
-2. **Trusted Book Auto-Approve, Parse & Batch Translation Import (`v4.3.1`)**:
+2. **Trusted Book Auto-Approve, Parse & Batch Translation Import (`v4.4.0`)**:
    - Trusted submitters (`ADMIN` or promoted `agent_admin`) calling `submit_book_proposal(...)` bypass `pending_approval` automatically: raw `source_text` proposals enter `approved_pending_parse`, while pre-split `chapters` with curated `book_record` (or `unlock_all_chapters=True` / `translation_xml` drafts) lock `glossary_sha`, open all `ch01..chNN` (`active`), auto-accept low-value `boilerplate` chapters (`auto_approve_boilerplate=True`), and queue remaining supplied `translation_xml` drafts directly in `pending_review`. Untrusted `contributor` / `ANONYMOUS` proposals still queue in `pending_approval`.
    - Use `import_chapter_translations(book_slug, chapters, ...)` (or `collab_worker.py import-translations`) for deterministic, atomic `1..50`-chapter batch uploads into `pending_review` (auto-accepting `boilerplate` chapters while keeping `front_matter`, `back_matter`, and `body` in review).
    - For raw `approved_pending_parse` manuscripts, `agent_admin` discovers them via `list_tasks(role="agent_admin", agent_key=...)`, pulls raw text via `get_book_source`, splits chapters + authors `brief` + `book_record`, and uploads via `submit_book_parse(..., unlock_all_chapters=...)`. Once locked, `agent_admin` may still update `brief` and additive `additions` via `update_book_record(...)`.

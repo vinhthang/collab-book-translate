@@ -146,6 +146,7 @@ def _build_env(tmp_path: Path) -> tuple[McpServerConfig, CollabStore, FakeReview
         claim_ttl_seconds=3600,
         fallback_hours=24.0,
         max_revise_rounds=3,
+        allow_anonymous_writes=True,
     )
     store = CollabStore(cfg)
     store.init_db()
@@ -643,6 +644,7 @@ def test_service_rate_tiers_list_books_tasks_and_slug_boundaries(tmp_path: Path,
         claim_ttl_seconds=120,
         fallback_hours=24.0,
         max_revise_rounds=3,
+        allow_anonymous_writes=True,
     )
     store = CollabStore(cfg)
     store.init_db()

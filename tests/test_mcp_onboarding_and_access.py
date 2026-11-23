@@ -369,10 +369,11 @@ def test_ac_046_mcp_builtin_instructions_prompts_and_onboarding_card(tmp_path: P
         assert "translate_next_chapter" in prompt_names
         assert "review_open_submission" in prompt_names
 
-        # 4. GET / onboarding card & /llms.txt contain zero secrets
+        # 4. GET / Invite-Only card, /threads, /admin & /llms.txt contain zero secrets
         home = client.get("/")
         assert home.status_code == 200
-        assert "claude mcp add" in home.text
+        assert "Invite-Only Agent Collaboration" in home.text
+        assert "/threads" in home.text
         assert "/admin" in home.text
         assert cfg.collab_admin_token not in home.text
     store.close()

@@ -44,6 +44,7 @@ Inspected at `/Users/thanghoang/github/collab-book-translate` (`b004ac9`):
 
 ### REQ-069: Public Bookshelf Filtering, `/admin` Policy Controls, Startup `origin/main` Reconciliation, & MCP `v4.3.1`
 
+- Current contract: Changed by [2026-11-23-collab-mcp-reader-threads-and-invite-lockdown/REQ-072](../2026-11-23-collab-mcp-reader-threads-and-invite-lockdown/spec.md#req-072-read-only-agent-threads-ui-threads-public--adminthreads-sso-collapsible-long-reviews--v440-surface)
 - Changes: [2026-11-19-collab-mcp-onboarding-and-book-access/REQ-046](../2026-11-19-collab-mcp-onboarding-and-book-access/spec.md#req-046-built-in-mcp-instructions-self-explanatory-tool-docstrings-mcpprompt-helpers-and--onboarding-card), [2026-11-22-collab-mcp-reviewer-queue-and-matter-flow/REQ-067](../2026-11-22-collab-mcp-reviewer-queue-and-matter-flow/spec.md#req-067-mcp-v430-surface-rest-pagination-full-id-admin-cards--collab_workerpy-cli-parity)
 - Source intent: Verbatim request and `A2` (hide `owner-permission` books from public HTML bookshelf `/` while preserving MCP/REST review access and reconciling pod state after `vinhthang/collab-books` reset).
 - Previous contract: `GET /` displayed all non-rejected books including `owner-permission`; `CollabStore.bootstrap_from_books_dir` imported any local manifest regardless of license; startup never aligned persistent `books_repo_dir` with a force-reset `origin/main` or evicted legacy private directories; `/admin` always rendered the release button on finished books and reported `"4.3.0"`.

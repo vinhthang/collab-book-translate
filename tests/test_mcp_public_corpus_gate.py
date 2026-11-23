@@ -396,11 +396,11 @@ def test_req_069_public_bookshelf_filter_startup_origin_reconcile_and_v431(tmp_p
         assert not (work_repo / "runs" / "the-changing-world-order").exists()
         assert (cfg.books_repo_dir.parent / "private-books" / "runs" / "the-changing-world-order" / "collab_ledger.json").is_file()
 
-        # 1. Health, /llms.txt, plugin.json, MCP initialize report "4.3.1"
-        assert client.get("/api/health").json()["version"] == "4.3.1"
-        assert "v4.3.1" in client.get("/llms.txt").text
+        # 1. Health, /llms.txt, plugin.json, MCP initialize report "4.4.0"
+        assert client.get("/api/health").json()["version"] == "4.4.0"
+        assert "v4.4.0" in client.get("/llms.txt").text
         repo_root = Path(__file__).resolve().parent.parent
-        assert json.loads((repo_root / "plugin.json").read_text(encoding="utf-8"))["version"] == "4.3.1"
+        assert json.loads((repo_root / "plugin.json").read_text(encoding="utf-8"))["version"] == "4.4.0"
 
         init_rpc = client.post(
             "/mcp",
@@ -409,10 +409,14 @@ def test_req_069_public_bookshelf_filter_startup_origin_reconcile_and_v431(tmp_p
                 "jsonrpc": "2.0",
                 "id": 1,
                 "method": "initialize",
-                "params": {"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}},
+                "params": {
+                    "protocolVersion": "2025-03-26",
+                    "capabilities": {},
+                    "clientInfo": {"name": "t", "version": "1"},
+                },
             },
         ).json()
-        assert init_rpc["result"]["serverInfo"]["version"] == "4.3.1"
+        assert init_rpc["result"]["serverInfo"]["version"] == "4.4.0"
 
         # 2. Public HTML bookshelf '/' hides owner-permission book & unbootstrapped leftover-private, shows gift-of-the-magi
         shelf_html = client.get("/").text
@@ -420,8 +424,14 @@ def test_req_069_public_bookshelf_filter_startup_origin_reconcile_and_v431(tmp_p
         assert "the-changing-world-order" not in shelf_html
         assert "leftover-private" not in shelf_html
 
-        # 3. MCP/REST list_books still returns the-changing-world-order (with public_corpus=False) for peer review
-        api_books = {b["slug"]: b for b in client.get("/api/v1/books").json()["books"]}
+        # 3. Anonymous list_books hides owner-permission (REQ-070); admin-minted AGENT_KEY still sees it with public_corpus=False
+        anon_books = {b["slug"]: b for b in client.get("/api/v1/books").json()["books"]}
+        assert "the-changing-world-order" not in anon_books
+        t_reg = client.post("/api/v1/agents/register", headers=admin_hdr, json={"handle": "tr-gift"}).json()
+        api_books = {
+            b["slug"]: b
+            for b in client.get("/api/v1/books", headers={"Authorization": f"Bearer {t_reg['agent_key']}"}).json()["books"]
+        }
         assert "leftover-private" not in api_books
         assert api_books["gift-of-the-magi"]["public_corpus"] is True
         assert api_books["the-changing-world-order"]["public_corpus"] is False
@@ -447,7 +457,6 @@ def test_req_069_public_bookshelf_filter_startup_origin_reconcile_and_v431(tmp_p
             '<segment id="S-0001" type="paragraph">\n<original>\nOne dollar and eighty-seven cents.\n</original>\n'
             '<translate>\nMột đô la tám mươi bảy xu (chương 2).\n</translate>\n</segment>\n'
         )
-        t_reg = client.post("/api/v1/agents/register", json={"handle": "tr-gift"}).json()
         client.post(
             f"/api/v1/admin/books/gift-of-the-magi/approval-mode",
             headers=admin_hdr,

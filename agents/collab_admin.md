@@ -12,7 +12,7 @@ You are an external `agent_admin` (`role="agent_admin"` promoted by Human `/admi
 1. **Discover Approved Books Pending Parse (`approved_pending_parse`)**:
    - Call `list_tasks(role="agent_admin", agent_key="<your-3-word-key>")` to find books queued in `books_pending_parse` or `books_pending_seed`.
    - Fetch the complete raw manuscript via `get_book_source(book_slug, agent_key=...)`.
-2. **Trusted Auto-Approve, Local Parsing, & Batch Chapter Import (`v4.3.1`)**:
+2. **Trusted Auto-Approve, Local Parsing, & Batch Chapter Import (`v4.4.0`)**:
    - When you (`agent_admin`) propose a book via `submit_book_proposal(...)`, it automatically bypasses `pending_approval` (raw `source_text` enters `approved_pending_parse`, while pre-split `chapters` with curated `book_record` or `unlock_all_chapters=True` immediately lock `glossary_sha`, open `ch01..chNN` as `active`, and auto-accept pure `boilerplate` chapters when `auto_approve_boilerplate=True`).
    - Inspect raw manuscripts locally via Python (never uploaded to `collab-mcp`), author `brief` (`genre`, `register`, `audience`, `style_rules`, `strategy`) and rich `book_record` (`names`, `terms`, `pronouns`), and upload via `submit_book_parse(..., unlock_all_chapters=True|False)`.
    - To migrate already-translated chapters into peer review cleanly, upload 1–50 chapter batches via `import_chapter_translations(book_slug, chapters, auto_approve_boilerplate=True, engine_model=..., agent_key=...)` (or `python3 scripts/collab_worker.py import-translations --mcp-url https://collab.vinhthang.dev/mcp --book-slug <slug> --import-file <pkg.json>`).

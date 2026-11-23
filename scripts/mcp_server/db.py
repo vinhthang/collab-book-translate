@@ -17,6 +17,8 @@ from scripts.mcp_server.config import McpServerConfig
 from scripts.mcp_server.git_sync import PUBLIC_CORPUS_LICENSES, is_public_corpus_book
 
 HANDLE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{1,38}[a-z0-9]$")
+_TEST_BOOK_SLUG_RE = re.compile(r"^(?:live-smoke-|live-v2-|e2e-|smoke-|test-smoke-)")
+_TEST_AGENT_HANDLE_RE = re.compile(r"^(?:e2e-|smoke-|test-bot-)")
 
 SCHEMA_STATEMENTS_COMMON = (
     """
@@ -1264,6 +1266,101 @@ class CollabStore:
         if updated is None:
             raise RuntimeError(f"Failed to update bug report '{bug_id}'")
         return updated
+
+    def list_recent_peer_reviews(
+        self,
+        *,
+        book_slug: Optional[str] = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """List recent peer reviews joined with submission metadata for Activity Threads."""
+        capped = max(1, min(int(limit), 300))
+        clauses = []
+        params: list[Any] = []
+        if book_slug:
+            clauses.append("s.book_slug = ?")
+            params.append(book_slug)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(capped)
+        rows = self._exec(
+            f"""
+            SELECT pr.*, s.book_slug, s.chapter_id, s.author_handle,
+                   s.status AS submission_status, s.round_number, s.engine_model
+            FROM peer_reviews pr
+            JOIN submissions s ON s.id = pr.submission_id
+            {where}
+            ORDER BY pr.created_at DESC
+            LIMIT ?
+            """,
+            tuple(params),
+            fetchall=True,
+        )
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            item = dict(r)
+            item["scores"] = json.loads(item.pop("scores_json", "{}") or "{}")
+            item["issues"] = json.loads(item.pop("issues_json", "[]") or "[]")
+            out.append(item)
+        return out
+
+    def purge_test_artifacts(self) -> dict[str, list[str]]:
+        """Delete rejected smoke/e2e test books (cascading rows) and orphan test agents."""
+        with self._lock:
+            purged_books: list[str] = []
+            purged_agents: list[str] = []
+
+            book_rows = self._exec(
+                "SELECT slug, status FROM books WHERE status = 'rejected'",
+                fetchall=True,
+            )
+            for row in book_rows:
+                slug = str(row.get("slug") or "")
+                if not _TEST_BOOK_SLUG_RE.match(slug):
+                    continue
+                sub_rows = self._exec(
+                    "SELECT id FROM submissions WHERE book_slug = ?",
+                    (slug,),
+                    fetchall=True,
+                )
+                for sr in sub_rows:
+                    self._exec("DELETE FROM peer_reviews WHERE submission_id = ?", (sr["id"],))
+                self._exec("DELETE FROM submissions WHERE book_slug = ?", (slug,))
+                self._exec("DELETE FROM chapters WHERE book_slug = ?", (slug,))
+                self._exec("DELETE FROM bug_reports WHERE book_slug = ?", (slug,))
+                self._exec("DELETE FROM books WHERE slug = ?", (slug,))
+                purged_books.append(slug)
+
+            agent_rows = self._exec("SELECT handle FROM agents", fetchall=True)
+            for row in agent_rows:
+                handle = str(row.get("handle") or "")
+                if not _TEST_AGENT_HANDLE_RE.match(handle):
+                    continue
+                actor = f"agent:{handle}"
+                has_sub = self._exec(
+                    "SELECT id FROM submissions WHERE author_actor_id = ? OR author_handle = ? LIMIT 1",
+                    (actor, handle),
+                    fetchone=True,
+                )
+                has_rev = self._exec(
+                    "SELECT id FROM peer_reviews WHERE reviewer_actor_id = ? OR reviewer_handle = ? LIMIT 1",
+                    (actor, handle),
+                    fetchone=True,
+                )
+                has_bug = self._exec(
+                    "SELECT id FROM bug_reports WHERE reporter_actor_id = ? OR reporter_handle = ? LIMIT 1",
+                    (actor, handle),
+                    fetchone=True,
+                )
+                has_book = self._exec(
+                    "SELECT slug FROM books WHERE proposed_by = ? LIMIT 1",
+                    (handle,),
+                    fetchone=True,
+                )
+                if not (has_sub or has_rev or has_bug or has_book):
+                    self._exec("DELETE FROM agents WHERE handle = ?", (handle,))
+                    purged_agents.append(handle)
+
+            return {"purged_books": sorted(purged_books), "purged_agents": sorted(purged_agents)}
 
 
 def parse_utc_timestamp(raw_iso: str) -> Optional[float]:

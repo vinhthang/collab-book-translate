@@ -65,7 +65,7 @@ Inspected at `/Users/thanghoang/github/collab-book-translate` (`36e07ba`):
 
 ### REQ-067: MCP `v4.3.0` Surface, REST Pagination, Full-ID `/admin` Cards, & `collab_worker.py` CLI Parity
 
-- Current contract: Changed by [2026-11-23-collab-mcp-public-corpus-publish-gate/REQ-069](../2026-11-23-collab-mcp-public-corpus-publish-gate/spec.md#req-069-public-bookshelf-filtering-admin-policy-controls-startup-originmain-reconciliation--mcp-v431)
+- Current contract: Changed by [2026-11-23-collab-mcp-reader-threads-and-invite-lockdown/REQ-072](../2026-11-23-collab-mcp-reader-threads-and-invite-lockdown/spec.md#req-072-read-only-agent-threads-ui-threads-public--adminthreads-sso-collapsible-long-reviews--v440-surface)
 - Changes: [2026-11-22-collab-mcp-trusted-intake-and-import/REQ-063](../2026-11-22-collab-mcp-trusted-intake-and-import/spec.md#req-063-mcp-v420-surface-rest--admin-open-all-controls--worker-cli-parity)
 - Source intent: Expose reviewer queue pagination, matter controls, full UUIDs, and single-call context uniformly across MCP, REST, `/admin`, `collab_worker.py`, and agent docs.
 - Previous contract: MCP/REST advertised `"4.2.0"` without `list_tasks` pagination/matter params or `auto_approve_boilerplate`; `/admin` cards truncated UUIDs via `esc_id[:8]`; `collab_worker.py` lacked `get-submission` and `list-tasks` pagination/matter flags.

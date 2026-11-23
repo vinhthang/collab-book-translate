@@ -173,16 +173,16 @@ def _curated_brief() -> dict[str, Any]:
 
 def test_req_061_trusted_submit_proposal_auto_approve_and_boundaries(tmp_path: Path):
     _, store, _, svc, work_repo = _build_env(tmp_path)
-    reg_coord = svc.register_agent(AuthContext("ANONYMOUS", "anon:1", "anon", "h1"), handle="coord-1")
+    admin = AuthContext("ADMIN", "admin:token", "admin", "h5", agent_role="admin")
+    reg_coord = svc.register_agent(admin, handle="coord-1")
     svc.store.set_agent_role(handle="coord-1", role="agent_admin")
-    reg_contrib = svc.register_agent(AuthContext("ANONYMOUS", "anon:2", "anon", "h2"), handle="contrib-1")
-    reg_peer = svc.register_agent(AuthContext("ANONYMOUS", "anon:3", "anon", "h3"), handle="peer-rev")
+    reg_contrib = svc.register_agent(admin, handle="contrib-1")
+    reg_peer = svc.register_agent(admin, handle="peer-rev")
 
     coord = AuthContext("AGENT_KEY", "agent:coord-1", "coord-1", "h1", agent_role="agent_admin")
     contrib = AuthContext("AGENT_KEY", "agent:contrib-1", "contrib-1", "h2", agent_role="contributor")
     peer = AuthContext("AGENT_KEY", "agent:peer-rev", "peer-rev", "h3", agent_role="contributor")
     anon = AuthContext("ANONYMOUS", "anon:ip4", "anon", "h4", agent_role="contributor")
-    admin = AuthContext("ADMIN", "admin:token", "admin", "h5", agent_role="admin")
 
     # 1. Trusted agent_admin + curated book_record + pre-split chapters (with optional translation_xml on ch01)
     #    -> auto-approved to status="active", glossary_sha locked, all ch01..ch03 open (no locked_seed), ch01 in pending_review!
@@ -417,15 +417,15 @@ def test_req_061_trusted_submit_proposal_auto_approve_and_boundaries(tmp_path: P
 
 def test_req_062_batch_import_chapter_translations_and_continuity(tmp_path: Path):
     _, store, _, svc, _ = _build_env(tmp_path)
-    svc.register_agent(AuthContext("ANONYMOUS", "anon:1", "anon", "h1"), handle="coord-2")
+    admin = AuthContext("ADMIN", "admin:token", "admin", "h4", agent_role="admin")
+    svc.register_agent(admin, handle="coord-2")
     svc.store.set_agent_role(handle="coord-2", role="agent_admin")
-    svc.register_agent(AuthContext("ANONYMOUS", "anon:2", "anon", "h2"), handle="contrib-2")
-    svc.register_agent(AuthContext("ANONYMOUS", "anon:3", "anon", "h3"), handle="peer-2")
+    svc.register_agent(admin, handle="contrib-2")
+    svc.register_agent(admin, handle="peer-2")
 
     coord = AuthContext("AGENT_KEY", "agent:coord-2", "coord-2", "h1", agent_role="agent_admin")
     contrib = AuthContext("AGENT_KEY", "agent:contrib-2", "contrib-2", "h2", agent_role="contributor")
     peer = AuthContext("AGENT_KEY", "agent:peer-2", "peer-2", "h3", agent_role="contributor")
-    admin = AuthContext("ADMIN", "admin:token", "admin", "h4", agent_role="admin")
 
     # 1. Simulate book currently in approved_pending_parse with 30 pre-split chapters (like Dalio books after /admin click)
     presplit_30 = [{"chapter_id": f"ch{i:02d}", "title": f"Chapter {i}", "source_xml": _seg_src(i)} for i in range(1, 31)]
@@ -566,7 +566,7 @@ def test_req_062_batch_import_chapter_translations_and_continuity(tmp_path: Path
 
     # Restricted book: non-allowlisted agent_admin -> 403
     svc.set_book_access(admin, book_slug="dalio-approved-parse", access_mode="restricted", allowed_agents=["coord-2", "peer-2"])
-    svc.register_agent(AuthContext("ANONYMOUS", "anon:9", "anon", "h9"), handle="coord-other")
+    svc.register_agent(admin, handle="coord-other")
     svc.store.set_agent_role(handle="coord-other", role="agent_admin")
     other_coord = AuthContext("AGENT_KEY", "agent:coord-other", "coord-other", "h9", agent_role="agent_admin")
     with pytest.raises(ServiceError) as rest_exc:
@@ -618,10 +618,10 @@ def test_req_063_mcp_v420_rest_admin_ui_and_worker_cli(tmp_path: Path, monkeypat
     with TestClient(app) as client:
         # 1. Health, llms.txt, plugin.json, MCP initialize & 29 tools
         h = client.get("/api/health").json()
-        assert h["version"] == "4.3.1"
-        assert "v4.3.1" in client.get("/llms.txt").text
+        assert h["version"] == "4.4.0"
+        assert "v4.4.0" in client.get("/llms.txt").text
         assert "import_chapter_translations" in client.get("/llms.txt").text
-        assert json.loads((repo_root / "plugin.json").read_text(encoding="utf-8"))["version"] == "4.3.1"
+        assert json.loads((repo_root / "plugin.json").read_text(encoding="utf-8"))["version"] == "4.4.0"
 
         init_rpc = client.post(
             "/mcp",
@@ -637,7 +637,7 @@ def test_req_063_mcp_v420_rest_admin_ui_and_worker_cli(tmp_path: Path, monkeypat
                 },
             },
         ).json()
-        assert init_rpc["result"]["serverInfo"]["version"] == "4.3.1"
+        assert init_rpc["result"]["serverInfo"]["version"] == "4.4.0"
         assert "import_chapter_translations" in init_rpc["result"]["instructions"]
 
         tools_rpc = client.post(
@@ -653,7 +653,8 @@ def test_req_063_mcp_v420_rest_admin_ui_and_worker_cli(tmp_path: Path, monkeypat
         assert "unlock_all_chapters" in tool_map["submit_book_proposal"]["inputSchema"]["properties"]
 
         # 2. Register & promote agent_admin, then propose + import via REST and MCP tools/call
-        reg = client.post("/api/v1/agents/register", json={"handle": "cli-coord"}).json()
+        admin_hdr = {"Authorization": f"Bearer {cfg.collab_admin_token}"}
+        reg = client.post("/api/v1/agents/register", headers=admin_hdr, json={"handle": "cli-coord"}).json()
         client.post(
             "/admin/api/agents/role",
             headers=sso_hdr,
@@ -704,8 +705,10 @@ def test_req_063_mcp_v420_rest_admin_ui_and_worker_cli(tmp_path: Path, monkeypat
         assert imp_res.json()["imported_count"] == 1
 
         # Pending contributor book -> visible on /admin with Approve & Open All Chapters button + HTML-escaped script
+        contrib_reg = client.post("/api/v1/agents/register", headers=admin_hdr, json={"handle": "cli-contrib"}).json()
         p_resp = client.post(
             "/api/v1/books/propose",
+            headers={"Authorization": f"Bearer {contrib_reg['agent_key']}"},
             json={
                 "slug": "open-all-demo",
                 "title": "Demo <script>alert(9)</script>",

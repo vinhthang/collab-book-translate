@@ -217,7 +217,7 @@ def test_req_064_section_type_classification_backfill_and_boilerplate_auto_accep
     # 2. Startup backfill of pre-existing SQLite chapters
     cfg, store, svc = _make_service(tmp_path)
     admin = _auth("ADMIN", "admin", role="admin")
-    aa = svc.register_agent(_auth("ANONYMOUS", "anon-aa"), handle="admin-helper")
+    aa = svc.register_agent(admin, handle="admin-helper")
     svc.set_agent_role(admin, identifier=aa["handle"], role="agent_admin")
     aa_ctx = _auth("AGENT_KEY", aa["handle"], role="agent_admin")
 
@@ -347,7 +347,7 @@ def test_req_065_reviewer_queue_pagination_full_uuid_and_body_first_ordering(tmp
     """REQ-065: Default limit=200, offset pagination, full 36-char submission_id, compact summaries, body-first natural sort."""
     cfg, store, svc = _make_service(tmp_path)
     admin = _auth("ADMIN", "admin", role="admin")
-    aa = svc.register_agent(_auth("ANONYMOUS", "anon-aa"), handle="aa-queue")
+    aa = svc.register_agent(admin, handle="aa-queue")
     svc.set_agent_role(admin, identifier=aa["handle"], role="agent_admin")
     aa_ctx = _auth("AGENT_KEY", aa["handle"], role="agent_admin")
     peer_ctx = _auth("AGENT_KEY", "peer-rev", role="contributor")
@@ -457,7 +457,7 @@ def test_req_066_submission_context_bundle_and_post_lock_brief_and_additions(tmp
     """REQ-066: Unified context + book_record + brief in get_submission_status and post-lock agent_admin brief + additions sync."""
     cfg, store, svc = _make_service(tmp_path)
     admin = _auth("ADMIN", "admin", role="admin")
-    aa = svc.register_agent(_auth("ANONYMOUS", "anon-aa"), handle="aa-ctx")
+    aa = svc.register_agent(admin, handle="aa-ctx")
     svc.set_agent_role(admin, identifier=aa["handle"], role="agent_admin")
     aa_ctx = _auth("AGENT_KEY", aa["handle"], role="agent_admin")
     peer_ctx = _auth("AGENT_KEY", "peer-ctx", role="contributor")
@@ -576,9 +576,9 @@ def test_req_067_mcp_v430_rest_admin_and_worker_cli_parity(tmp_path: Path, monke
     )
 
     with TestClient(app) as client:
-        assert client.get("/api/health").json()["version"] == "4.3.1"
-        assert "v4.3.1" in client.get("/llms.txt").text
-        assert json.loads((repo_root / "plugin.json").read_text(encoding="utf-8"))["version"] == "4.3.1"
+        assert client.get("/api/health").json()["version"] == "4.4.0"
+        assert "v4.4.0" in client.get("/llms.txt").text
+        assert json.loads((repo_root / "plugin.json").read_text(encoding="utf-8"))["version"] == "4.4.0"
 
         init_rpc = client.post(
             "/mcp",
@@ -594,16 +594,17 @@ def test_req_067_mcp_v430_rest_admin_and_worker_cli_parity(tmp_path: Path, monke
                 },
             },
         ).json()
-        assert init_rpc["result"]["serverInfo"]["version"] == "4.3.1"
+        assert init_rpc["result"]["serverInfo"]["version"] == "4.4.0"
 
-        reg = client.post("/api/v1/agents/register", json={"handle": "aa-v43"}).json()
+        admin_hdr = {"Authorization": f"Bearer {cfg.collab_admin_token}"}
+        reg = client.post("/api/v1/agents/register", headers=admin_hdr, json={"handle": "aa-v43"}).json()
         client.post(
             "/admin/api/agents/role",
             headers=sso_hdr,
             json={"identifier": reg["handle"], "role": "agent_admin"},
         )
         aa_hdr = {"Authorization": f"Bearer {reg['agent_key']}"}
-        peer = client.post("/api/v1/agents/register", json={"handle": "peer-v43"}).json()
+        peer = client.post("/api/v1/agents/register", headers=admin_hdr, json={"handle": "peer-v43"}).json()
         peer_hdr = {"Authorization": f"Bearer {peer['agent_key']}"}
 
         # Submit via REST with boilerplate + front_matter + body

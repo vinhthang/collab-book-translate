@@ -46,6 +46,7 @@ Protect `seeding` books for `agent_admin`/`ADMIN`, deterministically recover int
 - `AC-058-4`: Chapter acceptance marks remaining `remediation_required` drafts on that `(book_slug, chapter_id)` as `"superseded"`, startup idempotently retires un-superseded drafts on already-`accepted` chapters, and `list_tasks` restricts `revisions_needed` and actionable review targets to `chapter.status == "open"`.
 
 ### `REQ-059`: `bug_reports` Store, Injection Quarantine, & Triage Lifecycle
+- Current contract: Changed by [2026-11-23-collab-mcp-reader-threads-and-invite-lockdown/REQ-070](../2026-11-23-collab-mcp-reader-threads-and-invite-lockdown/spec.md#req-070-invite-only-registration--writes-private-owner-permission-manuscript-block-concise-reviews--2000-chars--test-artifact-purge)
 Persist bug reports in SQLite/PostgreSQL with input bounds, prompt-injection scanning, access scoping, and audited triage transitions.
 
 - `AC-059-1`: `submit_bug_report` accepts `AGENT_KEY` or `ANONYMOUS` callers (auto-minting a 3-word key via `_maybe_auto_assign_agent` on clean reports, rate-limited), validates `title` (`1..200` chars), `body_md` (`1..65536` bytes), and `severity in {"P0", "P1", "P2", "P3"}`, runs 4-class `detect_prompt_injection`, and quarantines hits as `status="flagged_security"` (HTTP `202`, no auto-key minted).
@@ -53,7 +54,7 @@ Persist bug reports in SQLite/PostgreSQL with input bounds, prompt-injection sca
 - `AC-059-3`: `triage_bug_report` requires `agent_admin` or `ADMIN` (`ADMIN`-only for `flagged_security` overrides), validates `status in {"open", "accepted", "fixed", "declined"}`, requires non-empty `resolution_note` for `"fixed"` / `"declined"`, and records `triaged_by`, `resolution_note`, `fixed_in_version`, and `updated_at`.
 
 ### `REQ-060`: Bug Triage MCP Surface, REST API, `/admin` UI, & CLI
-- Current contract: Changed by [2026-11-23-collab-mcp-public-corpus-publish-gate/REQ-069](../2026-11-23-collab-mcp-public-corpus-publish-gate/spec.md#req-069-public-bookshelf-filtering-admin-policy-controls-startup-originmain-reconciliation--mcp-v431)
+- Current contract: Changed by [2026-11-23-collab-mcp-reader-threads-and-invite-lockdown/REQ-072](../2026-11-23-collab-mcp-reader-threads-and-invite-lockdown/spec.md#req-072-read-only-agent-threads-ui-threads-public--adminthreads-sso-collapsible-long-reviews--v440-surface)
 Expose bug reporting and triage across MCP, REST, `/admin`, CLI, and agent instructions, and align versions to `4.1.0`.
 
 - `AC-060-1`: MCP exposes `28` tools (`submit_bug_report`, `query_bug_reports`, `triage_bug_report` added), `4` prompts (`triage_open_bugs` added), `list_tasks(role="agent_admin")` `open_bug_reports` queue, and server/health/`llms.txt`/`plugin.json` version `"4.1.0"`.

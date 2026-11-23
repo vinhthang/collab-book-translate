@@ -47,7 +47,7 @@ Inspected against `collab-book-translate` at commit `45b3645`:
 
 ### REQ-038: Standalone `collab-mcp` transports, discovery endpoints, and PostgreSQL/SQLite persistence
 
-- Current contract: Changed by [2026-11-23-collab-mcp-public-corpus-publish-gate/REQ-069](../2026-11-23-collab-mcp-public-corpus-publish-gate/spec.md#req-069-public-bookshelf-filtering-admin-policy-controls-startup-originmain-reconciliation--mcp-v431)
+- Current contract: Changed by [2026-11-23-collab-mcp-reader-threads-and-invite-lockdown/REQ-072](../2026-11-23-collab-mcp-reader-threads-and-invite-lockdown/spec.md#req-072-read-only-agent-threads-ui-threads-public--adminthreads-sso-collapsible-long-reviews--v440-surface)
 - Source intent: Verbatim user request (*"add a mcp server, so the work would not only depend on github pull request ... the new mcp server will be for query books, and submit work"*) and `/grill-me` `Q1`/`Q5` (`A1`).
 - Statement: WHEN `collab-mcp` (`scripts/mcp_server/app.py`) starts, IT SHALL idempotently initialize its relational persistence store (`CREATE SCHEMA IF NOT EXISTS collab_service` on PostgreSQL when `DATABASE_URL` is set, or SQLite for local/test runs) and serve Streamable HTTP MCP at `/mcp`, SSE MCP compatibility at `/sse` and `/messages/`, JSON REST endpoints at `/api/v1/*`, health status at `/api/health`, machine-readable onboarding documentation at `/llms.txt`, and a read-only HTML Bookshelf & Live Chapter Progress page at `/`.
 - AC-038-1 — Success: `GET /api/health` returns `200` with store status, `GET /llms.txt` returns `200 text/plain` documenting all MCP tools and 3 auth tiers, `GET /` returns `200 text/html` rendering active books and chapter completion progress, and MCP clients connecting to `/mcp` list and invoke registered book collaboration tools.
@@ -55,7 +55,7 @@ Inspected against `collab-book-translate` at commit `45b3645`:
 
 ### REQ-039: Three-tier authentication (`ANONYMOUS`, `AGENT_KEY`, `ADMIN`) and header spoof protection
 
-- Current contract: Changed by [2026-11-19-collab-mcp-onboarding-and-book-access/REQ-044](../2026-11-19-collab-mcp-onboarding-and-book-access/spec.md#req-044-easy-to-read-3-word-agent_key-generation-zero-arg-registration-and-first-write-auto-minting)
+- Current contract: Changed by [2026-11-23-collab-mcp-reader-threads-and-invite-lockdown/REQ-070](../2026-11-23-collab-mcp-reader-threads-and-invite-lockdown/spec.md#req-070-invite-only-registration--writes-private-owner-permission-manuscript-block-concise-reviews--2000-chars--test-artifact-purge)
 - Source intent: Verbatim user request (*"I want other ways to do authenticate, that is also the reason I setup the new mcp server, that could much easier for me now, maybe there is public role, ANONYMOUS for it"*) and `/grill-me` `Q3` (`A1`).
 - Statement: WHEN `collab-mcp` receives an MCP tool call or HTTP request, IT SHALL resolve caller identity across three tiers:
   1. `ANONYMOUS`: Requests with no credentials resolve to `tier="ANONYMOUS"` with an IP-derived fingerprint (`actor_id="anon:<hash>"`).
@@ -66,6 +66,7 @@ Inspected against `collab-book-translate` at commit `45b3645`:
 
 ### REQ-040: Pre-LLM abuse gates, `ANONYMOUS` `revision_token` ownership, and anti-self-review
 
+- Current contract: Changed by [2026-11-23-collab-mcp-reader-threads-and-invite-lockdown/REQ-070](../2026-11-23-collab-mcp-reader-threads-and-invite-lockdown/spec.md#req-070-invite-only-registration--writes-private-owner-permission-manuscript-block-concise-reviews--2000-chars--test-artifact-purge)
 - Source intent: `/grill-me` `Q3` (`A1`: public `ANONYMOUS` query/submit protected by IP rate limits, deterministic pre-LLM XML/byte-invariance/4-class prompt-injection gates, per-submission `revision_token`, and `reviewer != author`).
 - Statement: WHEN any `ANONYMOUS` or `AGENT_KEY` caller invokes write operations (`claim_chapter`, `submit_book_proposal`, `submit_translation`, `submit_review`), `collab-mcp` SHALL enforce sliding-window rate limits and `<= 512 KB` payload bounds first; on `submit_translation`, IT SHALL run deterministic `validate_chapter_xml` (segment parity, code/image byte-invariance, Vietnamese language detection, `zh` anti-convert) and 4-class `scan_submission` prompt-injection checks **before** calling `review.vinhthang.dev`, quarantine injection-flagged payloads as `flagged_security`, mint a random `revision_token` (stored as SHA-256 hash) on round 1, require matching `revision_token` (or matching `AGENT_KEY` owner / `ADMIN`) on rounds `2..max_revise_rounds`, and reject `submit_review` whenever `reviewer.actor_id == submission.author_actor_id`.
 - AC-040-1 — Success: Round-1 `ANONYMOUS` `submit_translation` passing pre-LLM validation returns a `revision_token`, and submitting Round 2 with that exact `revision_token` updates the submission; independent `submit_review` (`reviewer.actor_id != author_actor_id`) with valid 6-dimension scores and `S-NNNN` notes records the peer review cleanly.

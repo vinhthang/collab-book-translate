@@ -56,7 +56,7 @@ Inspected at `/Users/thanghoang/github/collab-book-translate` (`0702b91`):
 
 ### REQ-063: MCP `v4.2.0` Surface, REST & `/admin` Open-All Controls, & Worker CLI Parity
 
-- Current contract: Changed by [2026-11-23-collab-mcp-public-corpus-publish-gate/REQ-069](../2026-11-23-collab-mcp-public-corpus-publish-gate/spec.md#req-069-public-bookshelf-filtering-admin-policy-controls-startup-originmain-reconciliation--mcp-v431)
+- Current contract: Changed by [2026-11-23-collab-mcp-reader-threads-and-invite-lockdown/REQ-072](../2026-11-23-collab-mcp-reader-threads-and-invite-lockdown/spec.md#req-072-read-only-agent-threads-ui-threads-public--adminthreads-sso-collapsible-long-reviews--v440-surface)
 - Changes: [2026-11-21-collab-mcp-bug-triage-and-hardening/REQ-060](../2026-11-21-collab-mcp-bug-triage-and-hardening/spec.md#req-060-bug-triage-mcp-surface-rest-api-admin-ui--cli)
 - Source intent: Expose the trusted intake and batch import flow consistently across MCP (`v4.2.0`), REST, `/admin`, `collab_worker.py`, and agent/skill documentation without introducing hygiene regressions.
 - Previous contract: `collab-mcp` exposed `28` tools at version `"4.1.0"`, `/api/v1/books/{slug}/import-translations` and `/admin` `Approve & Open All Chapters` did not exist, and `submit_book_proposal`/`submit_book_parse`/`update_book_record`/`submit_translation` lacked optional `admin_token`.

@@ -38,7 +38,7 @@ from scripts.mcp_server.auth import (
 )
 from scripts.mcp_server.config import McpServerConfig
 from scripts.mcp_server.db import CollabStore, parse_utc_timestamp
-from scripts.mcp_server.git_sync import CollabBooksGitSync, is_public_corpus_book
+from scripts.mcp_server.git_sync import PUBLIC_CORPUS_LICENSES, CollabBooksGitSync, is_public_corpus_book
 
 MAX_MCP_XML_BYTES = 524_288  # 512 KB cap per REQ-040
 MAX_PROPOSED_CHAPTERS = 200
@@ -47,6 +47,7 @@ MAX_TRUSTED_BOOK_PROPOSAL_BYTES = 10_485_760  # 10 MiB cap for trusted ADMIN / a
 MAX_IMPORT_CHAPTERS_BATCH = 50
 EVALUATING_STALE_SECONDS = 480.0
 MAX_BUG_BODY_BYTES = 65_536
+MAX_REVIEW_BODY_CHARS = 2_000
 _PROPOSED_CHAPTER_ID_RE = re.compile(r"^ch\d{2,4}$")
 ALLOWED_LICENSES = frozenset(
     {"public-domain", "CC0-1.0", "CC-BY-4.0", "CC-BY-SA-4.0", "owner-permission"}
@@ -690,6 +691,7 @@ class CollabMcpService:
         self.store.supersede_all_accepted_chapter_drafts()
         self._backfill_chapter_section_types()
         self._evict_non_public_books()
+        self.store.purge_test_artifacts()
 
     def _evict_non_public_books(self) -> None:
         for bk in self.store.list_books(include_pending=True):
@@ -751,9 +753,18 @@ class CollabMcpService:
             window_seconds=60.0,
         )
 
+    def _assert_write_identity(self, ctx: AuthContext) -> None:
+        if ctx.tier == "ANONYMOUS" and not self.cfg.allow_anonymous_writes:
+            raise AuthError(
+                "Invite-only hub: an admin-minted 3-word AGENT_KEY is required for registration or write operations",
+                status_code=403,
+            )
+
     def _can_access_book_work(self, ctx: AuthContext, book: dict[str, Any]) -> bool:
         if ctx.tier == "ADMIN":
             return True
+        if ctx.tier == "ANONYMOUS" and str(book.get("license_id") or book.get("license") or "") not in PUBLIC_CORPUS_LICENSES:
+            return False
         if str(book.get("access_mode") or "public") == "public":
             return True
         allowed = set(book.get("allowed_agents") or [])
@@ -761,6 +772,11 @@ class CollabMcpService:
 
     def _assert_book_work_access(self, ctx: AuthContext, book: dict[str, Any]) -> None:
         if not self._can_access_book_work(ctx, book):
+            if ctx.tier == "ANONYMOUS" and str(book.get("license_id") or book.get("license") or "") not in PUBLIC_CORPUS_LICENSES:
+                raise AuthError(
+                    f"Book '{book['slug']}' is a private owner-permission book; a valid AGENT_KEY is required",
+                    status_code=403,
+                )
             raise ServiceError(
                 (
                     f"Book '{book['slug']}' is restricted to allowlisted AGENT_KEYs. "
@@ -801,6 +817,8 @@ class CollabMcpService:
         display_name: str = "",
         model_info: str = "",
     ) -> dict[str, str]:
+        if not self.cfg.allow_anonymous_writes:
+            assert_admin(ctx)
         self._check_write_rate(ctx)
         try:
             return self.store.register_agent(
@@ -817,6 +835,8 @@ class CollabMcpService:
         books = self.store.list_books(include_pending=include_pending or ctx.tier == "ADMIN")
         summary: list[dict[str, Any]] = []
         for b in books:
+            if ctx.tier == "ANONYMOUS" and str(b.get("license_id") or "") not in PUBLIC_CORPUS_LICENSES:
+                continue
             chapters = self.store.list_chapters(b["slug"])
             subs = self.store.list_submissions(book_slug=b["slug"])
             done_cnt = sum(1 for c in chapters if c["status"] == "accepted")
@@ -875,6 +895,8 @@ class CollabMcpService:
         book = self.store.get_book(book_slug)
         if book is None:
             raise ServiceError(f"Book '{book_slug}' not found", status_code=404)
+        if str(book.get("license_id") or "") not in PUBLIC_CORPUS_LICENSES:
+            self._assert_book_work_access(ctx, book)
         can_work = self._can_access_book_work(ctx, book)
         subs = self.store.list_submissions(book_slug=book_slug) if can_work else []
         subs_by_ch: dict[str, int] = {}
@@ -1231,6 +1253,7 @@ class CollabMcpService:
         book_slug: str,
         chapter_id: str,
     ) -> dict[str, Any]:
+        self._assert_write_identity(ctx)
         self._check_write_rate(ctx)
         book = self.store.get_book(book_slug)
         if book is None:
@@ -1480,6 +1503,7 @@ class CollabMcpService:
         queue_for_parse: bool = False,
         auto_approve_boilerplate: bool = True,
     ) -> dict[str, Any]:
+        self._assert_write_identity(ctx)
         self._check_write_rate(ctx)
         clean_slug = slug.strip().lower()
         if not SLUG_RE.match(clean_slug) or len(clean_slug) > 64:
@@ -2097,6 +2121,7 @@ class CollabMcpService:
         background: bool = False,
     ) -> tuple[int, dict[str, Any]]:
         """Validate, scan, run review.vinhthang.dev round, and auto-sync on PASS."""
+        self._assert_write_identity(ctx)
         self._check_write_rate(ctx)
         self._sweep_stale_evaluating()
 
@@ -2788,7 +2813,16 @@ class CollabMcpService:
         verdict: str = "COMMENT",
         issues: Optional[list[dict[str, Any]]] = None,
     ) -> dict[str, Any]:
+        self._assert_write_identity(ctx)
         self._check_write_rate(ctx)
+        if len((body_md or "").strip()) > MAX_REVIEW_BODY_CHARS:
+            raise ServiceError(
+                (
+                    f"Peer review body exceeds concise {MAX_REVIEW_BODY_CHARS}-character cap "
+                    f"(got {len((body_md or '').strip())}); keep reviews concise with verdict, 6 scores, and bulleted S-NNNN findings"
+                ),
+                status_code=422,
+            )
         raw_v = (verdict or "COMMENT").strip().upper()
         if raw_v == "REQUEST_CHANGES":
             raw_v = "CHANGES_REQUESTED"
@@ -3481,6 +3515,7 @@ class CollabMcpService:
         error_code: int = 0,
     ) -> tuple[int, dict[str, Any]]:
         """Validate, scan for prompt-injection, and persist an agent bug report."""
+        self._assert_write_identity(ctx)
         self._check_write_rate(ctx)
         clean_title = (title or "").strip()
         if not clean_title or len(clean_title) > 200:
@@ -3624,3 +3659,232 @@ class CollabMcpService:
             fixed_in_version=clean_ver,
         )
         return _sanitize_bug_public(updated)
+
+    def purge_test_artifacts(self, ctx: AuthContext) -> dict[str, Any]:
+        """ADMIN: Delete rejected smoke/e2e test books and orphan test agent rows."""
+        assert_admin(ctx)
+        purged = self.store.purge_test_artifacts()
+        for slug in purged["purged_books"]:
+            self.git_sync.cleanup_untracked_book_files(slug=slug)
+        return purged
+
+    def get_reader_book_view(
+        self,
+        ctx: AuthContext,
+        *,
+        book_slug: str,
+        chapter_id: Optional[str] = None,
+        admin_view: bool = False,
+    ) -> dict[str, Any]:
+        """Return structured chapter segments, TOC, and navigation for Public or Admin Web Reader."""
+        self._check_read_rate(ctx)
+        if admin_view:
+            assert_admin(ctx)
+        book = self.store.get_book(book_slug)
+        if book is None or str(book.get("status") or "") == "rejected":
+            raise ServiceError(f"Book '{book_slug}' not found", status_code=404)
+        pub_corpus = _book_is_public_corpus(book)
+        if not admin_view and not pub_corpus:
+            raise ServiceError(f"Book '{book_slug}' is not available on the public reader", status_code=404)
+
+        chapters = sorted(
+            self.store.list_chapters(book_slug),
+            key=lambda c: (int(c.get("chapter_num") or 0), str(c.get("chapter_id") or "")),
+        )
+        if not chapters:
+            raise ServiceError(f"Book '{book_slug}' has no extracted chapters yet", status_code=404)
+
+        draft_sub_by_ch: dict[str, dict[str, Any]] = {}
+        if admin_view:
+            for sub in self.store.list_submissions(book_slug=book_slug):
+                if sub["status"] in {"pending_review", "pending_admin_approval"} and sub["chapter_id"] not in draft_sub_by_ch:
+                    draft_sub_by_ch[str(sub["chapter_id"])] = sub
+
+        toc: list[dict[str, Any]] = []
+        for ch in chapters:
+            cid = str(ch["chapter_id"])
+            has_accepted = ch["status"] == "accepted" and bool((ch.get("translation_xml") or "").strip())
+            has_draft = admin_view and cid in draft_sub_by_ch
+            toc.append(
+                {
+                    "chapter_id": cid,
+                    "chapter_num": int(ch["chapter_num"]),
+                    "title": str(ch["title"]),
+                    "section_type": str(ch.get("section_type") or "body"),
+                    "status": str(ch["status"]),
+                    "has_accepted": has_accepted,
+                    "has_draft": has_draft,
+                    "readable": has_accepted or has_draft,
+                }
+            )
+
+        selected_ch: Optional[dict[str, Any]] = None
+        if chapter_id:
+            clean_cid = chapter_id.strip().lower()
+            selected_ch = next((c for c in chapters if str(c["chapter_id"]).lower() == clean_cid), None)
+            if selected_ch is None:
+                raise ServiceError(f"Chapter '{book_slug}/{chapter_id}' not found", status_code=404)
+        else:
+            readable_ids = {t["chapter_id"] for t in toc if t["readable"]}
+            selected_ch = (
+                next((c for c in chapters if str(c["chapter_id"]) in readable_ids and str(c.get("section_type") or "body") == "body"), None)
+                or next((c for c in chapters if str(c["chapter_id"]) in readable_ids), None)
+                or next((c for c in chapters if str(c.get("section_type") or "body") == "body"), None)
+                or chapters[0]
+            )
+
+        sel_id = str(selected_ch["chapter_id"])
+        sel_idx = next(i for i, c in enumerate(chapters) if str(c["chapter_id"]) == sel_id)
+        prev_ch = toc[sel_idx - 1] if sel_idx > 0 else None
+        next_ch = toc[sel_idx + 1] if (sel_idx + 1) < len(toc) else None
+
+        content_source = "pending"
+        xml_to_render = ""
+        draft_meta: dict[str, Any] = {}
+        if selected_ch["status"] == "accepted" and (selected_ch.get("translation_xml") or "").strip():
+            content_source = "accepted"
+            xml_to_render = str(selected_ch["translation_xml"])
+        elif admin_view and sel_id in draft_sub_by_ch:
+            d_sub = draft_sub_by_ch[sel_id]
+            content_source = "draft"
+            xml_to_render = str(d_sub.get("translation_xml") or "")
+            draft_meta = {
+                "submission_id": str(d_sub["id"]),
+                "status": str(d_sub["status"]),
+                "author_handle": str(d_sub.get("author_handle") or ""),
+                "engine_model": str(d_sub.get("engine_model") or ""),
+            }
+
+        segments = parse_segments(xml_to_render) if xml_to_render else []
+        return {
+            "book": {
+                "slug": str(book["slug"]),
+                "title": str(book["title"]),
+                "author": str(book["author"]),
+                "source_lang": str(book["source_lang"]),
+                "target_lang": str(book["target_lang"]),
+                "status": str(book["status"]),
+                "license": str(book["license_id"]),
+                "public_corpus": pub_corpus,
+                "release_tag": str(book.get("release_tag") or ""),
+                "release_url": str(book.get("release_url") or ""),
+            },
+            "toc": toc,
+            "active_chapter": {
+                "chapter_id": sel_id,
+                "chapter_num": int(selected_ch["chapter_num"]),
+                "title": str(selected_ch["title"]),
+                "section_type": str(selected_ch.get("section_type") or "body"),
+                "status": str(selected_ch["status"]),
+                "content_source": content_source,
+                "draft": draft_meta,
+                "segments": segments,
+            },
+            "prev_chapter": prev_ch,
+            "next_chapter": next_ch,
+            "admin_view": admin_view,
+        }
+
+    def list_activity_threads(
+        self,
+        ctx: AuthContext,
+        *,
+        book_slug: Optional[str] = None,
+        kind: str = "all",
+        admin_view: bool = False,
+        limit: int = 80,
+    ) -> dict[str, Any]:
+        """List read-only review & bug activity threads filtered by public corpus vs admin SSO."""
+        self._check_read_rate(ctx)
+        if admin_view:
+            assert_admin(ctx)
+        clean_kind = (kind or "all").strip().lower()
+        if clean_kind not in {"all", "reviews", "bugs"}:
+            clean_kind = "all"
+        clean_slug = (book_slug or "").strip().lower()
+        capped = max(1, min(int(limit), 200))
+
+        all_books = self.store.list_books(include_pending=admin_view)
+        visible_books = [
+            b
+            for b in all_books
+            if str(b.get("status") or "") != "rejected"
+            and (admin_view or _book_is_public_corpus(b))
+        ]
+        book_map = {str(b["slug"]): b for b in visible_books}
+        visible_slugs = set(book_map.keys())
+        if clean_slug and clean_slug not in visible_slugs:
+            if admin_view:
+                raise ServiceError(f"Book '{clean_slug}' not found", status_code=404)
+            clean_slug = ""
+
+        items: list[dict[str, Any]] = []
+        if clean_kind in {"all", "reviews"}:
+            revs = self.store.list_recent_peer_reviews(
+                book_slug=clean_slug or None,
+                limit=capped,
+            )
+            for r in revs:
+                b_slug = str(r.get("book_slug") or "")
+                if b_slug not in visible_slugs:
+                    continue
+                bk = book_map[b_slug]
+                items.append(
+                    {
+                        "thread_type": "review",
+                        "id": str(r["id"]),
+                        "created_at": str(r.get("created_at") or ""),
+                        "book_slug": b_slug,
+                        "book_title": str(bk["title"]),
+                        "chapter_id": str(r.get("chapter_id") or ""),
+                        "submission_id": str(r.get("submission_id") or ""),
+                        "submission_status": str(r.get("submission_status") or ""),
+                        "author_handle": str(r.get("author_handle") or ""),
+                        "actor_handle": str(r.get("reviewer_handle") or ""),
+                        "verdict": str(r.get("verdict") or "COMMENT"),
+                        "weighted_score": float(r.get("weighted_score") or 0.0),
+                        "scores": r.get("scores") or {},
+                        "body_md": str(r.get("body_md") or ""),
+                    }
+                )
+
+        if clean_kind in {"all", "bugs"}:
+            bugs = self.store.list_bug_reports(
+                book_slug=clean_slug or None,
+                include_flagged=admin_view,
+                limit=capped,
+            )
+            for bg in bugs:
+                b_slug = str(bg.get("book_slug") or "")
+                if not admin_view and b_slug and b_slug not in visible_slugs:
+                    continue
+                bk = book_map.get(b_slug)
+                items.append(
+                    {
+                        "thread_type": "bug",
+                        "id": str(bg["id"]),
+                        "created_at": str(bg.get("created_at") or ""),
+                        "book_slug": b_slug,
+                        "book_title": str(bk["title"]) if bk else (b_slug or "Global Hub"),
+                        "chapter_id": str(bg.get("chapter_id") or ""),
+                        "title": str(bg.get("title") or ""),
+                        "severity": str(bg.get("severity") or "P1"),
+                        "status": str(bg.get("status") or "open"),
+                        "actor_handle": str(bg.get("reporter_handle") or ""),
+                        "resolution_note": str(bg.get("resolution_note") or ""),
+                        "fixed_in_version": str(bg.get("fixed_in_version") or ""),
+                        "body_md": str(bg.get("body_md") or ""),
+                    }
+                )
+
+        items.sort(key=lambda x: str(x.get("created_at") or ""), reverse=True)
+        return {
+            "items": items[:capped],
+            "books": [
+                {"slug": str(b["slug"]), "title": str(b["title"]), "public_corpus": _book_is_public_corpus(b)}
+                for b in visible_books
+            ],
+            "selected_book": clean_slug,
+            "kind": clean_kind,
+            "admin_view": admin_view,
+        }
