@@ -83,3 +83,24 @@ jobs:
             echo "ERROR_PACKAGE_NOT_PUBLIC: Neither vinhthang/collab-mcp:${TAG} nor vinhthang/collab-book-translate:${TAG} is anonymously pullable."
             exit 1
           fi
+          echo "PUBLISHED_TAG=${TAG}" >> "$GITHUB_ENV"
+
+      - name: Trigger OCI Fleet Rollout (collab-mcp)
+        if: github.event_name != 'pull_request'
+        env:
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+        run: |
+          set -euo pipefail
+          TAG="${PUBLISHED_TAG:-${{ inputs.image_tag || 'v0.5.1' }}}"
+          TOK=$(curl -fsS "https://ghcr.io/token?scope=repository:vinhthang/collab-mcp:pull" | python3 -c 'import sys,json; print(json.load(sys.stdin)["token"])')
+          DIGEST=$(curl -fsSI \
+            -H "Authorization: Bearer ${TOK}" \
+            -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.docker.distribution.manifest.list.v2+json" \
+            "https://ghcr.io/v2/vinhthang/collab-mcp/manifests/${TAG}" \
+            | awk 'tolower($1)=="docker-content-digest:" {gsub("\r","",$2); print $2}')
+          PAYLOAD=$(python3 -c 'import json,sys; tag,dig=sys.argv[1:3]; d={"service":"collab-mcp","tag":tag}; d.update({"digest":dig} if dig.startswith("sha256:") else {}); print(json.dumps(d))' "$TAG" "$DIGEST")
+          echo "Triggering rollout on webhook.vinhthang.dev: ${PAYLOAD}"
+          curl -fsS -X POST "https://webhook.vinhthang.dev/deploy" \
+            -H "Authorization: Bearer ${WEBHOOK_SECRET}" \
+            -H "Content-Type: application/json" \
+            --data-binary "$PAYLOAD"
