@@ -3009,7 +3009,23 @@ class CollabMcpService:
 
     def list_agents(self, ctx: AuthContext) -> list[dict[str, Any]]:
         assert_admin(ctx)
-        return self.store.list_agents()
+        return self.store.list_agents_with_stats()
+
+    def rotate_agent_key(self, ctx: AuthContext, *, identifier: str) -> dict[str, Any]:
+        """Rotate an existing agent's 3-word AGENT_KEY and invalidate the old key immediately (ADMIN)."""
+        assert_admin(ctx)
+        resolved = self.store.resolve_agent_identifier(identifier)
+        if resolved is None:
+            raise ServiceError(f"Agent '{identifier}' not found", status_code=404)
+        return self.store.rotate_agent_key(resolved)
+
+    def revoke_agent(self, ctx: AuthContext, *, identifier: str, reactivate: bool = False) -> dict[str, Any]:
+        """Soft-revoke (or reactivate) an agent with history, or hard-delete an unused agent (ADMIN)."""
+        assert_admin(ctx)
+        resolved = self.store.resolve_agent_identifier(identifier)
+        if resolved is None:
+            raise ServiceError(f"Agent '{identifier}' not found", status_code=404)
+        return self.store.revoke_or_delete_agent(resolved, reactivate=reactivate)
 
     def admin_mint_agent(
         self,
@@ -3500,6 +3516,91 @@ class CollabMcpService:
             author=book["author"],
             release_tag=rel_tag,
         )
+
+    def get_admin_submission_detail(self, ctx: AuthContext, *, submission_id: str) -> dict[str, Any]:
+        """Return full submission inspection payload including XML, final text, findings, and peer critiques."""
+        assert_admin(ctx)
+        sub = self.store.get_submission(submission_id)
+        if sub is None:
+            raise ServiceError(f"Submission '{submission_id}' not found", status_code=404)
+        item = _sanitize_submission_public(sub)
+        ch = self.store.get_chapter(str(sub["book_slug"]), str(sub["chapter_id"]))
+        book = self.store.get_book(str(sub["book_slug"]))
+        item["section_type"] = str((ch or {}).get("section_type") or "body")
+        item["chapter_title"] = str((ch or {}).get("title") or sub["chapter_id"])
+        item["book_title"] = str((book or {}).get("title") or sub["book_slug"])
+        item["peer_reviews"] = self.store.list_peer_reviews(sub["id"])
+        return item
+
+    def bulk_manage_submissions(
+        self,
+        ctx: AuthContext,
+        *,
+        submission_ids: list[str],
+        action: str,
+    ) -> dict[str, Any]:
+        """Approve or reject up to 50 chapter submissions in one Admin batch."""
+        assert_admin(ctx)
+        clean_action = (action or "").strip()
+        if clean_action not in {"approve", "approve_override", "reject"}:
+            raise ServiceError("action must be 'approve', 'approve_override', or 'reject'", status_code=400)
+        clean_ids = [str(s or "").strip() for s in (submission_ids or []) if str(s or "").strip()]
+        if not clean_ids or len(clean_ids) > 50:
+            raise ServiceError("submission_ids must contain 1 to 50 non-empty IDs", status_code=400)
+        processed: list[dict[str, Any]] = []
+        errors: list[dict[str, str]] = []
+        for sid in clean_ids:
+            try:
+                res = self.manage_flagged_submission(ctx, submission_id=sid, action=clean_action)
+                processed.append(res)
+            except (ServiceError, AuthError) as exc:
+                errors.append({"submission_id": sid, "error": str(exc)})
+        return {"processed": processed, "errors": errors}
+
+    def export_book_deliverable(
+        self,
+        ctx: AuthContext,
+        *,
+        book_slug: str,
+        fmt: str,
+    ) -> tuple[Path, str, str]:
+        """Compile and return (path, media_type, filename) for any completed book behind ADMIN/SSO."""
+        assert_admin(ctx)
+        clean_fmt = (fmt or "").strip().lower()
+        mime_map = {
+            "epub": "application/epub+zip",
+            "pdf": "application/pdf",
+            "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        }
+        if clean_fmt not in mime_map:
+            raise ServiceError("format must be 'epub', 'pdf', or 'docx'", status_code=400)
+        book = self.store.get_book(book_slug)
+        if book is None or str(book.get("status") or "") == "rejected":
+            raise ServiceError(f"Book '{book_slug}' not found", status_code=404)
+        chapters = self.store.list_chapters(book_slug)
+        if not chapters or any(c["status"] != "accepted" for c in chapters):
+            raise ServiceError(
+                f"Book '{book_slug}' must have all chapters accepted before exporting",
+                status_code=409,
+            )
+        export_chapters: list[dict[str, Any]] = []
+        for ch in chapters:
+            final_txt = str(ch.get("final_txt") or "").strip()
+            if not final_txt and (ch.get("translation_xml") or "").strip():
+                final_txt = _render_final_txt(str(ch["translation_xml"]))
+            item = dict(ch)
+            item["final_txt"] = final_txt
+            export_chapters.append(item)
+
+        out_path = self.git_sync.compile_private_export(
+            slug=book_slug,
+            title=str(book["title"]),
+            author=str(book["author"]),
+            book_record=dict(book.get("book_record") or {}),
+            chapters=export_chapters,
+            fmt=clean_fmt,
+        )
+        return out_path, mime_map[clean_fmt], f"{book_slug}_vietnamese.{clean_fmt}"
 
     def submit_bug_report(
         self,

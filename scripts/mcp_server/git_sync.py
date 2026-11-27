@@ -522,6 +522,71 @@ class CollabBooksGitSync:
                 "assets": asset_paths,
             }
 
+    def compile_private_export(
+        self,
+        *,
+        slug: str,
+        title: str,
+        author: str,
+        book_record: dict[str, Any],
+        chapters: list[dict[str, Any]],
+        fmt: str,
+    ) -> Path:
+        """Compile EPUB/PDF/DOCX inside private-books/exports/<slug>/ without touching Git/GitHub."""
+        clean_fmt = (fmt or "").strip().lower()
+        if clean_fmt not in {"epub", "pdf", "docx"}:
+            raise ValueError("format must be 'epub', 'pdf', or 'docx'")
+        with self._lock:
+            export_root = self.private_books_dir / "exports" / slug
+            run_dir = export_root / "run"
+            out_dir = export_root / "out"
+            if run_dir.exists():
+                shutil.rmtree(run_dir)
+            run_dir.mkdir(parents=True, exist_ok=True)
+            out_dir.mkdir(parents=True, exist_ok=True)
+
+            rec_payload = dict(book_record or {})
+            rec_payload.setdefault("title", title)
+            rec_payload.setdefault("author", author)
+            (run_dir / "book_record.json").write_text(
+                json.dumps(rec_payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+
+            ordered = sorted(
+                chapters,
+                key=lambda c: (int(c.get("chapter_num") or 0), str(c.get("chapter_id") or "")),
+            )
+            checklist_rows: list[dict[str, Any]] = []
+            for ch in ordered:
+                cid = str(ch["chapter_id"])
+                ch_dir = run_dir / cid
+                ch_dir.mkdir(parents=True, exist_ok=True)
+                (ch_dir / "final.txt").write_text(str(ch.get("final_txt") or ""), encoding="utf-8")
+                if ch.get("source_xml"):
+                    (ch_dir / "source.txt").write_text(str(ch["source_xml"]), encoding="utf-8")
+                checklist_rows.append(
+                    {
+                        "chapter_id": cid,
+                        "chapter_num": int(ch.get("chapter_num") or 0),
+                        "title": str(ch.get("title") or cid),
+                        "status": "accepted",
+                    }
+                )
+            (run_dir / "checklist.json").write_text(
+                json.dumps({"book_slug": slug, "chapters": checklist_rows}, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+
+            compiled = compile_book_formats(
+                run_dir=run_dir,
+                output_dir=out_dir,
+                formats=clean_fmt,
+                title=title,
+                author=author,
+            )
+            return compiled[clean_fmt]
+
     def _upload_github_release(
         self,
         *,

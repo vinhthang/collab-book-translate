@@ -161,7 +161,7 @@ def test_ac_043_2_worker_missing_target_or_http_error_exits_nonzero(tmp_path: Pa
 def test_ac_043_1_plugin_v3_manifest_and_mcp_docs():
     repo_root = Path(__file__).resolve().parent.parent
     plugin = json.loads((repo_root / "plugin.json").read_text(encoding="utf-8"))
-    assert plugin["version"] == "4.4.0"
+    assert plugin["version"] == "4.5.0"
 
     readme = (repo_root / "README.md").read_text(encoding="utf-8")
     skill = (repo_root / "skills" / "collab-translate-book" / "SKILL.md").read_text(encoding="utf-8")
@@ -169,3 +169,16 @@ def test_ac_043_1_plugin_v3_manifest_and_mcp_docs():
     assert "ANONYMOUS" in readme
     assert "vinhthang/collab-books" in readme
     assert "https://collab.vinhthang.dev/mcp" in skill
+
+
+def test_skill_md_uses_uv_run_for_all_cli_invocations():
+    import re
+
+    repo_root = Path(__file__).resolve().parent.parent
+    skill = (repo_root / "skills" / "collab-translate-book" / "SKILL.md").read_text(encoding="utf-8")
+    bare_lines = [
+        line.strip()
+        for line in skill.splitlines()
+        if re.match(r"^\s*python3\s+scripts/collab_", line)
+    ]
+    assert bare_lines == [], f"Found bare python3 script commands without uv run: {bare_lines}"

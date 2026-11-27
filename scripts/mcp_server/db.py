@@ -30,7 +30,8 @@ SCHEMA_STATEMENTS_COMMON = (
         key_hint TEXT NOT NULL DEFAULT '',
         role TEXT NOT NULL DEFAULT 'contributor',
         created_at TEXT NOT NULL,
-        last_seen_at TEXT NOT NULL DEFAULT ''
+        last_seen_at TEXT NOT NULL DEFAULT '',
+        revoked_at TEXT NOT NULL DEFAULT ''
     )
     """,
     """
@@ -228,6 +229,7 @@ class CollabStore:
                         cur.execute("ALTER TABLE agents ADD COLUMN IF NOT EXISTS key_hint TEXT NOT NULL DEFAULT ''")
                         cur.execute("ALTER TABLE agents ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'contributor'")
                         cur.execute("ALTER TABLE agents ADD COLUMN IF NOT EXISTS last_seen_at TEXT NOT NULL DEFAULT ''")
+                        cur.execute("ALTER TABLE agents ADD COLUMN IF NOT EXISTS revoked_at TEXT NOT NULL DEFAULT ''")
                         cur.execute("ALTER TABLE books ADD COLUMN IF NOT EXISTS brief_json TEXT NOT NULL DEFAULT '{}'")
                         cur.execute("ALTER TABLE books ADD COLUMN IF NOT EXISTS access_mode TEXT NOT NULL DEFAULT 'public'")
                         cur.execute("ALTER TABLE books ADD COLUMN IF NOT EXISTS allowed_agents_json TEXT NOT NULL DEFAULT '[]'")
@@ -250,6 +252,8 @@ class CollabStore:
                     conn.execute("ALTER TABLE agents ADD COLUMN role TEXT NOT NULL DEFAULT 'contributor'")
                 if "last_seen_at" not in agent_cols:
                     conn.execute("ALTER TABLE agents ADD COLUMN last_seen_at TEXT NOT NULL DEFAULT ''")
+                if "revoked_at" not in agent_cols:
+                    conn.execute("ALTER TABLE agents ADD COLUMN revoked_at TEXT NOT NULL DEFAULT ''")
                 book_cols = {r["name"] for r in conn.execute("PRAGMA table_info(books)").fetchall()}
                 if "brief_json" not in book_cols:
                     conn.execute("ALTER TABLE books ADD COLUMN brief_json TEXT NOT NULL DEFAULT '{}'")
@@ -351,14 +355,20 @@ class CollabStore:
     def get_agent_by_key(self, raw_key: str) -> Optional[dict[str, Any]]:
         digest = sha256_hex(raw_key.strip())
         return self._exec(
-            "SELECT handle, display_name, model_info, key_hint, role, created_at, last_seen_at FROM agents WHERE key_sha256 = ?",
+            (
+                "SELECT handle, display_name, model_info, key_hint, role, created_at, last_seen_at, revoked_at "
+                "FROM agents WHERE key_sha256 = ? AND revoked_at = ''"
+            ),
             (digest,),
             fetchone=True,
         )
 
     def get_agent(self, handle: str) -> Optional[dict[str, Any]]:
         return self._exec(
-            "SELECT handle, display_name, model_info, key_hint, role, created_at, last_seen_at FROM agents WHERE handle = ?",
+            (
+                "SELECT handle, display_name, model_info, key_hint, role, created_at, last_seen_at, revoked_at "
+                "FROM agents WHERE handle = ?"
+            ),
             (handle.strip().lower(),),
             fetchone=True,
         )
@@ -379,9 +389,100 @@ class CollabStore:
 
     def list_agents(self) -> list[dict[str, Any]]:
         return self._exec(
-            "SELECT handle, display_name, model_info, key_hint, role, created_at, last_seen_at FROM agents ORDER BY created_at DESC",
+            (
+                "SELECT handle, display_name, model_info, key_hint, role, created_at, last_seen_at, revoked_at "
+                "FROM agents ORDER BY created_at DESC"
+            ),
             fetchall=True,
         )
+
+    def list_agents_with_stats(self) -> list[dict[str, Any]]:
+        """List registered agents enriched with submission_count and review_count."""
+        agents = self.list_agents()
+        sub_rows = self._exec(
+            "SELECT author_handle, COUNT(*) AS cnt FROM submissions GROUP BY author_handle",
+            fetchall=True,
+        )
+        rev_rows = self._exec(
+            "SELECT reviewer_handle, COUNT(*) AS cnt FROM peer_reviews GROUP BY reviewer_handle",
+            fetchall=True,
+        )
+        sub_counts = {str(r["author_handle"]): int(r["cnt"]) for r in sub_rows}
+        rev_counts = {str(r["reviewer_handle"]): int(r["cnt"]) for r in rev_rows}
+        out: list[dict[str, Any]] = []
+        for a in agents:
+            item = dict(a)
+            item["submission_count"] = sub_counts.get(str(a["handle"]), 0)
+            item["review_count"] = rev_counts.get(str(a["handle"]), 0)
+            out.append(item)
+        return out
+
+    def rotate_agent_key(self, handle: str) -> dict[str, str]:
+        """Replace an existing agent's 3-word key hash atomically and clear revoked_at."""
+        clean = handle.strip().lower()
+        with self._lock:
+            existing = self.get_agent(clean)
+            if existing is None:
+                raise KeyError(f"Agent '{clean}' not found")
+            raw_key, key_sha, key_hint = "", "", ""
+            for _ in range(16):
+                rk, ks, kh = mint_agent_key()
+                if self._exec("SELECT handle FROM agents WHERE key_sha256 = ?", (ks,), fetchone=True) is None:
+                    raw_key, key_sha, key_hint = rk, ks, kh
+                    break
+            if not raw_key:
+                raise RuntimeError("Failed to mint unique 3-word AGENT_KEY")
+            self._exec(
+                "UPDATE agents SET key_sha256 = ?, key_hint = ?, revoked_at = '' WHERE handle = ?",
+                (key_sha, key_hint, clean),
+            )
+            return {
+                "handle": clean,
+                "display_name": str(existing["display_name"]),
+                "model_info": str(existing["model_info"]),
+                "role": str(existing["role"]),
+                "agent_key": raw_key,
+                "key_hint": key_hint,
+                "revoked_at": "",
+            }
+
+    def revoke_or_delete_agent(self, handle: str, *, reactivate: bool = False) -> dict[str, Any]:
+        """Soft-revoke a referenced agent (or reactivate it) vs hard-delete an unused agent."""
+        clean = handle.strip().lower()
+        with self._lock:
+            existing = self.get_agent(clean)
+            if existing is None:
+                raise KeyError(f"Agent '{clean}' not found")
+            if reactivate:
+                self._exec("UPDATE agents SET revoked_at = '' WHERE handle = ?", (clean,))
+                return {"action": "reactivated", "agent": self.get_agent(clean)}
+            actor = f"agent:{clean}"
+            has_sub = self._exec(
+                "SELECT id FROM submissions WHERE author_actor_id = ? OR author_handle = ? LIMIT 1",
+                (actor, clean),
+                fetchone=True,
+            )
+            has_rev = self._exec(
+                "SELECT id FROM peer_reviews WHERE reviewer_actor_id = ? OR reviewer_handle = ? LIMIT 1",
+                (actor, clean),
+                fetchone=True,
+            )
+            has_bug = self._exec(
+                "SELECT id FROM bug_reports WHERE reporter_actor_id = ? OR reporter_handle = ? LIMIT 1",
+                (actor, clean),
+                fetchone=True,
+            )
+            has_book = self._exec(
+                "SELECT slug FROM books WHERE proposed_by = ? LIMIT 1",
+                (clean,),
+                fetchone=True,
+            )
+            if has_sub or has_rev or has_bug or has_book:
+                now = _utc_iso()
+                self._exec("UPDATE agents SET revoked_at = ? WHERE handle = ?", (now, clean))
+                return {"action": "revoked", "agent": self.get_agent(clean)}
+            self._exec("DELETE FROM agents WHERE handle = ?", (clean,))
+            return {"action": "deleted", "handle": clean}
 
     def resolve_agent_identifier(self, identifier: str) -> Optional[str]:
         """Resolve either a canonical handle or a raw AGENT_KEY (via SHA-256) to canonical handle."""
