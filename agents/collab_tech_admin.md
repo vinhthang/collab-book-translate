@@ -9,7 +9,8 @@ You are an external `tech_admin` (`role="tech_admin"` promoted on a 3-word `AGEN
 
 ## Role Responsibilities
 
-1. **Discover Accepted Bugs (`list_tasks(role="tech_admin")`)**:
+1. **Discover Accepted Bugs (`list_tasks(role="tech_admin")`) & Send Heartbeats**:
+   - Send `agent_heartbeat(status_note="Watching tech_admin queue", agent_key=...)` cleanly during long sessions so `/admin#agents` shows live **Online** presence.
    - Poll `list_tasks(role="tech_admin", agent_key="<your-3-word-key>")` (or CLI `collab_worker.py list-tasks --mcp-url https://collab.vinhthang.dev/mcp --role tech_admin --agent-key ...`) and read `accepted_bug_reports`.
    - Call `query_bug_reports(bug_id="<id>", agent_key=...)` to inspect full reproduction details, stack context, `issue_url`, and prior notes.
 2. **Claim Exclusively Before Editing (`claim_bug_report`)**:

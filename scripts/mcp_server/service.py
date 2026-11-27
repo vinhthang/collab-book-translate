@@ -41,6 +41,7 @@ from scripts.mcp_server.auth import (
 from scripts.mcp_server.config import McpServerConfig
 from scripts.mcp_server.db import CollabStore, parse_utc_timestamp
 from scripts.mcp_server.git_sync import PUBLIC_CORPUS_LICENSES, CollabBooksGitSync, is_public_corpus_book
+from scripts.mcp_server.presence import AgentPresenceTracker, compute_agent_presence, enrich_and_sort_agents
 
 MAX_MCP_XML_BYTES = 524_288  # 512 KB cap per REQ-040
 MAX_PROPOSED_CHAPTERS = 200
@@ -692,11 +693,13 @@ class CollabMcpService:
         store: CollabStore,
         review_client: Any,
         git_sync: CollabBooksGitSync,
+        presence: Optional[AgentPresenceTracker] = None,
     ) -> None:
         self.cfg = cfg
         self.store = store
         self.review_client = review_client
         self.git_sync = git_sync
+        self.presence = presence or AgentPresenceTracker()
         self.rate_limiter = SlidingWindowRateLimiter()
         self._seed_lock = threading.Lock()
         self._active_seeds: set[str] = set()
@@ -3035,9 +3038,15 @@ class CollabMcpService:
             raise ServiceError(f"Agent '{identifier}' not found", status_code=404)
         return self.store.set_agent_role(handle=resolved_handle, role=clean_role)
 
-    def list_agents(self, ctx: AuthContext) -> list[dict[str, Any]]:
+    def list_agents_with_summary(self, ctx: AuthContext) -> dict[str, Any]:
+        """Return registered agents enriched with live presence, sorted presence-first, and summary counts."""
         assert_admin(ctx)
-        return self.store.list_agents_with_stats()
+        raw = self.store.list_agents_with_stats()
+        agents, summary = enrich_and_sort_agents(raw, tracker=self.presence)
+        return {"agents": agents, "summary": summary}
+
+    def list_agents(self, ctx: AuthContext) -> list[dict[str, Any]]:
+        return self.list_agents_with_summary(ctx)["agents"]
 
     def rotate_agent_key(self, ctx: AuthContext, *, identifier: str) -> dict[str, Any]:
         """Rotate an existing agent's 3-word AGENT_KEY and invalidate the old key immediately (ADMIN)."""
@@ -3055,6 +3064,82 @@ class CollabMcpService:
             raise ServiceError(f"Agent '{identifier}' not found", status_code=404)
         return self.store.revoke_or_delete_agent(resolved, reactivate=reactivate)
 
+    def update_agent_profile(
+        self,
+        ctx: AuthContext,
+        *,
+        identifier: str,
+        display_name: Optional[str] = None,
+        model_info: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Update human-readable display_name and/or model_info on an existing agent (ADMIN)."""
+        assert_admin(ctx)
+        resolved = self.store.resolve_agent_identifier(identifier)
+        if resolved is None:
+            raise ServiceError(f"Agent '{identifier}' not found", status_code=404)
+        clean_name: Optional[str] = None
+        if display_name is not None:
+            clean_name = display_name.strip()
+            if not clean_name or len(clean_name) > 80:
+                raise ServiceError("display_name must be 1 to 80 characters", status_code=400)
+            if detect_prompt_injection(clean_name):
+                raise ServiceError("display_name blocked by prompt-injection scanner", status_code=422)
+        clean_model: Optional[str] = None
+        if model_info is not None:
+            clean_model = model_info.strip()
+            if len(clean_model) > 80:
+                raise ServiceError("model_info must be at most 80 characters", status_code=400)
+            if detect_prompt_injection(clean_model):
+                raise ServiceError("model_info blocked by prompt-injection scanner", status_code=422)
+        updated = self.store.update_agent_profile(
+            handle=resolved,
+            display_name=clean_name,
+            model_info=clean_model,
+        )
+        return compute_agent_presence(
+            updated,
+            live_connections=self.presence.active_connection_count(resolved),
+        )
+
+    def agent_heartbeat(
+        self,
+        ctx: AuthContext,
+        *,
+        status_note: str = "",
+        transport: str = "mcp-http",
+        client_name: str = "",
+    ) -> dict[str, Any]:
+        """Record a lightweight liveness heartbeat and optional status_note for an authenticated AGENT_KEY."""
+        if ctx.tier != "AGENT_KEY":
+            raise AuthError("Authenticated 3-word AGENT_KEY is required for agent_heartbeat", status_code=403)
+        self._check_read_rate(ctx)
+        clean_note = (status_note or "").strip()
+        if len(clean_note) > 140:
+            raise ServiceError("status_note must be at most 140 characters", status_code=400)
+        if clean_note and detect_prompt_injection(clean_note):
+            raise ServiceError("status_note blocked by prompt-injection scanner", status_code=422)
+        clean_client = (client_name or "").strip()
+        if len(clean_client) > 80:
+            clean_client = clean_client[:80]
+        if clean_client and detect_prompt_injection(clean_client):
+            raise ServiceError("client_name blocked by prompt-injection scanner", status_code=422)
+        self.store.touch_agent_last_seen(
+            ctx.handle,
+            transport=transport or "mcp-http",
+            action="heartbeat",
+            client_name=clean_client,
+            status_note=clean_note,
+        )
+        refreshed = self.store.get_agent(ctx.handle)
+        if refreshed is None:
+            raise ServiceError(f"Agent '{ctx.handle}' not found", status_code=404)
+        return {
+            "agent": compute_agent_presence(
+                refreshed,
+                live_connections=self.presence.active_connection_count(ctx.handle),
+            )
+        }
+
     def admin_mint_agent(
         self,
         ctx: AuthContext,
@@ -3062,13 +3147,18 @@ class CollabMcpService:
         handle: str = "",
         display_name: str = "",
         model_info: str = "",
+        role: str = "contributor",
     ) -> dict[str, str]:
         assert_admin(ctx)
+        clean_role = (role or "contributor").strip().lower() or "contributor"
+        if clean_role not in VALID_AGENT_ROLES:
+            raise ServiceError("role must be 'contributor', 'agent_admin', or 'tech_admin'", status_code=400)
         try:
             return self.store.register_agent(
                 handle=handle,
                 display_name=display_name,
                 model_info=model_info,
+                role=clean_role,
             )
         except ValueError as exc:
             status = 409 if "already registered" in str(exc) else 400

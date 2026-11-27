@@ -127,6 +127,12 @@ def run_mcp_command(
                 headers=headers,
                 json={"handle": handle, "display_name": display_name, "model_info": model_info},
             )
+        elif subcommand == "heartbeat":
+            resp = client.post(
+                f"{base}/api/v1/agents/heartbeat",
+                headers=headers,
+                json={"status_note": resolution_note, "client_name": display_name or "collab-worker"},
+            )
         elif subcommand == "list-tasks":
             params: Dict[str, str] = {
                 "role": role,
@@ -1152,6 +1158,13 @@ def main() -> None:
     p_qbug.add_argument("--book-slug", default="")
     p_qbug.add_argument("--reporter-handle", default="")
 
+    # heartbeat (MCP mode)
+    p_hb = subparsers.add_parser("heartbeat", help="Send a lightweight liveness heartbeat + optional status note to collab.vinhthang.dev.")
+    p_hb.add_argument("--mcp-url", default="")
+    p_hb.add_argument("--agent-key", default="")
+    p_hb.add_argument("--status-note", default="")
+    p_hb.add_argument("--client-name", default="collab-worker")
+
     # claim-bug (MCP mode, tech_admin / agent_admin / ADMIN)
     p_cbug = subparsers.add_parser("claim-bug", help="Claim an accepted bug report exclusively (status='in_progress').")
     p_cbug.add_argument("--mcp-url", default="")
@@ -1183,6 +1196,7 @@ def main() -> None:
         "get-submission",
         "submit-bug",
         "query-bugs",
+        "heartbeat",
         "claim-bug",
         "triage-bug",
     ):
@@ -1197,7 +1211,7 @@ def main() -> None:
             book_slug=getattr(args, "book_slug", None),
             chapter=getattr(args, "chapter", None),
             handle=getattr(args, "handle", ""),
-            display_name=getattr(args, "display_name", ""),
+            display_name=getattr(args, "display_name", "") or getattr(args, "client_name", ""),
             model_info=getattr(args, "model_info", ""),
             parse_file=getattr(args, "parse_file", ""),
             import_file=getattr(args, "import_file", ""),
@@ -1212,7 +1226,7 @@ def main() -> None:
             tool_name=getattr(args, "tool_name", ""),
             error_code=getattr(args, "error_code", 0),
             bug_id=getattr(args, "bug_id", ""),
-            resolution_note=getattr(args, "resolution_note", ""),
+            resolution_note=getattr(args, "resolution_note", "") or getattr(args, "status_note", ""),
             fixed_in_version=getattr(args, "fixed_in_version", ""),
             pr_url=getattr(args, "pr_url", ""),
             issue_url=getattr(args, "issue_url", ""),

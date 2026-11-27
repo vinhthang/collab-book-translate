@@ -125,6 +125,18 @@ def mint_agent_key() -> tuple[str, str, str]:
     return raw, sha256_hex(raw), hint
 
 
+def generate_readable_handle(display_name: str = "", model_info: str = "") -> str:
+    """Derive a clean slug handle without random hex when display_name or model_info is descriptive."""
+    seed_src = (display_name or model_info or "").strip().lower()
+    if not seed_src:
+        return ""
+    tokens = [t for t in _NON_ALNUM_RE.split(seed_src) if t]
+    slug = "-".join(tokens)[:32].strip("-")
+    if len(slug) < 3 or not slug[0].isalnum() or not slug[-1].isalnum():
+        return ""
+    return slug
+
+
 def generate_default_handle(model_info: str = "", display_name: str = "") -> str:
     """Derive a clean public agent handle (never exposing the secret AGENT_KEY)."""
     seed_src = (model_info or display_name or "agent").strip().lower()
@@ -204,6 +216,9 @@ def resolve_auth(
     client_ip: str = "127.0.0.1",
     agent_key_arg: Optional[str] = None,
     admin_token_arg: Optional[str] = None,
+    transport: str = "",
+    action: str = "",
+    client_name: str = "",
 ) -> AuthContext:
     """Resolve caller identity across ADMIN, AGENT_KEY, and ANONYMOUS tiers."""
     lower = {k.lower(): v for k, v in headers.items()}
@@ -243,7 +258,12 @@ def resolve_auth(
         if agent is not None:
             handle = str(agent["handle"])
             role = _normalize_agent_role(agent.get("role"))
-            store.touch_agent_last_seen(handle)
+            store.touch_agent_last_seen(
+                handle,
+                transport=transport,
+                action=action,
+                client_name=client_name,
+            )
             return AuthContext(
                 tier="AGENT_KEY",
                 actor_id=f"agent:{handle}",
@@ -260,7 +280,12 @@ def resolve_auth(
         if agent is not None:
             handle = str(agent["handle"])
             role_arg = _normalize_agent_role(agent.get("role"))
-            store.touch_agent_last_seen(handle)
+            store.touch_agent_last_seen(
+                handle,
+                transport=transport,
+                action=action,
+                client_name=client_name,
+            )
             return AuthContext(
                 tier="AGENT_KEY",
                 actor_id=f"agent:{handle}",

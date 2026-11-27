@@ -6,6 +6,7 @@ import html
 from typing import Any, Optional
 
 from scripts.mcp_server.config import McpServerConfig
+from scripts.mcp_server.presence import compute_agent_presence, enrich_and_sort_agents
 
 STATUS_BADGE_CLASS = {
     "pending_approval": "badge-warn",
@@ -166,6 +167,15 @@ summary { cursor: pointer; color: var(--text-muted); font-size: 0.85rem; }
 .toast { background: var(--surface); color: var(--text); border: 1px solid var(--border); border-left: 4px solid var(--accent); border-radius: 8px; padding: 0.65rem 0.9rem; font-size: 0.85rem; box-shadow: 0 10px 25px rgba(0,0,0,0.35); }
 .toast.toast-ok { border-left-color: #10b981; }
 .toast.toast-err { border-left-color: #ef4444; }
+.presence-pill { display: inline-flex; align-items: center; gap: 0.38rem; padding: 0.16rem 0.56rem; border-radius: 999px; font-size: 0.76rem; font-weight: 600; border: 1px solid var(--border); background: var(--elevated); color: var(--text-soft); }
+.dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+.dot-connected { background: #10b981; box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.28); }
+.dot-online { background: #22c55e; }
+.dot-idle { background: #f59e0b; }
+.dot-offline, .dot-never { background: #64748b; }
+.dot-revoked { background: #ef4444; }
+.agent-name { font-weight: 650; color: var(--text); font-size: 0.94rem; }
+.agent-sub { font-size: 0.78rem; color: var(--text-muted); margin-top: 0.14rem; line-height: 1.35; }
 @media (max-width: 920px) {
   .console-shell { grid-template-columns: 1fr; }
   .console-sidebar { position: static; height: auto; border-right: none; border-bottom: 1px solid var(--border); }
@@ -540,29 +550,137 @@ document.querySelectorAll('.js-bug-chip').forEach(chip => {
 });
 applyBugFilters();
 
-// Agents search
-document.getElementById('agent-search')?.addEventListener('input', (e) => {
-  const q = (e.target.value || '').trim().toLowerCase();
-  document.querySelectorAll('.agent-row').forEach(tr => {
+// Agents filter, mint, live presence polling, & delegated actions
+let activeAgentFilter = 'all';
+function applyAgentFilters() {
+  const q = (document.getElementById('agent-search')?.value || '').trim().toLowerCase();
+  document.querySelectorAll('#agents-tbody .agent-row').forEach(tr => {
     const hay = (tr.dataset.search || '').toLowerCase();
-    tr.classList.toggle('hidden', !!q && !hay.includes(q));
+    const st = tr.dataset.presence || 'never';
+    let matchChip = true;
+    if (activeAgentFilter === 'online') matchChip = st === 'connected' || st === 'online';
+    else if (activeAgentFilter === 'idle') matchChip = st === 'idle';
+    else if (activeAgentFilter === 'offline') matchChip = st === 'offline' || st === 'never';
+    else if (activeAgentFilter === 'revoked') matchChip = st === 'revoked';
+    const matchQ = !q || hay.includes(q);
+    tr.classList.toggle('hidden', !(matchChip && matchQ));
+  });
+}
+document.querySelectorAll('.js-agent-chip').forEach(chip => {
+  chip.addEventListener('click', () => {
+    activeAgentFilter = chip.dataset.filter || 'all';
+    document.querySelectorAll('.js-agent-chip').forEach(c => c.classList.toggle('active', c === chip));
+    applyAgentFilters();
   });
 });
+document.getElementById('agent-search')?.addEventListener('input', applyAgentFilters);
+
+function renderAgentRowClient(a) {
+  const h = String(a.handle || '');
+  const disp = String(a.display_name || h || 'Unnamed');
+  const model = String(a.model_info || '');
+  const hint = String(a.key_hint || '(legacy)');
+  const st = String(a.connection_state || 'never');
+  const roleVal = String(a.role || 'contributor');
+  const roleCls = (roleVal === 'agent_admin' || roleVal === 'tech_admin') ? 'badge-ok' : 'badge-info';
+  const liveCnt = Number(a.live_connections || 0);
+  let dotCls = 'dot-offline';
+  let stateCls = 'badge-info';
+  let stateLabel = 'Offline';
+  if (st === 'revoked') { dotCls = 'dot-revoked'; stateCls = 'badge-danger'; stateLabel = 'Revoked'; }
+  else if (st === 'connected') { dotCls = 'dot-connected'; stateCls = 'badge-ok'; stateLabel = 'Connected (SSE · ' + liveCnt + ')'; }
+  else if (st === 'online') { dotCls = 'dot-online'; stateCls = 'badge-ok'; stateLabel = 'Online'; }
+  else if (st === 'idle') { dotCls = 'dot-idle'; stateCls = 'badge-warn'; stateLabel = 'Idle'; }
+  else if (st === 'never') { dotCls = 'dot-never'; stateCls = 'badge-info'; stateLabel = 'Never connected'; }
+
+  const showHandle = disp.toLowerCase() !== h.toLowerCase();
+  const subParts = [];
+  if (showHandle) subParts.push('<code>@' + escHtml(h) + '</code>');
+  if (model) subParts.push('<code>' + escHtml(model) + '</code>');
+  subParts.push('<code>' + escHtml(hint) + '</code>');
+  if (st === 'revoked') subParts.push('<span class="badge badge-danger">Revoked</span>');
+
+  const trMap = { 'mcp-sse': 'SSE', 'mcp-http': 'MCP HTTP', 'rest': 'REST' };
+  const tLabel = trMap[String(a.last_transport || '')] || String(a.last_transport || '');
+  const metaBits = [escHtml(a.relative_last_seen || 'Never connected')];
+  if (tLabel) metaBits.push(escHtml(tLabel));
+  if (a.last_action) metaBits.push('<code>' + escHtml(a.last_action) + '</code>');
+  const noteParts = [];
+  if (a.status_note) noteParts.push(escHtml(a.status_note));
+  if (a.client_name) noteParts.push('(' + escHtml(a.client_name) + ')');
+  const noteLine = noteParts.length ? '<div class="agent-sub">' + noteParts.join(' ') + '</div>' : '';
+
+  const isRevoked = !!String(a.revoked_at || '').trim();
+  const revBtn = isRevoked
+    ? '<button class="btn btn-sec btn-sm js-revoke-agent" data-handle="' + escHtml(h) + '" data-reactivate="1" type="button">Reactivate</button>'
+    : '<button class="btn btn-danger btn-sm js-revoke-agent" data-handle="' + escHtml(h) + '" data-reactivate="0" type="button">Revoke</button>';
+  const searchBlob = [h, disp, model, roleVal, st, a.status_note || '', a.client_name || ''].join(' ');
+  return (
+    '<tr class="agent-row" data-presence="' + escHtml(st) + '" data-search="' + escHtml(searchBlob) + '">' +
+      '<td><div class="agent-name">' + escHtml(disp) + '</div><div class="agent-sub">' + subParts.join(' &middot; ') + '</div></td>' +
+      '<td><span class="presence-pill ' + stateCls + '"><span class="dot ' + dotCls + '"></span>' + escHtml(stateLabel) + '</span>' +
+      '<div class="agent-sub" title="' + escHtml(a.last_seen_at || '') + '">' + metaBits.join(' &middot; ') + '</div>' + noteLine + '</td>' +
+      '<td><span class="badge ' + roleCls + '">' + escHtml(roleVal) + '</span> ' +
+      '<select id="role-' + escHtml(h) + '" aria-label="Role for ' + escHtml(h) + '">' +
+      '<option value="contributor"' + (roleVal === 'contributor' ? ' selected' : '') + '>contributor</option>' +
+      '<option value="agent_admin"' + (roleVal === 'agent_admin' ? ' selected' : '') + '>agent_admin</option>' +
+      '<option value="tech_admin"' + (roleVal === 'tech_admin' ? ' selected' : '') + '>tech_admin</option>' +
+      '</select> <button class="btn btn-sec btn-sm js-toggle-agent-role" data-handle="' + escHtml(h) + '" type="button">Set Role</button></td>' +
+      '<td><small>' + Number(a.submission_count || 0) + ' subs &middot; ' + Number(a.review_count || 0) + ' reviews</small></td>' +
+      '<td><div class="btn-row" style="margin-top:0;">' +
+      '<button class="btn btn-sec btn-sm js-edit-agent" data-handle="' + escHtml(h) + '" data-display="' + escHtml(disp) + '" data-model="' + escHtml(model) + '" type="button">Edit</button>' +
+      '<button class="btn btn-sec btn-sm js-rotate-agent-key" data-handle="' + escHtml(h) + '" type="button">Rotate Key</button>' +
+      revBtn + '</div></td>' +
+    '</tr>'
+  );
+}
+
+async function refreshAgentsLive() {
+  try {
+    const r = await fetch('/admin/api/agents');
+    if (!r.ok) return;
+    const d = await r.json();
+    const list = d.agents || [];
+    const sum = d.summary || {};
+    const tbody = document.getElementById('agents-tbody');
+    if (tbody) {
+      tbody.innerHTML = list.length ? list.map(renderAgentRowClient).join('') : "<tr><td colspan='5'>No registered agents yet.</td></tr>";
+      applyAgentFilters();
+    }
+    const onlineCnt = Number(sum.active_online ?? list.filter(a => a.is_online).length);
+    const totalCnt = Number(sum.total ?? list.length);
+    const kpiSub = document.getElementById('kpi-agents-online');
+    if (kpiSub) kpiSub.textContent = onlineCnt + ' online · ' + totalCnt + ' total';
+    const stamp = document.getElementById('agents-live-stamp');
+    if (stamp) stamp.textContent = onlineCnt + ' online · updated ' + new Date().toLocaleTimeString();
+  } catch (_e) {}
+}
+document.getElementById('btn-refresh-agents')?.addEventListener('click', refreshAgentsLive);
+setInterval(() => {
+  const tab = document.getElementById('tab-agents');
+  const autoChk = document.getElementById('chk-agents-autorefresh');
+  if (tab && !tab.classList.contains('hidden') && (!autoChk || autoChk.checked) && !drawerBackdrop?.classList.contains('open') && !document.hidden) {
+    refreshAgentsLive();
+  }
+}, 10000);
 
 document.getElementById('btn-mint-key')?.addEventListener('click', async () => {
   const btn = document.getElementById('btn-mint-key');
   const handle = document.getElementById('mint-handle').value.trim();
   const displayName = document.getElementById('mint-display').value.trim();
   const modelInfo = document.getElementById('mint-model').value.trim();
+  const role = document.getElementById('mint-role')?.value || 'contributor';
   btn.disabled = true;
   const out = await postJson('/admin/api/agents/mint', {
     handle,
     display_name: displayName,
-    model_info: modelInfo
+    model_info: modelInfo,
+    role
   }, document.getElementById('global-msg'), 'Minting key...');
   btn.disabled = false;
   if (out.ok) {
     showKeyBanner('New 3-word AGENT_KEY minted', out.data);
+    refreshAgentsLive();
   }
 });
 
@@ -667,61 +785,80 @@ document.querySelectorAll('.js-approve-open-all').forEach(btn => {
   });
 });
 
-document.querySelectorAll('.js-toggle-agent-role').forEach(btn => {
-  btn.addEventListener('click', async () => {
-    const handle = btn.dataset.handle;
+document.getElementById('agents-tbody')?.addEventListener('click', async (e) => {
+  const btn = e.target.closest('button');
+  if (!btn) return;
+  const handle = btn.dataset.handle;
+  if (!handle) return;
+
+  if (btn.classList.contains('js-toggle-agent-role')) {
     const sel = document.getElementById('role-' + handle);
     const nextRole = sel ? sel.value : (btn.dataset.nextRole || 'contributor');
-    const gMsg = document.getElementById('global-msg');
     btn.disabled = true;
-    const out = await postJson(
-      '/admin/api/agents/role',
-      { identifier: handle, role: nextRole },
-      gMsg,
-      'Updating role for ' + handle + '...'
-    );
+    const out = await postJson('/admin/api/agents/role', { identifier: handle, role: nextRole }, document.getElementById('global-msg'), 'Updating role for ' + handle + '...');
     btn.disabled = false;
     if (out.ok) {
       showToast('Updated ' + handle + ' to ' + nextRole + '.', 'ok');
-      setTimeout(() => location.reload(), 700);
+      refreshAgentsLive();
     }
-  });
-});
+    return;
+  }
 
-document.querySelectorAll('.js-rotate-agent-key').forEach(btn => {
-  btn.addEventListener('click', async () => {
-    const handle = btn.dataset.handle;
+  if (btn.classList.contains('js-edit-agent')) {
+    const curDisp = btn.dataset.display || '';
+    const curModel = btn.dataset.model || '';
+    openDrawer(
+      'Edit Agent: ' + handle,
+      '<div style="display:flex; flex-direction:column; gap:0.75rem;">' +
+        '<label><small style="color:var(--text-muted);">Display Name</small><br/><input id="edit-agent-display" type="text" value="' + escHtml(curDisp) + '" style="width:100%; margin-top:0.25rem;"/></label>' +
+        '<label><small style="color:var(--text-muted);">Model Info</small><br/><input id="edit-agent-model" type="text" value="' + escHtml(curModel) + '" style="width:100%; margin-top:0.25rem;"/></label>' +
+        '<div class="btn-row"><button id="btn-save-agent-profile" class="btn" type="button">Save Profile</button></div>' +
+        '<div id="edit-agent-msg" class="status-msg"></div>' +
+      '</div>'
+    );
+    document.getElementById('btn-save-agent-profile')?.addEventListener('click', async () => {
+      const dVal = document.getElementById('edit-agent-display')?.value.trim() || '';
+      const mVal = document.getElementById('edit-agent-model')?.value.trim() || '';
+      const msgEl = document.getElementById('edit-agent-msg');
+      const saveBtn = document.getElementById('btn-save-agent-profile');
+      if (saveBtn) saveBtn.disabled = true;
+      const out = await postJson('/admin/api/agents/' + encodeURIComponent(handle) + '/profile', { display_name: dVal, model_info: mVal }, msgEl, 'Saving profile...');
+      if (saveBtn) saveBtn.disabled = false;
+      if (out.ok) {
+        closeDrawer();
+        showToast('Updated profile for ' + handle + '.', 'ok');
+        refreshAgentsLive();
+      }
+    });
+    return;
+  }
+
+  if (btn.classList.contains('js-rotate-agent-key')) {
     if (!window.confirm('Rotate AGENT_KEY for ' + handle + '? The old key stops working immediately.')) return;
     btn.disabled = true;
     const out = await postJson('/admin/api/agents/' + encodeURIComponent(handle) + '/rotate', {}, document.getElementById('global-msg'), 'Rotating key...');
     btn.disabled = false;
     if (out.ok) {
       showKeyBanner('Rotated 3-word AGENT_KEY', out.data);
+      refreshAgentsLive();
     }
-  });
-});
+    return;
+  }
 
-document.querySelectorAll('.js-revoke-agent').forEach(btn => {
-  btn.addEventListener('click', async () => {
-    const handle = btn.dataset.handle;
+  if (btn.classList.contains('js-revoke-agent')) {
     const reactivate = btn.dataset.reactivate === '1';
     const promptTxt = reactivate
       ? 'Reactivate AGENT_KEY access for ' + handle + '?'
       : 'Revoke/delete ' + handle + '? Unused agents are deleted; contributors with history are soft-revoked.';
     if (!window.confirm(promptTxt)) return;
     btn.disabled = true;
-    const out = await postJson(
-      '/admin/api/agents/' + encodeURIComponent(handle) + '/revoke',
-      { reactivate },
-      document.getElementById('global-msg'),
-      reactivate ? 'Reactivating agent...' : 'Revoking agent...'
-    );
+    const out = await postJson('/admin/api/agents/' + encodeURIComponent(handle) + '/revoke', { reactivate }, document.getElementById('global-msg'), reactivate ? 'Reactivating agent...' : 'Revoking agent...');
     btn.disabled = false;
     if (out.ok) {
       showToast('Agent ' + handle + ': ' + out.data.action + '.', 'ok');
-      setTimeout(() => location.reload(), 700);
+      refreshAgentsLive();
     }
-  });
+  }
 });
 
 document.querySelectorAll('.js-approve-queue-parse').forEach(btn => {
@@ -1378,17 +1515,82 @@ def _render_admin_html(
         f"<tbody>{''.join(ov_rows) if ov_rows else '<tr><td colspan=5>No books indexed.</td></tr>'}</tbody></table>"
     )
 
+    norm_agents: list[dict[str, Any]] = []
+    for raw_a in agents:
+        if "connection_state" in raw_a:
+            norm_agents.append(dict(raw_a))
+        else:
+            norm_agents.append(compute_agent_presence(raw_a, live_connections=int(raw_a.get("live_connections") or 0)))
+    enriched_agents, agent_summary = enrich_and_sort_agents(
+        [a for a in norm_agents],
+    )
+    # Preserve pre-computed live_connections when already populated by service
+    live_by_h = {str(a.get("handle") or ""): int(a.get("live_connections") or 0) for a in norm_agents}
+    recomputed = [
+        compute_agent_presence(a, live_connections=live_by_h.get(str(a.get("handle") or ""), 0))
+        for a in norm_agents
+    ]
+    recomputed.sort(
+        key=lambda a: (
+            int(a["presence_rank"]),
+            int(a["last_seen_seconds_ago"]) if a["last_seen_seconds_ago"] is not None else 10**9,
+            str(a.get("display_name") or a.get("handle") or "").lower(),
+        )
+    )
+    online_agents_cnt = sum(1 for a in recomputed if a.get("is_online"))
+
     agent_rows: list[str] = []
-    for a in agents:
+    for a in recomputed:
         h = str(a["handle"])
         esc_h = _esc(h)
+        disp_name = str(a.get("display_name") or h)
+        model_info = str(a.get("model_info") or "")
+        key_hint = str(a.get("key_hint") or "(legacy)")
         role_val = str(a.get("role") or "contributor")
         role_cls = "badge-ok" if role_val in {"agent_admin", "tech_admin"} else "badge-info"
         opt_c = " selected" if role_val == "contributor" else ""
         opt_aa = " selected" if role_val == "agent_admin" else ""
         opt_ta = " selected" if role_val == "tech_admin" else ""
+        st = str(a.get("connection_state") or "never")
+        live_cnt = int(a.get("live_connections") or 0)
+        if st == "revoked":
+            dot_cls, st_cls, st_lbl = "dot-revoked", "badge-danger", "Revoked"
+        elif st == "connected":
+            dot_cls, st_cls, st_lbl = "dot-connected", "badge-ok", f"Connected (SSE · {live_cnt})"
+        elif st == "online":
+            dot_cls, st_cls, st_lbl = "dot-online", "badge-ok", "Online"
+        elif st == "idle":
+            dot_cls, st_cls, st_lbl = "dot-idle", "badge-warn", "Idle"
+        elif st == "offline":
+            dot_cls, st_cls, st_lbl = "dot-offline", "badge-info", "Offline"
+        else:
+            dot_cls, st_cls, st_lbl = "dot-never", "badge-info", "Never connected"
+
+        sub_bits: list[str] = []
+        if disp_name.lower() != h.lower():
+            sub_bits.append(f"<code>@{esc_h}</code>")
+        if model_info:
+            sub_bits.append(f"<code>{_esc(model_info)}</code>")
+        sub_bits.append(f"<code>{_esc(key_hint)}</code>")
+        if st == "revoked":
+            sub_bits.append('<span class="badge badge-danger">Revoked</span>')
+
+        tr_map = {"mcp-sse": "SSE", "mcp-http": "MCP HTTP", "rest": "REST"}
+        last_t = str(a.get("last_transport") or "")
+        t_lbl = tr_map.get(last_t, last_t)
+        meta_bits = [_esc(a.get("relative_last_seen") or "Never connected")]
+        if t_lbl:
+            meta_bits.append(_esc(t_lbl))
+        if a.get("last_action"):
+            meta_bits.append(f"<code>{_esc(a['last_action'])}</code>")
+        note_bits: list[str] = []
+        if a.get("status_note"):
+            note_bits.append(_esc(a["status_note"]))
+        if a.get("client_name"):
+            note_bits.append(f"({_esc(a['client_name'])})")
+        note_html = f'<div class="agent-sub">{" ".join(note_bits)}</div>' if note_bits else ""
+
         is_revoked = bool(str(a.get("revoked_at") or "").strip())
-        state_badge = '<span class="badge badge-danger">Revoked</span>' if is_revoked else '<span class="badge badge-ok">Active</span>'
         rev_btn = (
             f'<button class="btn btn-sec btn-sm js-revoke-agent" data-handle="{esc_h}" data-reactivate="1" type="button">Reactivate</button>'
             if is_revoked
@@ -1396,11 +1598,12 @@ def _render_admin_html(
         )
         sub_cnt = int(a.get("submission_count") or 0)
         rev_cnt = int(a.get("review_count") or 0)
-        search_a = _esc(f"{h} {a.get('display_name') or ''} {a.get('model_info') or ''} {role_val}")
+        search_a = _esc(f"{h} {disp_name} {model_info} {role_val} {st} {a.get('status_note') or ''} {a.get('client_name') or ''}")
         agent_rows.append(
-            f'<tr class="agent-row" data-search="{search_a}">'
-            f"<td><code>{esc_h}</code><br/><small style='color:var(--text-muted);'>{_esc(a.get('display_name') or '')}</small></td>"
-            f"<td><code>{_esc(a.get('key_hint') or '(legacy)')}</code><br/>{state_badge}</td>"
+            f'<tr class="agent-row" data-presence="{_esc(st)}" data-search="{search_a}">'
+            f"<td><div class='agent-name'>{_esc(disp_name)}</div><div class='agent-sub'>{' &middot; '.join(sub_bits)}</div></td>"
+            f"<td><span class='presence-pill {st_cls}'><span class='dot {dot_cls}'></span>{_esc(st_lbl)}</span>"
+            f"<div class='agent-sub' title='{_esc(a.get('last_seen_at') or '')}'>{' &middot; '.join(meta_bits)}</div>{note_html}</td>"
             f"<td><span class='badge {role_cls}'>{_esc(role_val)}</span> "
             f'<select id="role-{esc_h}" aria-label="Role for {esc_h}">'
             f'<option value="contributor"{opt_c}>contributor</option>'
@@ -1409,13 +1612,13 @@ def _render_admin_html(
             f"</select> "
             f"<button class='btn btn-sec btn-sm js-toggle-agent-role' data-handle='{esc_h}' type='button'>Set Role</button></td>"
             f"<td><small>{sub_cnt} subs &middot; {rev_cnt} reviews</small></td>"
-            f"<td><code>{_esc(a.get('model_info') or '-')}</code><br/><small style='color:var(--text-muted);'>{_esc(a.get('last_seen_at') or 'never')}</small></td>"
             f"<td><div class='btn-row' style='margin-top:0;'>"
+            f'<button class="btn btn-sec btn-sm js-edit-agent" data-handle="{esc_h}" data-display="{_esc(disp_name)}" data-model="{_esc(model_info)}" type="button">Edit</button>'
             f"<button class='btn btn-sec btn-sm js-rotate-agent-key' data-handle='{esc_h}' type='button'>Rotate Key</button>"
             f"{rev_btn}</div></td>"
             "</tr>"
         )
-    agents_tbody = "\n".join(agent_rows) if agent_rows else "<tr><td colspan='6'>No registered agents yet.</td></tr>"
+    agents_tbody = "\n".join(agent_rows) if agent_rows else "<tr><td colspan='5'>No registered agents yet.</td></tr>"
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -1431,7 +1634,7 @@ def _render_admin_html(
       <div>
         <div class="brand-title">
           <span>Collab Admin</span>
-          <span class="badge badge-info">v4.6.0</span>
+          <span class="badge badge-info">v4.7.0</span>
         </div>
         <div class="brand-sub"><code>{_esc(cfg.public_base_url)}</code></div>
         <nav class="nav-group" aria-label="Admin sections">
@@ -1478,8 +1681,8 @@ def _render_admin_html(
           </button>
           <button class="kpi-card" type="button" data-tab="agents">
             <div class="kpi-label">Registered Agents</div>
-            <div class="kpi-val">{len(agents)}</div>
-            <div class="kpi-sub">Invite-only 3-word AGENT_KEYs</div>
+            <div class="kpi-val">{len(recomputed)}</div>
+            <div id="kpi-agents-online" class="kpi-sub">{online_agents_cnt} online &middot; {len(recomputed)} total</div>
           </button>
         </div>
         <h2 style="font-size:1.1rem; margin-top:0.5rem;">Action Inbox ({len(inbox_items)})</h2>
@@ -1545,11 +1748,16 @@ def _render_admin_html(
 
       <section id="tab-agents" class="tab-panel hidden">
         <div class="card">
-          <h2 style="font-size:1.15rem; margin-bottom:0.5rem;">Mint New 3-Word AGENT_KEY</h2>
-          <div style="display:flex; gap:0.5rem; flex-wrap:wrap;">
-            <input id="mint-handle" type="text" placeholder="Optional handle (auto-generated if blank)"/>
-            <input id="mint-display" type="text" placeholder="Display name (e.g. Claude Sonnet)"/>
+          <h2 style="font-size:1.15rem; margin-bottom:0.5rem;">Mint New Agent &amp; 3-Word AGENT_KEY</h2>
+          <div style="display:flex; gap:0.5rem; flex-wrap:wrap; align-items:center;">
+            <input id="mint-display" type="text" placeholder="Display name (e.g. Claude Sonnet)" style="min-width:210px;"/>
             <input id="mint-model" type="text" placeholder="Model info (e.g. claude-sonnet-4)"/>
+            <select id="mint-role" aria-label="Initial agent role">
+              <option value="contributor">contributor</option>
+              <option value="agent_admin">agent_admin</option>
+              <option value="tech_admin">tech_admin</option>
+            </select>
+            <input id="mint-handle" type="text" placeholder="Optional handle (auto slug if blank)"/>
             <button id="btn-mint-key" class="btn" type="button">Generate 3-Word Key</button>
           </div>
           <div id="mint-out" class="mint-box" data-base-url="{_esc(cfg.public_base_url)}"></div>
@@ -1558,14 +1766,27 @@ def _render_admin_html(
         <div class="card">
           <div class="row-flex">
             <div>
-              <h2 style="font-size:1.15rem; margin-bottom:0.2rem;">Registered Agents ({len(agents)})</h2>
-              <small style="color:var(--text-muted);">Keys are stored strictly as SHA-256 hashes; only masked hints appear here.</small>
+              <h2 style="font-size:1.15rem; margin-bottom:0.2rem;">Registered Agents ({len(recomputed)})</h2>
+              <small id="agents-live-stamp" style="color:var(--text-muted);">{online_agents_cnt} online &middot; live SSE &amp; MCP/REST presence (Online &le;5m, Idle &le;30m)</small>
             </div>
-            <input id="agent-search" type="search" placeholder="Search agents by handle, model, role..."/>
+            <div style="display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap;">
+              <label class="chk" style="margin:0;"><input id="chk-agents-autorefresh" type="checkbox" checked/> Auto-refresh (10s)</label>
+              <button id="btn-refresh-agents" class="btn btn-sec btn-sm" type="button">Refresh</button>
+            </div>
+          </div>
+          <div class="filter-bar">
+            <div class="chip-row">
+              <button class="chip active js-agent-chip" type="button" data-filter="all">All ({len(recomputed)})</button>
+              <button class="chip js-agent-chip" type="button" data-filter="online">Online ({online_agents_cnt})</button>
+              <button class="chip js-agent-chip" type="button" data-filter="idle">Idle</button>
+              <button class="chip js-agent-chip" type="button" data-filter="offline">Offline</button>
+              <button class="chip js-agent-chip" type="button" data-filter="revoked">Revoked</button>
+            </div>
+            <input id="agent-search" type="search" placeholder="Search name, handle, model, role, note..."/>
           </div>
           <table>
-            <thead><tr><th>Handle</th><th>Key &amp; Status</th><th>Role</th><th>Contributions</th><th>Model &amp; Last Seen</th><th>Actions</th></tr></thead>
-            <tbody>{agents_tbody}</tbody>
+            <thead><tr><th>Agent</th><th>Live Status</th><th>Role</th><th>Contributions</th><th>Actions</th></tr></thead>
+            <tbody id="agents-tbody">{agents_tbody}</tbody>
           </table>
         </div>
       </section>

@@ -218,8 +218,8 @@ def test_ac_057_mcp_tool_error_passthrough_and_schema_preservation(tmp_path: Pat
     with TestClient(app) as client:
         # Health & llms.txt & MCP server version 4.5.0
         health = client.get("/api/health").json()
-        assert health["version"] == "4.6.0"
-        assert "v4.6.0" in client.get("/llms.txt").text
+        assert health["version"] == "4.7.0"
+        assert "v4.7.0" in client.get("/llms.txt").text
 
         init_rpc = _mcp_call(
             client,
@@ -231,11 +231,11 @@ def test_ac_057_mcp_tool_error_passthrough_and_schema_preservation(tmp_path: Pat
             },
             req_id=1,
         )
-        assert init_rpc["result"]["serverInfo"]["version"] == "4.6.0"
+        assert init_rpc["result"]["serverInfo"]["version"] == "4.7.0"
 
         tools_rpc = _mcp_call(client, "tools/list", {}, req_id=2)
         tools = tools_rpc["result"]["tools"]
-        assert len(tools) == 30
+        assert len(tools) == 31
         by_name = {t["name"]: t for t in tools}
         assert {"submit_bug_report", "query_bug_reports", "triage_bug_report"}.issubset(by_name)
         assert set(by_name["submit_bug_report"]["inputSchema"]["required"]) >= {"title", "body_md"}

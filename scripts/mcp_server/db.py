@@ -12,7 +12,7 @@ import time
 from typing import Any, Optional
 import uuid
 
-from scripts.mcp_server.auth import generate_default_handle, mint_agent_key, sha256_hex
+from scripts.mcp_server.auth import generate_default_handle, generate_readable_handle, mint_agent_key, sha256_hex
 from scripts.mcp_server.config import McpServerConfig
 from scripts.mcp_server.git_sync import PUBLIC_CORPUS_LICENSES, is_public_corpus_book
 
@@ -31,7 +31,11 @@ SCHEMA_STATEMENTS_COMMON = (
         role TEXT NOT NULL DEFAULT 'contributor',
         created_at TEXT NOT NULL,
         last_seen_at TEXT NOT NULL DEFAULT '',
-        revoked_at TEXT NOT NULL DEFAULT ''
+        revoked_at TEXT NOT NULL DEFAULT '',
+        last_transport TEXT NOT NULL DEFAULT '',
+        last_action TEXT NOT NULL DEFAULT '',
+        client_name TEXT NOT NULL DEFAULT '',
+        status_note TEXT NOT NULL DEFAULT ''
     )
     """,
     """
@@ -235,6 +239,10 @@ class CollabStore:
                         cur.execute("ALTER TABLE agents ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'contributor'")
                         cur.execute("ALTER TABLE agents ADD COLUMN IF NOT EXISTS last_seen_at TEXT NOT NULL DEFAULT ''")
                         cur.execute("ALTER TABLE agents ADD COLUMN IF NOT EXISTS revoked_at TEXT NOT NULL DEFAULT ''")
+                        cur.execute("ALTER TABLE agents ADD COLUMN IF NOT EXISTS last_transport TEXT NOT NULL DEFAULT ''")
+                        cur.execute("ALTER TABLE agents ADD COLUMN IF NOT EXISTS last_action TEXT NOT NULL DEFAULT ''")
+                        cur.execute("ALTER TABLE agents ADD COLUMN IF NOT EXISTS client_name TEXT NOT NULL DEFAULT ''")
+                        cur.execute("ALTER TABLE agents ADD COLUMN IF NOT EXISTS status_note TEXT NOT NULL DEFAULT ''")
                         cur.execute("ALTER TABLE books ADD COLUMN IF NOT EXISTS brief_json TEXT NOT NULL DEFAULT '{}'")
                         cur.execute("ALTER TABLE books ADD COLUMN IF NOT EXISTS access_mode TEXT NOT NULL DEFAULT 'public'")
                         cur.execute("ALTER TABLE books ADD COLUMN IF NOT EXISTS allowed_agents_json TEXT NOT NULL DEFAULT '[]'")
@@ -264,6 +272,9 @@ class CollabStore:
                     conn.execute("ALTER TABLE agents ADD COLUMN last_seen_at TEXT NOT NULL DEFAULT ''")
                 if "revoked_at" not in agent_cols:
                     conn.execute("ALTER TABLE agents ADD COLUMN revoked_at TEXT NOT NULL DEFAULT ''")
+                for acol in ("last_transport", "last_action", "client_name", "status_note"):
+                    if acol not in agent_cols:
+                        conn.execute(f"ALTER TABLE agents ADD COLUMN {acol} TEXT NOT NULL DEFAULT ''")
                 book_cols = {r["name"] for r in conn.execute("PRAGMA table_info(books)").fetchall()}
                 if "brief_json" not in book_cols:
                     conn.execute("ALTER TABLE books ADD COLUMN brief_json TEXT NOT NULL DEFAULT '{}'")
@@ -306,6 +317,7 @@ class CollabStore:
         handle: str = "",
         display_name: str = "",
         model_info: str = "",
+        role: str = "contributor",
     ) -> dict[str, str]:
         with self._lock:
             clean = handle.strip().lower()
@@ -322,15 +334,24 @@ class CollabStore:
                 if existing is not None:
                     raise ValueError(f"Agent handle '{clean}' is already registered")
             else:
-                for _ in range(16):
-                    candidate = generate_default_handle(model_info=model_info, display_name=display_name)
-                    if (
-                        HANDLE_RE.match(candidate)
-                        and self._exec("SELECT handle FROM agents WHERE handle = ?", (candidate,), fetchone=True)
-                        is None
-                    ):
-                        clean = candidate
-                        break
+                readable = generate_readable_handle(display_name=display_name, model_info=model_info)
+                if (
+                    readable
+                    and HANDLE_RE.match(readable)
+                    and self._exec("SELECT handle FROM agents WHERE handle = ?", (readable,), fetchone=True)
+                    is None
+                ):
+                    clean = readable
+                if not clean:
+                    for _ in range(16):
+                        candidate = generate_default_handle(model_info=model_info, display_name=display_name)
+                        if (
+                            HANDLE_RE.match(candidate)
+                            and self._exec("SELECT handle FROM agents WHERE handle = ?", (candidate,), fetchone=True)
+                            is None
+                        ):
+                            clean = candidate
+                            break
                 if not clean:
                     raise RuntimeError("Failed to allocate unique default agent handle")
 
@@ -349,12 +370,13 @@ class CollabStore:
             now = _utc_iso()
             disp = (display_name or clean).strip()
             mod = model_info.strip()
+            eff_role = (role or "contributor").strip().lower() or "contributor"
             self._exec(
                 """
                 INSERT INTO agents (handle, display_name, model_info, key_sha256, key_hint, role, created_at, last_seen_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (clean, disp, mod, key_sha, key_hint, "contributor", now, ""),
+                (clean, disp, mod, key_sha, key_hint, eff_role, now, ""),
             )
             return {
                 "handle": clean,
@@ -362,7 +384,7 @@ class CollabStore:
                 "model_info": mod,
                 "agent_key": raw_key,
                 "key_hint": key_hint,
-                "role": "contributor",
+                "role": eff_role,
                 "created_at": now,
             }
 
@@ -370,7 +392,8 @@ class CollabStore:
         digest = sha256_hex(raw_key.strip())
         return self._exec(
             (
-                "SELECT handle, display_name, model_info, key_hint, role, created_at, last_seen_at, revoked_at "
+                "SELECT handle, display_name, model_info, key_hint, role, created_at, last_seen_at, revoked_at, "
+                "last_transport, last_action, client_name, status_note "
                 "FROM agents WHERE key_sha256 = ? AND revoked_at = ''"
             ),
             (digest,),
@@ -380,7 +403,8 @@ class CollabStore:
     def get_agent(self, handle: str) -> Optional[dict[str, Any]]:
         return self._exec(
             (
-                "SELECT handle, display_name, model_info, key_hint, role, created_at, last_seen_at, revoked_at "
+                "SELECT handle, display_name, model_info, key_hint, role, created_at, last_seen_at, revoked_at, "
+                "last_transport, last_action, client_name, status_note "
                 "FROM agents WHERE handle = ?"
             ),
             (handle.strip().lower(),),
@@ -395,16 +419,62 @@ class CollabStore:
             raise KeyError(f"Agent '{clean}' not found")
         return agent
 
-    def touch_agent_last_seen(self, handle: str) -> None:
+    def update_agent_profile(
+        self,
+        *,
+        handle: str,
+        display_name: Optional[str] = None,
+        model_info: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Update human-readable display_name and/or model_info on an existing agent."""
+        clean = handle.strip().lower()
+        with self._lock:
+            existing = self.get_agent(clean)
+            if existing is None:
+                raise KeyError(f"Agent '{clean}' not found")
+            eff_name = str(existing["display_name"]) if display_name is None else display_name
+            eff_model = str(existing["model_info"]) if model_info is None else model_info
+            self._exec(
+                "UPDATE agents SET display_name = ?, model_info = ? WHERE handle = ?",
+                (eff_name, eff_model, clean),
+            )
+            updated = self.get_agent(clean)
+            if updated is None:
+                raise KeyError(f"Agent '{clean}' not found")
+            return updated
+
+    def touch_agent_last_seen(
+        self,
+        handle: str,
+        *,
+        transport: str = "",
+        action: str = "",
+        client_name: str = "",
+        status_note: Optional[str] = None,
+    ) -> None:
+        clean_t = (transport or "").strip()[:40]
+        clean_a = (action or "").strip()[:80]
+        clean_c = (client_name or "").strip()[:80]
+        has_note = 1 if status_note is not None else 0
+        eff_note = "" if status_note is None else status_note.strip()[:140]
         self._exec(
-            "UPDATE agents SET last_seen_at = ? WHERE handle = ?",
-            (_utc_iso(), handle),
+            """
+            UPDATE agents
+            SET last_seen_at = ?,
+                last_transport = CASE WHEN ? != '' THEN ? ELSE last_transport END,
+                last_action = CASE WHEN ? != '' THEN ? ELSE last_action END,
+                client_name = CASE WHEN ? != '' THEN ? ELSE client_name END,
+                status_note = CASE WHEN ? = 1 THEN ? ELSE status_note END
+            WHERE handle = ?
+            """,
+            (_utc_iso(), clean_t, clean_t, clean_a, clean_a, clean_c, clean_c, has_note, eff_note, handle),
         )
 
     def list_agents(self) -> list[dict[str, Any]]:
         return self._exec(
             (
-                "SELECT handle, display_name, model_info, key_hint, role, created_at, last_seen_at, revoked_at "
+                "SELECT handle, display_name, model_info, key_hint, role, created_at, last_seen_at, revoked_at, "
+                "last_transport, last_action, client_name, status_note "
                 "FROM agents ORDER BY created_at DESC"
             ),
             fetchall=True,

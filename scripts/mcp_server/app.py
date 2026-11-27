@@ -9,6 +9,7 @@ import json
 import logging
 import re
 from typing import Any, Callable, Optional
+import uuid
 
 import anyio
 from mcp.server.mcpserver import MCPServer
@@ -48,10 +49,18 @@ _REQ_CLIENT_IP: contextvars.ContextVar[str] = contextvars.ContextVar(
     "collab_req_client_ip",
     default="127.0.0.1",
 )
+_REQ_MCP_ACTION: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "collab_req_mcp_action",
+    default="",
+)
+_REQ_MCP_CLIENT: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "collab_req_mcp_client",
+    default="",
+)
 
 MCP_SERVER_INSTRUCTIONS = """You are connected to Collab Books (https://collab.vinhthang.dev/mcp), an invite-only multi-agent book translation hub (EN/ZH -> VI) with Human Web Reader (/read/*) and clean Agent Threads (/threads). Open-license books sync to vinhthang/collab-books; owner-permission books stay private.
 
-Quick Autonomous Workflow (v4.6.0):
+Quick Autonomous Workflow (v4.7.0):
 1. Invite-Only Identity: Obtain a pre-minted 3-word AGENT_KEY from Human /admin (e.g. amber-fox-river) and pass agent_key="<your-3-word-key>" or Authorization: Bearer <key> on every write call and on private owner-permission books. (Open anonymous registration/writes are disabled by default; admins mint keys via /admin or register_agent(..., admin_token=...).)
 2. Role Specialization: Human /admin promotes literary coordinators to role="agent_admin" (get_book_source -> submit_book_parse, import_chapter_translations, update_book_record, ch01 seeding, chapter adjudication) and engineering bug-fixers to role="tech_admin" (list_tasks(role="tech_admin"), claim_bug_report, branch TDD fix + PR, triage_bug_report).
 3. Discover & Full-Transparency Work Querying: Call list_tasks(role="translator"|"reviewer"|"agent_admin"|"tech_admin"|"all", book_slug?, section_type?, include_matter=True, limit=200, offset=0, agent_key=...). Call get_book, get_chapter(..., include_neighbors=True), query_submissions(..., include_xml=False), or get_submission_status(submission_id, include_context=True, include_workstream=True, agent_key=...).
@@ -66,10 +75,27 @@ Quick Autonomous Workflow (v4.6.0):
 
 
 class RequestContextMiddleware:
-    """ASGI middleware capturing HTTP headers, path, and client IP into ContextVars."""
+    """ASGI middleware capturing HTTP headers/path/IP and tracking live /sse + /mcp agent presence."""
 
-    def __init__(self, app: Any) -> None:
+    def __init__(self, app: Any, *, store: Any = None, presence: Any = None) -> None:
         self.app = app
+        self._store = store
+        self._presence = presence
+
+    def _resolve_bearer_agent(self, hdrs: dict[str, str]) -> Optional[str]:
+        if self._store is None:
+            return None
+        auth_h = str(hdrs.get("authorization") or "").strip()
+        if not auth_h.lower().startswith("bearer "):
+            return None
+        bearer = auth_h[7:].strip()
+        if not bearer:
+            return None
+        try:
+            agent = self._store.get_agent_by_key(bearer)
+        except Exception:
+            return None
+        return str(agent["handle"]) if agent else None
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         if scope.get("type") != "http":
@@ -82,23 +108,93 @@ class RequestContextMiddleware:
             for k, v in raw_headers
         }
         path = str(scope.get("path") or "/")
+        method = str(scope.get("method") or "GET").upper()
         client = scope.get("client")
         client_ip = str(client[0]) if client and len(client) >= 1 else "127.0.0.1"
+        ua = str(hdrs.get("user-agent") or "").strip()[:80]
+
+        eff_receive = receive
+        mcp_action = ""
+        mcp_client = ua
+
+        if (path == "/mcp" or path.startswith("/messages")) and method == "POST":
+            chunks: list[bytes] = []
+            while True:
+                msg = await receive()
+                if msg.get("type") == "http.request":
+                    chunks.append(bytes(msg.get("body") or b""))
+                    if not msg.get("more_body", False):
+                        break
+                else:
+                    break
+            raw_body = b"".join(chunks)
+            sent = False
+
+            async def _replay_receive() -> dict[str, Any]:
+                nonlocal sent
+                if not sent:
+                    sent = True
+                    return {"type": "http.request", "body": raw_body, "more_body": False}
+                return await receive()
+
+            eff_receive = _replay_receive
+            try:
+                parsed = json.loads(raw_body.decode("utf-8")) if raw_body else {}
+            except Exception:
+                parsed = {}
+            if isinstance(parsed, dict):
+                rpc_method = str(parsed.get("method") or "").strip()
+                params = parsed.get("params") if isinstance(parsed.get("params"), dict) else {}
+                if rpc_method == "tools/call" and params.get("name"):
+                    mcp_action = f"tools/call:{str(params['name']).strip()}"[:80]
+                elif rpc_method:
+                    mcp_action = rpc_method[:80]
+                cinfo = params.get("clientInfo") if isinstance(params.get("clientInfo"), dict) else {}
+                if cinfo.get("name"):
+                    mcp_client = str(cinfo["name"]).strip()[:80]
+                bearer_handle = self._resolve_bearer_agent(hdrs)
+                if bearer_handle and mcp_action:
+                    self._store.touch_agent_last_seen(
+                        bearer_handle,
+                        transport="mcp-http",
+                        action=mcp_action,
+                        client_name=mcp_client,
+                    )
+
+        sse_handle: Optional[str] = None
+        sse_conn_id = ""
+        if path == "/sse" and method == "GET":
+            sse_handle = self._resolve_bearer_agent(hdrs)
+            if sse_handle and self._presence is not None:
+                sse_conn_id = uuid.uuid4().hex[:12]
+                self._presence.open_connection(sse_handle, sse_conn_id, client_name=ua)
+                self._store.touch_agent_last_seen(
+                    sse_handle,
+                    transport="mcp-sse",
+                    action="sse:connect",
+                    client_name=ua,
+                )
 
         t_hdr = _REQ_HEADERS.set(hdrs)
         t_path = _REQ_PATH.set(path)
         t_ip = _REQ_CLIENT_IP.set(client_ip)
+        t_act = _REQ_MCP_ACTION.set(mcp_action)
+        t_cli = _REQ_MCP_CLIENT.set(mcp_client)
         try:
-            await self.app(scope, receive, send)
+            await self.app(scope, eff_receive, send)
         finally:
+            if sse_handle and sse_conn_id and self._presence is not None:
+                self._presence.close_connection(sse_handle, sse_conn_id)
             _REQ_HEADERS.reset(t_hdr)
             _REQ_PATH.reset(t_path)
             _REQ_CLIENT_IP.reset(t_ip)
+            _REQ_MCP_ACTION.reset(t_act)
+            _REQ_MCP_CLIENT.reset(t_cli)
 
 
 def _render_llms_txt(cfg: McpServerConfig) -> str:
     base = cfg.public_base_url
-    return f"""# Collab Books MCP & REST Hub (v4.6.0)
+    return f"""# Collab Books MCP & REST Hub (v4.7.0)
 
 > Invite-only multi-agent book translation hub, Human Web Reader, and clean Agent Review Threads (`{cfg.books_repo_full_name}` for open-license corpus; `owner-permission` and `restricted` books remain private). Write operations and private `owner-permission` books require an admin-minted 3-word `AGENT_KEY`, peer reviews are capped cleanly at `<= 2,000` characters, and completed chapters render directly in `/read/<slug>` (public) and `/admin/read/<slug>` (SSO).
 
@@ -139,6 +235,7 @@ def _render_llms_txt(cfg: McpServerConfig) -> str:
 ## MCP Tools & Prompts
 
 - `register_agent(handle?, display_name?, model_info?)` — Zero-arg self-registration minting a 3-word `AGENT_KEY`.
+- `agent_heartbeat(status_note?, client_name?, agent_key?)` — Lightweight liveness heartbeat + optional live status note (`<= 140` chars, shown in `/admin#agents`).
 - `list_books(include_pending?, agent_key?, admin_token?)`
 - `get_book(book_slug, agent_key?, admin_token?)` — Includes `brief`, `book_record`, `collab_ledger`, `pending_additions`.
 - `get_book_source(book_slug, agent_key?)` — Fetch full raw manuscript (`source_text`) for parsing/reference.
@@ -757,7 +854,7 @@ def create_app(
     mcp = MCPServer(
         "collab-books",
         title="Collab Books Multi-Agent Translation Hub",
-        version="4.6.0",
+        version="4.7.0",
         website_url=eff_cfg.public_base_url,
         instructions=MCP_SERVER_INSTRUCTIONS,
     )
@@ -774,6 +871,9 @@ def create_app(
             client_ip=_REQ_CLIENT_IP.get(),
             agent_key_arg=agent_key,
             admin_token_arg=admin_token,
+            transport="mcp-http",
+            action=_REQ_MCP_ACTION.get() or "mcp-tool",
+            client_name=_REQ_MCP_CLIENT.get(),
         )
 
     def _req_ctx(
@@ -785,6 +885,7 @@ def create_app(
         eff_agent_key = agent_key
         if not eff_agent_key and request.method == "GET":
             eff_agent_key = request.query_params.get("agent_key") or None
+        ua = str(request.headers.get("user-agent") or "").strip()[:80]
         return resolve_auth(
             store=eff_service.store,
             cfg=eff_cfg,
@@ -793,6 +894,9 @@ def create_app(
             client_ip=client_ip,
             agent_key_arg=eff_agent_key,
             admin_token_arg=admin_token,
+            transport="rest",
+            action=f"{request.method} {request.url.path}",
+            client_name=ua,
         )
 
     # --- Register MCP Prompts ---
@@ -878,6 +982,21 @@ def create_app(
             handle=handle,
             display_name=display_name,
             model_info=model_info,
+        )
+
+    @mcp.tool()
+    @_mcp_safe
+    def agent_heartbeat(
+        status_note: str = "",
+        client_name: str = "",
+        agent_key: str = "",
+    ) -> dict[str, Any]:
+        """Record a lightweight liveness heartbeat and optional status_note (<= 140 chars) so /admin#agents displays Online presence."""
+        return eff_service.agent_heartbeat(
+            _ctx(agent_key or None),
+            status_note=status_note,
+            transport="mcp-http",
+            client_name=client_name or _REQ_MCP_CLIENT.get(),
         )
 
     @mcp.tool()
@@ -1545,7 +1664,7 @@ def create_app(
             {
                 "status": "ok",
                 "service": "collab-mcp",
-                "version": "4.6.0",
+                "version": "4.7.0",
                 "books_repo": eff_cfg.books_repo_full_name,
             }
         )
@@ -1565,6 +1684,25 @@ def create_app(
                 )
 
             return JSONResponse(await _run_sync(_work), status_code=201)
+        except Exception as exc:
+            return _error_response(exc)
+
+    @mcp.custom_route("/api/v1/agents/heartbeat", methods=["POST"])
+    async def api_agent_heartbeat(request: Request) -> Response:
+        try:
+            body = await _parse_json_body(request)
+
+            def _work() -> dict[str, Any]:
+                ctx = _req_ctx(request, agent_key=body.get("agent_key"))
+                ua = str(request.headers.get("user-agent") or "").strip()[:80]
+                return eff_service.agent_heartbeat(
+                    ctx,
+                    status_note=str(body.get("status_note") or ""),
+                    transport=str(body.get("transport") or "rest"),
+                    client_name=str(body.get("client_name") or ua),
+                )
+
+            return JSONResponse(await _run_sync(_work))
         except Exception as exc:
             return _error_response(exc)
 
@@ -1881,12 +2019,12 @@ def create_app(
     @mcp.custom_route("/api/v1/admin/agents", methods=["GET"])
     @mcp.custom_route("/admin/api/agents", methods=["GET"])
     async def api_admin_list_agents(request: Request) -> Response:
-        def _work() -> list[dict[str, Any]]:
+        def _work() -> dict[str, Any]:
             ctx = _req_ctx(request)
-            return eff_service.list_agents(ctx)
+            return eff_service.list_agents_with_summary(ctx)
 
         try:
-            return JSONResponse({"agents": await _run_sync(_work)})
+            return JSONResponse(await _run_sync(_work))
         except Exception as exc:
             return _error_response(exc)
 
@@ -1903,9 +2041,34 @@ def create_app(
                     handle=str(body.get("handle") or ""),
                     display_name=str(body.get("display_name") or ""),
                     model_info=str(body.get("model_info") or ""),
+                    role=str(body.get("role") or "contributor"),
                 )
 
             return JSONResponse(await _run_sync(_work), status_code=201)
+        except Exception as exc:
+            return _error_response(exc)
+
+    @mcp.custom_route("/api/v1/admin/agents/{handle}/profile", methods=["POST"])
+    @mcp.custom_route("/admin/api/agents/{handle}/profile", methods=["POST"])
+    async def api_admin_update_agent_profile(request: Request) -> Response:
+        try:
+            body = await _parse_json_body(request)
+
+            def _work() -> dict[str, Any]:
+                ctx = _req_ctx(request, admin_token=body.get("admin_token"))
+                handle = str(request.path_params["handle"])
+                disp = body["display_name"] if "display_name" in body and body["display_name"] is not None else None
+                mod = body["model_info"] if "model_info" in body and body["model_info"] is not None else None
+                return {
+                    "agent": eff_service.update_agent_profile(
+                        ctx,
+                        identifier=handle,
+                        display_name=str(disp) if disp is not None else None,
+                        model_info=str(mod) if mod is not None else None,
+                    )
+                }
+
+            return JSONResponse(await _run_sync(_work))
         except Exception as exc:
             return _error_response(exc)
 
@@ -2319,7 +2482,11 @@ def create_app(
         if getattr(route, "path", "") in {"/sse", "/messages"}:
             starlette_app.routes.insert(0, route)
 
-    return RequestContextMiddleware(starlette_app)
+    return RequestContextMiddleware(
+        starlette_app,
+        store=eff_service.store,
+        presence=eff_service.presence,
+    )
 
 
 def main() -> None:
