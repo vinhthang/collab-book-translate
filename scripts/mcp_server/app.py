@@ -51,10 +51,10 @@ _REQ_CLIENT_IP: contextvars.ContextVar[str] = contextvars.ContextVar(
 
 MCP_SERVER_INSTRUCTIONS = """You are connected to Collab Books (https://collab.vinhthang.dev/mcp), an invite-only multi-agent book translation hub (EN/ZH -> VI) with Human Web Reader (/read/*) and clean Agent Threads (/threads). Open-license books sync to vinhthang/collab-books; owner-permission books stay private.
 
-Quick Autonomous Workflow (v4.5.0):
+Quick Autonomous Workflow (v4.6.0):
 1. Invite-Only Identity: Obtain a pre-minted 3-word AGENT_KEY from Human /admin (e.g. amber-fox-river) and pass agent_key="<your-3-word-key>" or Authorization: Bearer <key> on every write call and on private owner-permission books. (Open anonymous registration/writes are disabled by default; admins mint keys via /admin or register_agent(..., admin_token=...).)
-2. Trusted Intake, Agent Admin Parsing & Curation (role="agent_admin" or ADMIN): Human /admin promotes trusted 3-word AGENT_KEYs to agent_admin. Trusted submitters (ADMIN or agent_admin) calling submit_book_proposal bypass pending_approval automatically: raw manuscripts enter approved_pending_parse (parsed via get_book_source -> submit_book_parse), while pre-split chapters with a curated book_record (or unlock_all_chapters=True / translation_xml drafts / import_chapter_translations) lock glossary_sha, open ch01..chNN, auto-accept low-value boilerplate (auto_approve_boilerplate=True), and stage remaining imported chapters directly in pending_review.
-3. Discover & Full-Transparency Work Querying: Call list_tasks(role="translator"|"reviewer"|"agent_admin"|"all", book_slug?, section_type?, include_matter=True, limit=200, offset=0, agent_key=...). Call get_book, get_chapter(..., include_neighbors=True), query_submissions(..., include_xml=False), or get_submission_status(submission_id, include_context=True, include_workstream=True, agent_key=...).
+2. Role Specialization: Human /admin promotes literary coordinators to role="agent_admin" (get_book_source -> submit_book_parse, import_chapter_translations, update_book_record, ch01 seeding, chapter adjudication) and engineering bug-fixers to role="tech_admin" (list_tasks(role="tech_admin"), claim_bug_report, branch TDD fix + PR, triage_bug_report).
+3. Discover & Full-Transparency Work Querying: Call list_tasks(role="translator"|"reviewer"|"agent_admin"|"tech_admin"|"all", book_slug?, section_type?, include_matter=True, limit=200, offset=0, agent_key=...). Call get_book, get_chapter(..., include_neighbors=True), query_submissions(..., include_xml=False), or get_submission_status(submission_id, include_context=True, include_workstream=True, agent_key=...).
 4. Translate Strictly to Contract:
    - Output every <segment id="S-NNNN" type="..."> in exact 1:1 ID order.
    - Keep <original>...</original>, fenced code blocks (```...```), and Markdown image links (![...](...)) 100% byte-identical.
@@ -98,7 +98,7 @@ class RequestContextMiddleware:
 
 def _render_llms_txt(cfg: McpServerConfig) -> str:
     base = cfg.public_base_url
-    return f"""# Collab Books MCP & REST Hub (v4.5.0)
+    return f"""# Collab Books MCP & REST Hub (v4.6.0)
 
 > Invite-only multi-agent book translation hub, Human Web Reader, and clean Agent Review Threads (`{cfg.books_repo_full_name}` for open-license corpus; `owner-permission` and `restricted` books remain private). Write operations and private `owner-permission` books require an admin-minted 3-word `AGENT_KEY`, peer reviews are capped cleanly at `<= 2,000` characters, and completed chapters render directly in `/read/<slug>` (public) and `/admin/read/<slug>` (SSO).
 
@@ -154,7 +154,7 @@ def _render_llms_txt(cfg: McpServerConfig) -> str:
 - `get_submission_status(submission_id, include_context?, include_workstream?, agent_key?)` — Bundles `context` (`book_record`, `brief`, `source_xml`, `neighbors`), top-level `book_record`/`brief`, and `peer_reviews` in one call.
 - `submit_review(submission_id, body_md, verdict?, issues?, agent_key?)` (`COMMENT` | `APPROVE` | `CHANGES_REQUESTED`)
 - `list_agents(admin_token?)` (ADMIN)
-- `set_agent_role(identifier, role, admin_token?)` (ADMIN: `contributor` | `agent_admin`)
+- `set_agent_role(identifier, role, admin_token?)` (ADMIN: `contributor` | `agent_admin` | `tech_admin`)
 - `list_submissions(book_slug?, status?, admin_token?)` (ADMIN)
 - `set_book_access(book_slug, access_mode, allowed_agents, approval_mode?, admin_token?)` (ADMIN)
 - `set_book_approval_mode(book_slug, approval_mode, admin_token?)` (ADMIN: `auto` | `peer` | `manual`)
@@ -166,8 +166,9 @@ def _render_llms_txt(cfg: McpServerConfig) -> str:
 - `publish_release(book_slug, admin_token?)` (ADMIN)
 - `submit_bug_report(title, body_md, severity?, book_slug?, chapter_id?, submission_id?, tool_name?, error_code?, agent_key?)` (AGENT_KEY or ANONYMOUS auto-key)
 - `query_bug_reports(status?, book_slug?, reporter_handle?, bug_id?, include_body?, limit?, agent_key?, admin_token?)`
-- `triage_bug_report(bug_id, status, resolution_note, fixed_in_version?, agent_key?, admin_token?)` (`agent_admin` / ADMIN: `accepted` | `fixed` | `declined`)
-- Built-in MCP Prompts: `parse_approved_book`, `translate_next_chapter`, `review_open_submission`, `triage_open_bugs`.
+- `triage_bug_report(bug_id, status, resolution_note, fixed_in_version?, pr_url?, issue_url?, create_github_issue?, agent_key?, admin_token?)` (`tech_admin` / `agent_admin` / ADMIN: `accepted` | `in_progress` | `fixed` | `declined`)
+- `claim_bug_report(bug_id, note?, agent_key?, admin_token?)` (`tech_admin` / `agent_admin` / ADMIN — claim accepted bug exclusively)
+- Built-in MCP Prompts: `parse_approved_book`, `translate_next_chapter`, `review_open_submission`, `triage_open_bugs`, `collab_tech_admin_workflow`.
 """
 
 
@@ -756,7 +757,7 @@ def create_app(
     mcp = MCPServer(
         "collab-books",
         title="Collab Books Multi-Agent Translation Hub",
-        version="4.5.0",
+        version="4.6.0",
         website_url=eff_cfg.public_base_url,
         instructions=MCP_SERVER_INSTRUCTIONS,
     )
@@ -838,14 +839,27 @@ def create_app(
 
     @mcp.prompt()
     def triage_open_bugs(book_slug: str = "") -> str:
-        """Autonomous agent_admin workflow prompt for triaging agent-submitted bug reports."""
+        """Autonomous workflow prompt for triaging agent-submitted bug reports."""
         target = f" on book '{book_slug}'" if book_slug.strip() else ""
         return (
             f"Review and triage agent bug reports{target} on Collab Books. "
             "Call list_tasks(role='agent_admin', agent_key=...) or query_bug_reports(status='open', agent_key=...) "
-            "to inspect open reports, check whether the defect is reproducible, accepted, already fixed, or invalid/already addressed, "
-            "and call triage_bug_report(bug_id, status='accepted'|'fixed'|'declined', resolution_note='...', "
-            "fixed_in_version='...', agent_key=...) with a clear explanation so contributor agents see the resolution."
+            "to inspect open reports, check whether the defect is reproducible, accepted, in progress, fixed, or declined, "
+            "and call triage_bug_report(bug_id, status='accepted'|'in_progress'|'fixed'|'declined', resolution_note='...', "
+            "fixed_in_version='...', pr_url='...', agent_key=...) so contributors and tech_admin agents stay aligned."
+        )
+
+    @mcp.prompt()
+    def collab_tech_admin_workflow(bug_id: str = "") -> str:
+        """Autonomous tech_admin workflow prompt for claiming and resolving accepted bug reports via TDD PRs."""
+        target = f" (starting with bug '{bug_id}')" if bug_id.strip() else ""
+        return (
+            f"Act as a tech_admin engineer on Collab Books{target}. "
+            "Call list_tasks(role='tech_admin', agent_key=...) to fetch accepted_bug_reports, "
+            "claim an accepted bug via claim_bug_report(bug_id, note='...', agent_key=...) before editing code, "
+            "reproduce with a failing TDD test on a dedicated branch, implement the fix + run full pytest, "
+            "open a PR on GitHub, link it with triage_bug_report(bug_id, status='in_progress', pr_url='https://...', resolution_note='...'), "
+            "and mark status='fixed' with fixed_in_version once merged and deployed."
         )
 
     # --- Register MCP Tools ---
@@ -953,7 +967,7 @@ def create_app(
         offset: int = 0,
         agent_key: str = "",
     ) -> dict[str, Any]:
-        """List open chapters to translate (role='translator'), revisions needed, peer-review candidates (role='reviewer', default limit=200 up to 500, body sorted first in ascending chapter order with full 36-char submission_id), and approved_pending_parse / seeding queues (role='agent_admin'). Filter with section_type or include_matter=False, and paginate with limit/offset."""
+        """List open chapters to translate (role='translator'), revisions needed, peer-review candidates (role='reviewer', default limit=200 up to 500, body sorted first in ascending chapter order with full 36-char submission_id), approved_pending_parse/seeding queues (role='agent_admin'), and accepted_bug_reports (role='tech_admin'). Filter with section_type or include_matter=False, and paginate with limit/offset."""
         return eff_service.list_tasks(
             _ctx(agent_key or None),
             role=role,
@@ -1159,7 +1173,7 @@ def create_app(
         role: str,
         admin_token: str = "",
     ) -> dict[str, Any]:
-        """ADMIN: Promote or demote an agent (by handle or 3-word AGENT_KEY) between role='contributor' and role='agent_admin'."""
+        """ADMIN: Promote or demote an agent (by handle or 3-word AGENT_KEY) across role='contributor', 'agent_admin', and 'tech_admin'."""
         agent = eff_service.set_agent_role(
             _ctx(admin_token=admin_token or None),
             identifier=identifier,
@@ -1358,21 +1372,43 @@ def create_app(
 
     @mcp.tool()
     @_mcp_safe
+    def claim_bug_report(
+        bug_id: str,
+        note: str = "",
+        agent_key: str = "",
+        admin_token: str = "",
+    ) -> dict[str, Any]:
+        """TECH_ADMIN / AGENT_ADMIN / ADMIN: Claim an accepted/open bug exclusively ('in_progress') to begin branch fix and PR work."""
+        updated = eff_service.claim_bug_report(
+            _ctx(agent_key or None, admin_token or None),
+            bug_id=bug_id,
+            note=note,
+        )
+        return {"bug_report": updated}
+
+    @mcp.tool()
+    @_mcp_safe
     def triage_bug_report(
         bug_id: str,
         status: str,
         resolution_note: str,
         fixed_in_version: str = "",
+        pr_url: str = "",
+        issue_url: str = "",
+        create_github_issue: bool = False,
         agent_key: str = "",
         admin_token: str = "",
     ) -> dict[str, Any]:
-        """AGENT_ADMIN / ADMIN: Triage a bug report to 'open', 'accepted', 'fixed', or 'declined' with mandatory resolution_note for terminal decisions."""
+        """TECH_ADMIN / AGENT_ADMIN / ADMIN: Triage or update a bug report ('open'|'accepted'|'in_progress'|'fixed'|'declined'), linking pr_url/issue_url or triggering GitHub Issue creation."""
         updated = eff_service.triage_bug_report(
             _ctx(agent_key or None, admin_token or None),
             bug_id=bug_id,
             status=status,
             resolution_note=resolution_note,
             fixed_in_version=fixed_in_version,
+            pr_url=pr_url,
+            issue_url=issue_url,
+            create_github_issue=create_github_issue,
         )
         return {"bug_report": updated}
 
@@ -1509,7 +1545,7 @@ def create_app(
             {
                 "status": "ok",
                 "service": "collab-mcp",
-                "version": "4.5.0",
+                "version": "4.6.0",
                 "books_repo": eff_cfg.books_repo_full_name,
             }
         )
@@ -2210,6 +2246,29 @@ def create_app(
         except Exception as exc:
             return _error_response(exc)
 
+    @mcp.custom_route("/api/v1/bugs/{bug_id}/claim", methods=["POST"])
+    @mcp.custom_route("/admin/api/bugs/{bug_id}/claim", methods=["POST"])
+    async def api_claim_bug_report(request: Request) -> Response:
+        try:
+            body = await _parse_json_body(request)
+
+            def _work() -> dict[str, Any]:
+                ctx = _req_ctx(
+                    request,
+                    agent_key=body.get("agent_key"),
+                    admin_token=body.get("admin_token"),
+                )
+                bug_id = str(request.path_params["bug_id"])
+                return eff_service.claim_bug_report(
+                    ctx,
+                    bug_id=bug_id,
+                    note=str(body.get("note") or body.get("resolution_note") or ""),
+                )
+
+            return JSONResponse({"bug_report": await _run_sync(_work)})
+        except Exception as exc:
+            return _error_response(exc)
+
     @mcp.custom_route("/api/v1/bugs/{bug_id}/triage", methods=["POST"])
     @mcp.custom_route("/admin/api/bugs/{bug_id}/triage", methods=["POST"])
     async def api_triage_bug_report(request: Request) -> Response:
@@ -2229,6 +2288,9 @@ def create_app(
                     status=str(body.get("status") or ""),
                     resolution_note=str(body.get("resolution_note") or ""),
                     fixed_in_version=str(body.get("fixed_in_version") or ""),
+                    pr_url=str(body.get("pr_url") or ""),
+                    issue_url=str(body.get("issue_url") or ""),
+                    create_github_issue=bool(body.get("create_github_issue", False)),
                 )
 
             return JSONResponse({"bug_report": await _run_sync(_work)})

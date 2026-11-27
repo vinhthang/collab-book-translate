@@ -651,7 +651,7 @@ def test_ac_056_mcp_v4_tools_admin_ui_xss_and_worker_cli(tmp_path: Path, monkeyp
                 "params": {"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}},
             },
         ).json()["result"]
-        assert init["serverInfo"]["version"] == "4.5.0"
+        assert init["serverInfo"]["version"] == "4.6.0"
         assert "submit_book_parse" in init["instructions"]
         assert "get_book_source" in init["instructions"]
 
@@ -766,7 +766,7 @@ def test_ac_056_mcp_v4_tools_admin_ui_xss_and_worker_cli(tmp_path: Path, monkeyp
 
     repo_root = Path(__file__).resolve().parent.parent
     assert (repo_root / "agents" / "collab_admin.md").is_file()
-    assert json.loads((repo_root / "plugin.json").read_text(encoding="utf-8"))["version"] == "4.5.0"
+    assert json.loads((repo_root / "plugin.json").read_text(encoding="utf-8"))["version"] == "4.6.0"
 
     store.close()
 

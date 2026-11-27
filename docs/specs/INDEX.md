@@ -16,3 +16,4 @@
 | `2026-11-23-collab-mcp-public-corpus-publish-gate` | Collab Books MCP Public-Corpus Publish Gate & Non-Public Storage Isolation (`v4.3.1`) | In-Testing | REQ-068..REQ-069 | ADR-039 | [spec](./2026-11-23-collab-mcp-public-corpus-publish-gate/spec.md) |
 | `2026-11-23-collab-mcp-reader-threads-and-invite-lockdown` | Collab Books MCP Invite-Only Lockdown, Human Web Reader, & Clean Agent Threads (`v4.4.0`) | In-Testing | REQ-070..REQ-072 | ADR-040 | [spec](./2026-11-23-collab-mcp-reader-threads-and-invite-lockdown/spec.md) |
 | `2026-11-27-collab-mcp-admin-console-rework` | Collab Books MCP Admin Workspace Console Rework (`v4.5.0`) | In-Testing | REQ-073..REQ-075 | ADR-041 | [spec](./2026-11-27-collab-mcp-admin-console-rework/spec.md) |
+| `2026-11-27-collab-mcp-tech-admin-bug-workflow` | Dedicated `tech_admin` Role & Hybrid Bug Resolution Workflow (`v4.6.0`) | In-Testing | REQ-076..REQ-078 | ADR-042 | [spec](./2026-11-27-collab-mcp-tech-admin-bug-workflow/spec.md) |

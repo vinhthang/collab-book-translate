@@ -23,6 +23,7 @@ STATUS_BADGE_CLASS = {
     "superseded": "badge-info",
     "seeding": "badge-info",
     "active": "badge-info",
+    "in_progress": "badge-info",
     "declined": "badge-info",
     "accepted": "badge-ok",
     "completed": "badge-ok",
@@ -669,7 +670,8 @@ document.querySelectorAll('.js-approve-open-all').forEach(btn => {
 document.querySelectorAll('.js-toggle-agent-role').forEach(btn => {
   btn.addEventListener('click', async () => {
     const handle = btn.dataset.handle;
-    const nextRole = btn.dataset.nextRole;
+    const sel = document.getElementById('role-' + handle);
+    const nextRole = sel ? sel.value : (btn.dataset.nextRole || 'contributor');
     const gMsg = document.getElementById('global-msg');
     btn.disabled = true;
     const out = await postJson(
@@ -911,13 +913,15 @@ document.querySelectorAll('.js-triage-bug').forEach(btn => {
     const status = btn.dataset.status;
     const noteEl = document.getElementById('bug-note-' + bugId);
     const verEl = document.getElementById('bug-ver-' + bugId);
+    const prEl = document.getElementById('bug-pr-' + bugId);
     const msg = document.getElementById('bug-msg-' + bugId);
     const note = noteEl ? noteEl.value.trim() : '';
     const fixedVer = verEl ? verEl.value.trim() : '';
+    const prUrl = prEl ? prEl.value.trim() : '';
     btn.disabled = true;
     const out = await postJson(
       '/admin/api/bugs/' + encodeURIComponent(bugId) + '/triage',
-      { status, resolution_note: note, fixed_in_version: fixedVer },
+      { status, resolution_note: note, fixed_in_version: fixedVer, pr_url: prUrl },
       msg,
       'Updating bug report...'
     );
@@ -1110,7 +1114,7 @@ def _render_admin_bug_card(bug: dict[str, Any]) -> str:
     card_cls = (
         "card card-danger"
         if status_str == "flagged_security" or sev_str == "P0"
-        else ("card card-action" if status_str in {"open", "accepted"} else "card")
+        else ("card card-action" if status_str in {"open", "accepted", "in_progress"} else "card")
     )
     bug_group = "resolved" if status_str in {"fixed", "declined"} else "open"
     det_open = "" if bug_group == "resolved" else " open"
@@ -1127,6 +1131,10 @@ def _render_admin_bug_card(bug: dict[str, Any]) -> str:
         meta_parts.append(tool_s)
     if bug.get("triaged_by"):
         meta_parts.append(f"triaged by <code>{_esc(bug['triaged_by'])}</code>")
+    if bug.get("claimed_by"):
+        meta_parts.append(f"claimed by <code>{_esc(bug['claimed_by'])}</code>")
+    if bug.get("dispatch_status"):
+        meta_parts.append(f"trigger=<code>{_esc(bug['dispatch_status'])}</code>")
 
     sec_flags = list(bug.get("security_flags") or [])
     sec_html = (
@@ -1134,8 +1142,17 @@ def _render_admin_bug_card(bug: dict[str, Any]) -> str:
         if sec_flags
         else ""
     )
+    safe_issue = _safe_http_url(str(bug.get("issue_url") or ""))
+    safe_pr = _safe_http_url(str(bug.get("pr_url") or ""))
+    link_bits: list[str] = []
+    if safe_issue:
+        link_bits.append(f'<a class="pill" style="margin:0;" href="{_esc(safe_issue)}" target="_blank" rel="noopener">GitHub Issue</a>')
+    if safe_pr:
+        link_bits.append(f'<a class="pill" style="margin:0;" href="{_esc(safe_pr)}" target="_blank" rel="noopener">Fix PR</a>')
+    links_row = f'<div class="btn-row" style="margin-top:0.4rem;">{"".join(link_bits)}</div>' if link_bits else ""
     note_val = _esc(bug.get("resolution_note") or "")
     ver_val = _esc(bug.get("fixed_in_version") or "")
+    pr_val = _esc(bug.get("pr_url") or "")
     return f"""<div class="bug-item" data-bug-group="{bug_group}"><div class="{card_cls}">
       <div class="row-flex">
         <div>
@@ -1146,15 +1163,17 @@ def _render_admin_bug_card(bug: dict[str, Any]) -> str:
         </div>
         <small style="color:var(--text-muted);"><code>{esc_id}</code></small>
       </div>
-      {sec_html}
+      {sec_html}{links_row}
       <details{det_open}>
         <summary>Inspect bug details</summary>
         <pre>{_esc(str(bug.get('body_md') or '')[:4000])}</pre>
       </details>
       <div class="btn-row">
-        <input id="bug-note-{esc_id}" type="text" value="{note_val}" placeholder="Resolution note / decline reason" style="flex:1; min-width:220px;"/>
-        <input id="bug-ver-{esc_id}" type="text" value="{ver_val}" placeholder="Fixed version (e.g. v0.7.0)" style="width:155px;"/>
+        <input id="bug-note-{esc_id}" type="text" value="{note_val}" placeholder="Resolution note / decline reason" style="flex:1; min-width:200px;"/>
+        <input id="bug-pr-{esc_id}" type="text" value="{pr_val}" placeholder="Fix PR URL (https://...)" style="width:210px;"/>
+        <input id="bug-ver-{esc_id}" type="text" value="{ver_val}" placeholder="Fixed version (e.g. v0.8.0)" style="width:155px;"/>
         <button class="btn btn-sec btn-sm js-triage-bug" data-bug-id="{esc_id}" data-status="accepted">Accept</button>
+        <button class="btn btn-sec btn-sm js-triage-bug" data-bug-id="{esc_id}" data-status="in_progress">In Progress</button>
         <button class="btn btn-sm js-triage-bug" data-bug-id="{esc_id}" data-status="fixed">Mark Fixed</button>
         <button class="btn btn-danger btn-sm js-triage-bug" data-bug-id="{esc_id}" data-status="declined">Decline</button>
       </div>
@@ -1277,7 +1296,7 @@ def _render_admin_html(
         if str(s.get("status") or "") in {"pending_review", "pending_admin_approval", "flagged_security", "escalated_to_admin"}
     ]
     open_bugs_list = [
-        bg for bg in bugs_list if str(bg.get("status") or "") in {"open", "accepted", "flagged_security"}
+        bg for bg in bugs_list if str(bg.get("status") or "") in {"open", "accepted", "in_progress", "flagged_security"}
     ]
 
     proposals_block = (
@@ -1364,9 +1383,10 @@ def _render_admin_html(
         h = str(a["handle"])
         esc_h = _esc(h)
         role_val = str(a.get("role") or "contributor")
-        role_cls = "badge-ok" if role_val == "agent_admin" else "badge-info"
-        next_role = "contributor" if role_val == "agent_admin" else "agent_admin"
-        btn_lbl = "Demote to contributor" if role_val == "agent_admin" else "Promote to agent_admin"
+        role_cls = "badge-ok" if role_val in {"agent_admin", "tech_admin"} else "badge-info"
+        opt_c = " selected" if role_val == "contributor" else ""
+        opt_aa = " selected" if role_val == "agent_admin" else ""
+        opt_ta = " selected" if role_val == "tech_admin" else ""
         is_revoked = bool(str(a.get("revoked_at") or "").strip())
         state_badge = '<span class="badge badge-danger">Revoked</span>' if is_revoked else '<span class="badge badge-ok">Active</span>'
         rev_btn = (
@@ -1382,7 +1402,12 @@ def _render_admin_html(
             f"<td><code>{esc_h}</code><br/><small style='color:var(--text-muted);'>{_esc(a.get('display_name') or '')}</small></td>"
             f"<td><code>{_esc(a.get('key_hint') or '(legacy)')}</code><br/>{state_badge}</td>"
             f"<td><span class='badge {role_cls}'>{_esc(role_val)}</span> "
-            f"<button class='btn btn-sec btn-sm js-toggle-agent-role' data-handle='{esc_h}' data-next-role='{_esc(next_role)}' type='button'>{btn_lbl}</button></td>"
+            f'<select id="role-{esc_h}" aria-label="Role for {esc_h}">'
+            f'<option value="contributor"{opt_c}>contributor</option>'
+            f'<option value="agent_admin"{opt_aa}>agent_admin</option>'
+            f'<option value="tech_admin"{opt_ta}>tech_admin</option>'
+            f"</select> "
+            f"<button class='btn btn-sec btn-sm js-toggle-agent-role' data-handle='{esc_h}' type='button'>Set Role</button></td>"
             f"<td><small>{sub_cnt} subs &middot; {rev_cnt} reviews</small></td>"
             f"<td><code>{_esc(a.get('model_info') or '-')}</code><br/><small style='color:var(--text-muted);'>{_esc(a.get('last_seen_at') or 'never')}</small></td>"
             f"<td><div class='btn-row' style='margin-top:0;'>"
@@ -1406,7 +1431,7 @@ def _render_admin_html(
       <div>
         <div class="brand-title">
           <span>Collab Admin</span>
-          <span class="badge badge-info">v4.5.0</span>
+          <span class="badge badge-info">v4.6.0</span>
         </div>
         <div class="brand-sub"><code>{_esc(cfg.public_base_url)}</code></div>
         <nav class="nav-group" aria-label="Admin sections">

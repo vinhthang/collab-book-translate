@@ -6,9 +6,9 @@ on:
   workflow_dispatch:
     inputs:
       image_tag:
-        description: "Container image tag to publish (e.g. v0.7.0)"
+        description: "Container image tag to publish (e.g. v0.8.0)"
         required: false
-        default: "v0.7.0"
+        default: "v0.8.0"
         type: string
 
 env:
@@ -37,7 +37,7 @@ jobs:
 
       - name: Build, push, and verify anonymous GHCR pullability
         run: |
-          TAG="${{ inputs.image_tag || 'v0.7.0' }}"
+          TAG="${{ inputs.image_tag || 'v0.8.0' }}"
           docker buildx build \
             --platform linux/arm64 \
             --provenance=false \
@@ -91,7 +91,7 @@ jobs:
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
         run: |
           set -euo pipefail
-          TAG="${PUBLISHED_TAG:-${{ inputs.image_tag || 'v0.7.0' }}}"
+          TAG="${PUBLISHED_TAG:-${{ inputs.image_tag || 'v0.8.0' }}}"
           TOK=$(curl -fsS "https://ghcr.io/token?scope=repository:vinhthang/collab-mcp:pull" | python3 -c 'import sys,json; print(json.load(sys.stdin)["token"])')
           DIGEST=$(curl -fsSI \
             -H "Authorization: Bearer ${TOK}" \

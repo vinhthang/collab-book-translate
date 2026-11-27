@@ -140,6 +140,11 @@ SCHEMA_STATEMENTS_COMMON = (
         triaged_by TEXT NOT NULL DEFAULT '',
         resolution_note TEXT NOT NULL DEFAULT '',
         fixed_in_version TEXT NOT NULL DEFAULT '',
+        claimed_by TEXT NOT NULL DEFAULT '',
+        claimed_at TEXT NOT NULL DEFAULT '',
+        issue_url TEXT NOT NULL DEFAULT '',
+        pr_url TEXT NOT NULL DEFAULT '',
+        dispatch_status TEXT NOT NULL DEFAULT '',
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
     )
@@ -240,6 +245,11 @@ class CollabStore:
                         cur.execute("ALTER TABLE submissions ADD COLUMN IF NOT EXISTS rounds_history_json TEXT NOT NULL DEFAULT '[]'")
                         cur.execute("ALTER TABLE peer_reviews ADD COLUMN IF NOT EXISTS reviewer_role TEXT NOT NULL DEFAULT 'contributor'")
                         cur.execute("ALTER TABLE peer_reviews ADD COLUMN IF NOT EXISTS verdict TEXT NOT NULL DEFAULT 'COMMENT'")
+                        cur.execute("ALTER TABLE bug_reports ADD COLUMN IF NOT EXISTS claimed_by TEXT NOT NULL DEFAULT ''")
+                        cur.execute("ALTER TABLE bug_reports ADD COLUMN IF NOT EXISTS claimed_at TEXT NOT NULL DEFAULT ''")
+                        cur.execute("ALTER TABLE bug_reports ADD COLUMN IF NOT EXISTS issue_url TEXT NOT NULL DEFAULT ''")
+                        cur.execute("ALTER TABLE bug_reports ADD COLUMN IF NOT EXISTS pr_url TEXT NOT NULL DEFAULT ''")
+                        cur.execute("ALTER TABLE bug_reports ADD COLUMN IF NOT EXISTS dispatch_status TEXT NOT NULL DEFAULT ''")
                     conn.commit()
             else:
                 conn = self._get_sqlite()
@@ -278,6 +288,10 @@ class CollabStore:
                     conn.execute("ALTER TABLE peer_reviews ADD COLUMN reviewer_role TEXT NOT NULL DEFAULT 'contributor'")
                 if "verdict" not in pr_cols:
                     conn.execute("ALTER TABLE peer_reviews ADD COLUMN verdict TEXT NOT NULL DEFAULT 'COMMENT'")
+                bug_cols = {r["name"] for r in conn.execute("PRAGMA table_info(bug_reports)").fetchall()}
+                for col in ("claimed_by", "claimed_at", "issue_url", "pr_url", "dispatch_status"):
+                    if col not in bug_cols:
+                        conn.execute(f"ALTER TABLE bug_reports ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
                 conn.commit()
 
     def close(self) -> None:
@@ -1349,24 +1363,79 @@ class CollabStore:
         triaged_by: str,
         resolution_note: str,
         fixed_in_version: str = "",
+        claimed_by: Optional[str] = None,
+        claimed_at: Optional[str] = None,
+        issue_url: Optional[str] = None,
+        pr_url: Optional[str] = None,
+        dispatch_status: Optional[str] = None,
     ) -> dict[str, Any]:
-        """Update status and triage metadata for an existing bug report."""
-        current = self.get_bug_report(bug_id)
-        if current is None:
-            raise KeyError(f"Bug report '{bug_id}' not found")
-        now = _utc_iso()
-        self._exec(
-            """
-            UPDATE bug_reports
-            SET status = ?, triaged_by = ?, resolution_note = ?, fixed_in_version = ?, updated_at = ?
-            WHERE id = ?
-            """,
-            (status, triaged_by, resolution_note, fixed_in_version, now, bug_id),
-        )
-        updated = self.get_bug_report(bug_id)
-        if updated is None:
-            raise RuntimeError(f"Failed to update bug report '{bug_id}'")
-        return updated
+        """Update status and triage/PR/dispatch metadata for an existing bug report."""
+        with self._lock:
+            current = self.get_bug_report(bug_id)
+            if current is None:
+                raise KeyError(f"Bug report '{bug_id}' not found")
+            eff_claimed_by = str(current.get("claimed_by") or "") if claimed_by is None else claimed_by
+            eff_claimed_at = str(current.get("claimed_at") or "") if claimed_at is None else claimed_at
+            eff_issue_url = str(current.get("issue_url") or "") if issue_url is None else issue_url
+            eff_pr_url = str(current.get("pr_url") or "") if pr_url is None else pr_url
+            eff_dispatch = str(current.get("dispatch_status") or "") if dispatch_status is None else dispatch_status
+            now = _utc_iso()
+            self._exec(
+                """
+                UPDATE bug_reports
+                SET status = ?, triaged_by = ?, resolution_note = ?, fixed_in_version = ?,
+                    claimed_by = ?, claimed_at = ?, issue_url = ?, pr_url = ?, dispatch_status = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    status,
+                    triaged_by,
+                    resolution_note,
+                    fixed_in_version,
+                    eff_claimed_by,
+                    eff_claimed_at,
+                    eff_issue_url,
+                    eff_pr_url,
+                    eff_dispatch,
+                    now,
+                    bug_id,
+                ),
+            )
+            updated = self.get_bug_report(bug_id)
+            if updated is None:
+                raise RuntimeError(f"Failed to update bug report '{bug_id}'")
+            return updated
+
+    def claim_bug_report(
+        self,
+        bug_id: str,
+        *,
+        claimed_by: str,
+        resolution_note: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Claim an actionable bug report exclusively and transition it to in_progress."""
+        with self._lock:
+            current = self.get_bug_report(bug_id)
+            if current is None:
+                raise KeyError(f"Bug report '{bug_id}' not found")
+            now = _utc_iso()
+            eff_note = (
+                resolution_note
+                if resolution_note is not None
+                else str(current.get("resolution_note") or "")
+            )
+            self._exec(
+                """
+                UPDATE bug_reports
+                SET status = 'in_progress', claimed_by = ?, claimed_at = ?, resolution_note = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (claimed_by, now, eff_note, now, bug_id),
+            )
+            updated = self.get_bug_report(bug_id)
+            if updated is None:
+                raise RuntimeError(f"Failed to claim bug report '{bug_id}'")
+            return updated
 
     def list_recent_peer_reviews(
         self,

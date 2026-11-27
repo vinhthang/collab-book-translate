@@ -10,6 +10,7 @@ import secrets
 import threading
 import time
 from typing import Any, Optional
+import httpx
 
 from scripts.collab_pr_validate import (
     HANVIET_TAG_RE,
@@ -31,6 +32,7 @@ from scripts.mcp_server.auth import (
     SlidingWindowRateLimiter,
     assert_admin,
     assert_agent_admin_or_admin,
+    assert_bug_handler_or_admin,
     assert_not_self_review,
     mint_revision_token,
     sha256_hex,
@@ -53,12 +55,12 @@ ALLOWED_LICENSES = frozenset(
     {"public-domain", "CC0-1.0", "CC-BY-4.0", "CC-BY-SA-4.0", "owner-permission"}
 )
 SUPPORTED_SOURCE_LANGS = frozenset({"en", "zh"})
-VALID_AGENT_ROLES = frozenset({"contributor", "agent_admin"})
+VALID_AGENT_ROLES = frozenset({"contributor", "agent_admin", "tech_admin"})
 VALID_APPROVAL_MODES = frozenset({"peer", "auto", "manual"})
 VALID_STRATEGIES = frozenset({"faithful", "idiomatic", "register-matched"})
 VALID_REVIEW_VERDICTS = frozenset({"COMMENT", "APPROVE", "CHANGES_REQUESTED"})
 VALID_BUG_SEVERITIES = frozenset({"P0", "P1", "P2", "P3"})
-VALID_BUG_STATUSES = frozenset({"open", "accepted", "fixed", "declined"})
+VALID_BUG_STATUSES = frozenset({"open", "accepted", "in_progress", "fixed", "declined"})
 VALID_SECTION_TYPES = frozenset({"body", "front_matter", "back_matter", "boilerplate"})
 _SECTION_SORT_RANK = {
     "body": 0,
@@ -639,6 +641,21 @@ def _is_coord(ctx: AuthContext) -> bool:
     return ctx.tier == "ADMIN" or (ctx.tier == "AGENT_KEY" and ctx.agent_role == "agent_admin")
 
 
+def _is_tech_admin(ctx: AuthContext) -> bool:
+    return ctx.tier == "ADMIN" or (ctx.tier == "AGENT_KEY" and ctx.agent_role == "tech_admin")
+
+
+def _validate_optional_http_url(url: str, field_name: str) -> str:
+    clean = (url or "").strip()
+    if not clean:
+        return ""
+    if len(clean) > 500 or not clean.lower().startswith(("https://", "http://")):
+        raise ServiceError(f"{field_name} must be an http:// or https:// URL (<= 500 chars)", status_code=400)
+    if detect_prompt_injection(clean):
+        raise ServiceError(f"{field_name} blocked by prompt-injection scanner", status_code=422)
+    return clean
+
+
 def _is_trusted_submitter(ctx: AuthContext) -> bool:
     return _is_coord(ctx)
 
@@ -1002,16 +1019,26 @@ class CollabMcpService:
         books_pending_parse: list[dict[str, Any]] = []
         books_pending_seed: list[dict[str, Any]] = []
         open_bug_reports: list[dict[str, Any]] = []
+        accepted_bug_reports: list[dict[str, Any]] = []
         if is_coord and role in {"all", "agent_admin"}:
             open_bug_reports = [
                 _sanitize_bug_public(r)
                 for r in self.store.list_bug_reports(
-                    statuses=("open", "accepted"),
+                    statuses=("open", "accepted", "in_progress"),
                     book_slug=book_slug,
                     include_flagged=False,
                     limit=50,
                 )
             ]
+        if _is_tech_admin(ctx) and role in {"all", "tech_admin"}:
+            tech_rows = self.store.list_bug_reports(
+                statuses=("accepted", "in_progress"),
+                book_slug=book_slug,
+                include_flagged=False,
+                limit=50,
+            )
+            tech_rows.sort(key=lambda r: 0 if r.get("status") == "accepted" else 1)
+            accepted_bug_reports = [_sanitize_bug_public(r) for r in tech_rows]
 
         for b in books:
             if not b:
@@ -1133,6 +1160,7 @@ class CollabMcpService:
             "peer_review_offset": eff_offset,
             "peer_review_has_more": (eff_offset + len(paged_reviews)) < total_reviews,
             "open_bug_reports": open_bug_reports,
+            "accepted_bug_reports": accepted_bug_reports,
         }
 
     def _effective_chapter_translation_xml(self, book_slug: str, chapter_row: dict[str, Any]) -> str:
@@ -2997,11 +3025,11 @@ class CollabMcpService:
         identifier: str,
         role: str,
     ) -> dict[str, Any]:
-        """Promote or demote a registered agent between 'contributor' and 'agent_admin' (Human ADMIN only)."""
+        """Promote or demote a registered agent across 'contributor', 'agent_admin', and 'tech_admin' (Human ADMIN only)."""
         assert_admin(ctx)
         clean_role = (role or "").strip().lower()
         if clean_role not in VALID_AGENT_ROLES:
-            raise ServiceError("role must be 'contributor' or 'agent_admin'", status_code=400)
+            raise ServiceError("role must be 'contributor', 'agent_admin', or 'tech_admin'", status_code=400)
         resolved_handle = self.store.resolve_agent_identifier(identifier)
         if resolved_handle is None:
             raise ServiceError(f"Agent '{identifier}' not found", status_code=404)
@@ -3722,6 +3750,138 @@ class CollabMcpService:
         rows = self.store.list_bug_reports(include_flagged=True, limit=limit)
         return [_sanitize_bug_public(r) for r in rows]
 
+    def claim_bug_report(
+        self,
+        ctx: AuthContext,
+        *,
+        bug_id: str,
+        note: str = "",
+    ) -> dict[str, Any]:
+        """Claim an open/accepted bug report exclusively for engineering resolution (tech_admin / agent_admin / ADMIN)."""
+        assert_bug_handler_or_admin(ctx)
+        bug = self.store.get_bug_report(bug_id.strip())
+        if bug is None:
+            raise ServiceError(f"Bug report '{bug_id}' not found", status_code=404)
+        if bug["status"] == "flagged_security":
+            assert_admin(ctx)
+        if bug["status"] in {"fixed", "declined"}:
+            raise ServiceError(
+                f"Bug report '{bug_id}' is already terminal ({bug['status']})",
+                status_code=409,
+            )
+
+        clean_note = (note or "").strip()
+        if clean_note and detect_prompt_injection(clean_note):
+            raise ServiceError("Claim note blocked by prompt-injection scanner", status_code=422)
+
+        holder = str(bug.get("claimed_by") or "").strip()
+        claimed_ts = parse_utc_timestamp(str(bug.get("claimed_at") or ""))
+        if (
+            bug["status"] == "in_progress"
+            and holder
+            and holder != ctx.actor_id
+            and ctx.tier != "ADMIN"
+            and claimed_ts is not None
+            and (time.time() - claimed_ts) < self.cfg.claim_ttl_seconds
+        ):
+            raise ServiceError(
+                f"Bug report '{bug_id}' is actively claimed by '{holder}'",
+                status_code=409,
+            )
+
+        updated = self.store.claim_bug_report(
+            bug["id"],
+            claimed_by=ctx.actor_id,
+            resolution_note=clean_note or None,
+        )
+        return _sanitize_bug_public(updated)
+
+    def _dispatch_accepted_bug(
+        self,
+        bug: dict[str, Any],
+        *,
+        create_github_issue: bool,
+    ) -> dict[str, Any]:
+        """Run non-blocking webhook and GitHub Issue triggers when a bug is accepted."""
+        parts: list[str] = []
+        new_issue_url: Optional[str] = None
+        want_hook = bool(self.cfg.bug_accept_webhook_url)
+        want_gh = bool(
+            (self.cfg.bug_auto_github_issue or create_github_issue)
+            and self.cfg.github_token
+            and not str(bug.get("issue_url") or "").strip()
+        )
+        if not want_hook and not want_gh:
+            return bug
+
+        with httpx.Client(timeout=10.0) as client:
+            if want_hook:
+                hdrs = {"Content-Type": "application/json"}
+                if self.cfg.bug_accept_webhook_secret:
+                    hdrs["Authorization"] = f"Bearer {self.cfg.bug_accept_webhook_secret}"
+                try:
+                    resp = client.post(
+                        self.cfg.bug_accept_webhook_url,
+                        headers=hdrs,
+                        json={
+                            "event": "bug.accepted",
+                            "hub_url": self.cfg.public_base_url,
+                            "bug_report": _sanitize_bug_public(bug),
+                        },
+                    )
+                    if resp.status_code < 400:
+                        parts.append("webhook:ok")
+                    else:
+                        parts.append(f"webhook:error:{resp.status_code}")
+                except Exception as exc:
+                    parts.append(f"webhook:error:{type(exc).__name__}")
+
+            if want_gh:
+                repo = self.cfg.bug_github_repo or "vinhthang/collab-book-translate"
+                issue_body = (
+                    f"Reported by `{bug.get('reporter_handle') or bug.get('reporter_actor_id')}` "
+                    f"(`{bug.get('severity', 'P1')}`)\n\n"
+                    f"- **Bug ID**: `{bug['id']}`\n"
+                    f"- **Book/Chapter**: `{bug.get('book_slug') or '-'}` / `{bug.get('chapter_id') or '-'}`\n"
+                    f"- **Tool / Code**: `{bug.get('tool_name') or '-'}` (`{bug.get('error_code') or 0}`)\n\n"
+                    f"### Details\n\n{bug.get('body_md') or ''}\n"
+                )
+                try:
+                    gh_resp = client.post(
+                        f"https://api.github.com/repos/{repo}/issues",
+                        headers={
+                            "Authorization": f"Bearer {self.cfg.github_token}",
+                            "Accept": "application/vnd.github+json",
+                            "X-GitHub-Api-Version": "2022-11-28",
+                        },
+                        json={
+                            "title": f"[{bug.get('severity', 'P1')}] {bug.get('title', 'Bug report')}",
+                            "body": issue_body[:60000],
+                            "labels": ["bug", str(bug.get("severity") or "P1")],
+                        },
+                    )
+                    if gh_resp.status_code < 400:
+                        html_url = str((gh_resp.json() or {}).get("html_url") or "").strip()
+                        if html_url:
+                            new_issue_url = html_url
+                        parts.append("github_issue:ok")
+                    else:
+                        parts.append(f"github_issue:error:{gh_resp.status_code}")
+                except Exception as exc:
+                    parts.append(f"github_issue:error:{type(exc).__name__}")
+
+        if new_issue_url is not None or parts:
+            return self.store.update_bug_report(
+                bug["id"],
+                status=bug["status"],
+                triaged_by=str(bug.get("triaged_by") or ""),
+                resolution_note=str(bug.get("resolution_note") or ""),
+                fixed_in_version=str(bug.get("fixed_in_version") or ""),
+                issue_url=new_issue_url,
+                dispatch_status="; ".join(parts)[:300],
+            )
+        return bug
+
     def triage_bug_report(
         self,
         ctx: AuthContext,
@@ -3730,9 +3890,12 @@ class CollabMcpService:
         status: str,
         resolution_note: str,
         fixed_in_version: str = "",
+        pr_url: str = "",
+        issue_url: str = "",
+        create_github_issue: bool = False,
     ) -> dict[str, Any]:
-        """Triage a bug report as accepted, fixed, or declined (agent_admin / ADMIN)."""
-        assert_agent_admin_or_admin(ctx)
+        """Triage a bug report as accepted, in_progress, fixed, or declined (tech_admin / agent_admin / ADMIN)."""
+        assert_bug_handler_or_admin(ctx)
         bug = self.store.get_bug_report(bug_id.strip())
         if bug is None:
             raise ServiceError(f"Bug report '{bug_id}' not found", status_code=404)
@@ -3741,7 +3904,7 @@ class CollabMcpService:
 
         clean_status = (status or "").strip().lower()
         if clean_status not in VALID_BUG_STATUSES:
-            raise ServiceError("status must be one of: open, accepted, fixed, declined", status_code=400)
+            raise ServiceError("status must be one of: open, accepted, in_progress, fixed, declined", status_code=400)
         clean_note = (resolution_note or "").strip()
         if clean_status in {"fixed", "declined"} and not clean_note:
             raise ServiceError(
@@ -3751,6 +3914,8 @@ class CollabMcpService:
         clean_ver = (fixed_in_version or "").strip()
         if detect_prompt_injection(f"{clean_note}\n{clean_ver}"):
             raise ServiceError("Triage note blocked by prompt-injection scanner", status_code=422)
+        clean_pr = _validate_optional_http_url(pr_url, "pr_url")
+        clean_issue = _validate_optional_http_url(issue_url, "issue_url")
 
         updated = self.store.update_bug_report(
             bug["id"],
@@ -3758,7 +3923,11 @@ class CollabMcpService:
             triaged_by=ctx.actor_id,
             resolution_note=clean_note,
             fixed_in_version=clean_ver,
+            pr_url=clean_pr or None,
+            issue_url=clean_issue or None,
         )
+        if clean_status == "accepted":
+            updated = self._dispatch_accepted_bug(updated, create_github_issue=bool(create_github_issue))
         return _sanitize_bug_public(updated)
 
     def purge_test_artifacts(self, ctx: AuthContext) -> dict[str, Any]:

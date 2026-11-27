@@ -99,6 +99,9 @@ def run_mcp_command(
     bug_id: str = "",
     resolution_note: str = "",
     fixed_in_version: str = "",
+    pr_url: str = "",
+    issue_url: str = "",
+    create_github_issue: bool = False,
     import_file: str = "",
     limit: int = 200,
     offset: int = 0,
@@ -286,6 +289,12 @@ def run_mcp_command(
                 if author_handle:
                     b_params["reporter_handle"] = author_handle
                 resp = client.get(f"{base}/api/v1/bugs", headers=headers, params=b_params)
+        elif subcommand == "claim-bug":
+            resp = client.post(
+                f"{base}/api/v1/bugs/{bug_id}/claim",
+                headers=headers,
+                json={"note": resolution_note},
+            )
         elif subcommand == "triage-bug":
             resp = client.post(
                 f"{base}/api/v1/bugs/{bug_id}/triage",
@@ -294,6 +303,9 @@ def run_mcp_command(
                     "status": status,
                     "resolution_note": resolution_note,
                     "fixed_in_version": fixed_in_version,
+                    "pr_url": pr_url,
+                    "issue_url": issue_url,
+                    "create_github_issue": bool(create_github_issue),
                 },
             )
         else:
@@ -1051,7 +1063,7 @@ def main() -> None:
 
     # list-tasks
     p_list = subparsers.add_parser("list-tasks", help="List tasks filtered by role.")
-    p_list.add_argument("--role", choices=["translator", "reviewer", "agent_admin", "all"], default="all")
+    p_list.add_argument("--role", choices=["translator", "reviewer", "agent_admin", "tech_admin", "all"], default="all")
     p_list.add_argument("--gh-user")
     p_list.add_argument("--mcp-url", default="")
     p_list.add_argument("--agent-key", default="")
@@ -1140,14 +1152,24 @@ def main() -> None:
     p_qbug.add_argument("--book-slug", default="")
     p_qbug.add_argument("--reporter-handle", default="")
 
-    # triage-bug (MCP mode, agent_admin / ADMIN)
-    p_tbug = subparsers.add_parser("triage-bug", help="Triage an agent bug report (accepted|fixed|declined).")
+    # claim-bug (MCP mode, tech_admin / agent_admin / ADMIN)
+    p_cbug = subparsers.add_parser("claim-bug", help="Claim an accepted bug report exclusively (status='in_progress').")
+    p_cbug.add_argument("--mcp-url", default="")
+    p_cbug.add_argument("--agent-key", default="")
+    p_cbug.add_argument("--bug-id", required=True)
+    p_cbug.add_argument("--resolution-note", default="")
+
+    # triage-bug (MCP mode, tech_admin / agent_admin / ADMIN)
+    p_tbug = subparsers.add_parser("triage-bug", help="Triage an agent bug report (accepted|in_progress|fixed|declined).")
     p_tbug.add_argument("--mcp-url", default="")
     p_tbug.add_argument("--agent-key", default="")
     p_tbug.add_argument("--bug-id", required=True)
-    p_tbug.add_argument("--status", choices=["open", "accepted", "fixed", "declined"], required=True)
+    p_tbug.add_argument("--status", choices=["open", "accepted", "in_progress", "fixed", "declined"], required=True)
     p_tbug.add_argument("--resolution-note", default="")
     p_tbug.add_argument("--fixed-in-version", default="")
+    p_tbug.add_argument("--pr-url", default="")
+    p_tbug.add_argument("--issue-url", default="")
+    p_tbug.add_argument("--create-github-issue", action="store_true")
 
     args = parser.parse_args()
 
@@ -1161,6 +1183,7 @@ def main() -> None:
         "get-submission",
         "submit-bug",
         "query-bugs",
+        "claim-bug",
         "triage-bug",
     ):
         mode_info = resolve_worker_mode(None, args.mcp_url)
@@ -1191,6 +1214,9 @@ def main() -> None:
             bug_id=getattr(args, "bug_id", ""),
             resolution_note=getattr(args, "resolution_note", ""),
             fixed_in_version=getattr(args, "fixed_in_version", ""),
+            pr_url=getattr(args, "pr_url", ""),
+            issue_url=getattr(args, "issue_url", ""),
+            create_github_issue=getattr(args, "create_github_issue", False),
             limit=getattr(args, "limit", 100),
             offset=getattr(args, "offset", 0),
             section_type=getattr(args, "section_type", ""),

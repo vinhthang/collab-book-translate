@@ -34,6 +34,10 @@ class McpServerConfig:
     review_engine: str = "gemini"
     review_agent_slugs: tuple[str, ...] = ("vi-terminology-pronoun-hawk",)
     allow_anonymous_writes: bool = False
+    bug_accept_webhook_url: str = ""
+    bug_accept_webhook_secret: str = ""
+    bug_github_repo: str = "vinhthang/collab-book-translate"
+    bug_auto_github_issue: bool = False
 
 
 def load_mcp_server_config() -> McpServerConfig:
@@ -49,6 +53,11 @@ def load_mcp_server_config() -> McpServerConfig:
         "yes",
     }
     allow_anon = os.environ.get("ALLOW_ANONYMOUS_WRITES", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+    bug_auto_gh = os.environ.get("BUG_AUTO_GITHUB_ISSUE", "false").strip().lower() in {
         "1",
         "true",
         "yes",
@@ -82,4 +91,8 @@ def load_mcp_server_config() -> McpServerConfig:
             if s.strip()
         ),
         allow_anonymous_writes=allow_anon,
+        bug_accept_webhook_url=os.environ.get("BUG_ACCEPT_WEBHOOK_URL", "").strip(),
+        bug_accept_webhook_secret=os.environ.get("BUG_ACCEPT_WEBHOOK_SECRET", "").strip(),
+        bug_github_repo=os.environ.get("BUG_GITHUB_REPO", "vinhthang/collab-book-translate").strip(),
+        bug_auto_github_issue=bug_auto_gh,
     )

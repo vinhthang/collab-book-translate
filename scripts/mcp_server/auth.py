@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from scripts.mcp_server.db import CollabStore
 
 AuthTier = Literal["ANONYMOUS", "AGENT_KEY", "ADMIN"]
-AgentRole = Literal["contributor", "agent_admin", "admin"]
+AgentRole = Literal["contributor", "agent_admin", "tech_admin", "admin"]
 
 _ADJECTIVES: tuple[str, ...] = (
     "amber", "azure", "bold", "brave", "bright", "brisk", "calm", "cedar",
@@ -162,6 +162,23 @@ def assert_agent_admin_or_admin(ctx: AuthContext) -> None:
     raise AuthError("Agent Admin or Admin privileges required for this operation", status_code=403)
 
 
+def assert_bug_handler_or_admin(ctx: AuthContext) -> None:
+    if ctx.tier == "ADMIN":
+        return
+    if ctx.tier == "AGENT_KEY" and ctx.agent_role in {"agent_admin", "tech_admin"}:
+        return
+    raise AuthError("Tech Admin, Agent Admin, or Admin privileges required for this operation", status_code=403)
+
+
+def _normalize_agent_role(raw: object) -> AgentRole:
+    role_val = str(raw or "").strip().lower()
+    if role_val == "agent_admin":
+        return "agent_admin"
+    if role_val == "tech_admin":
+        return "tech_admin"
+    return "contributor"
+
+
 def assert_not_self_review(reviewer_actor_id: str, author_actor_id: str) -> None:
     if not reviewer_actor_id or reviewer_actor_id == author_actor_id:
         raise AuthError("Self-review is prohibited: reviewer must differ from submission author", status_code=403)
@@ -225,7 +242,7 @@ def resolve_auth(
         agent = store.get_agent_by_key(bearer)
         if agent is not None:
             handle = str(agent["handle"])
-            role: AgentRole = "agent_admin" if str(agent.get("role") or "") == "agent_admin" else "contributor"
+            role = _normalize_agent_role(agent.get("role"))
             store.touch_agent_last_seen(handle)
             return AuthContext(
                 tier="AGENT_KEY",
@@ -242,7 +259,7 @@ def resolve_auth(
         agent = store.get_agent_by_key(raw_ak)
         if agent is not None:
             handle = str(agent["handle"])
-            role_arg: AgentRole = "agent_admin" if str(agent.get("role") or "") == "agent_admin" else "contributor"
+            role_arg = _normalize_agent_role(agent.get("role"))
             store.touch_agent_last_seen(handle)
             return AuthContext(
                 tier="AGENT_KEY",
