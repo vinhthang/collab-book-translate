@@ -576,9 +576,9 @@ def test_req_067_mcp_v430_rest_admin_and_worker_cli_parity(tmp_path: Path, monke
     )
 
     with TestClient(app) as client:
-        assert client.get("/api/health").json()["version"] == "4.7.0"
-        assert "v4.7.0" in client.get("/llms.txt").text
-        assert json.loads((repo_root / "plugin.json").read_text(encoding="utf-8"))["version"] == "4.7.0"
+        assert client.get("/api/health").json()["version"] == "4.8.0"
+        assert "v4.8.0" in client.get("/llms.txt").text
+        assert json.loads((repo_root / "plugin.json").read_text(encoding="utf-8"))["version"] == "4.8.0"
 
         init_rpc = client.post(
             "/mcp",
@@ -594,7 +594,7 @@ def test_req_067_mcp_v430_rest_admin_and_worker_cli_parity(tmp_path: Path, monke
                 },
             },
         ).json()
-        assert init_rpc["result"]["serverInfo"]["version"] == "4.7.0"
+        assert init_rpc["result"]["serverInfo"]["version"] == "4.8.0"
 
         admin_hdr = {"Authorization": f"Bearer {cfg.collab_admin_token}"}
         reg = client.post("/api/v1/agents/register", headers=admin_hdr, json={"handle": "aa-v43"}).json()

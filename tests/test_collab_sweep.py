@@ -369,7 +369,7 @@ def test_sync_clean_main_rejects_non_main_dirty_outside_runs_and_recovers_runs(t
     remote = tmp_path / "remote.git"
     repo = tmp_path / "repo"
     repo.mkdir()
-    subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+    subprocess.run(["git", "init", "--bare", "-b", "main", str(remote)], check=True, capture_output=True)
     subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
     subprocess.run(["git", "remote", "add", "origin", str(remote)], cwd=repo, check=True, capture_output=True)
     subprocess.run(["git", "config", "user.name", "Bot"], cwd=repo, check=True, capture_output=True)
@@ -1143,7 +1143,7 @@ def test_confinement_commit_and_push_git_and_read_pr_file_fallbacks(tmp_path: Pa
     remote = tmp_path / "remote.git"
     repo = tmp_path / "repo"
     repo.mkdir()
-    subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+    subprocess.run(["git", "init", "--bare", "-b", "main", str(remote)], check=True, capture_output=True)
     subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
     subprocess.run(["git", "remote", "add", "origin", str(remote)], cwd=repo, check=True, capture_output=True)
     subprocess.run(["git", "config", "user.name", "Bot"], cwd=repo, check=True, capture_output=True)

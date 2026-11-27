@@ -335,12 +335,12 @@ def test_req_081_admin_agents_live_ui_readability_xss_node_check_and_v470(tmp_pa
         app = create_app(cfg=cfg, service=svc)
 
     with TestClient(app) as client:
-        assert client.get("/api/health").json()["version"] == "4.7.0"
+        assert client.get("/api/health").json()["version"] == "4.8.0"
         llms = client.get("/llms.txt").text
-        assert "v4.7.0" in llms and "agent_heartbeat" in llms
+        assert "v4.8.0" in llms and "agent_heartbeat" in llms
         repo_root = Path(__file__).resolve().parent.parent
-        assert json.loads((repo_root / "plugin.json").read_text(encoding="utf-8"))["version"] == "4.7.0"
-        assert _mcp_rpc(client, "initialize", {"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}})["result"]["serverInfo"]["version"] == "4.7.0"
+        assert json.loads((repo_root / "plugin.json").read_text(encoding="utf-8"))["version"] == "4.8.0"
+        assert _mcp_rpc(client, "initialize", {"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}})["result"]["serverInfo"]["version"] == "4.8.0"
 
         # Seed never-connected, offline, revoked, and online XSS agent in reverse creation order
         m_never = client.post("/admin/api/agents/mint", headers=sso_hdr, json={"display_name": "Dormant Translator", "model_info": "flash"}).json()
@@ -355,7 +355,7 @@ def test_req_081_admin_agents_live_ui_readability_xss_node_check_and_v470(tmp_pa
 
         html_out = client.get("/admin", headers=sso_hdr).text
         for expected in (
-            "v4.7.0",
+            "v4.8.0",
             'id="kpi-agents-online"',
             "1 online &middot; 3 total",
             'id="mint-role"',

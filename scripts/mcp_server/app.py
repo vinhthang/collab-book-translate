@@ -8,7 +8,8 @@ import html
 import json
 import logging
 import re
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Mapping, Optional
+from urllib.parse import urlparse
 import uuid
 
 import anyio
@@ -57,10 +58,16 @@ _REQ_MCP_CLIENT: contextvars.ContextVar[str] = contextvars.ContextVar(
     "collab_req_mcp_client",
     default="",
 )
+_REQ_BEARER_AGENT: contextvars.ContextVar[Optional[dict[str, Any]]] = contextvars.ContextVar(
+    "collab_req_bearer_agent",
+    default=None,
+)
+
+MAX_HTTP_BODY_BYTES = 10 * 1024 * 1024
 
 MCP_SERVER_INSTRUCTIONS = """You are connected to Collab Books (https://collab.vinhthang.dev/mcp), an invite-only multi-agent book translation hub (EN/ZH -> VI) with Human Web Reader (/read/*) and clean Agent Threads (/threads). Open-license books sync to vinhthang/collab-books; owner-permission books stay private.
 
-Quick Autonomous Workflow (v4.7.0):
+Quick Autonomous Workflow (v4.8.0):
 1. Invite-Only Identity: Obtain a pre-minted 3-word AGENT_KEY from Human /admin (e.g. amber-fox-river) and pass agent_key="<your-3-word-key>" or Authorization: Bearer <key> on every write call and on private owner-permission books. (Open anonymous registration/writes are disabled by default; admins mint keys via /admin or register_agent(..., admin_token=...).)
 2. Role Specialization: Human /admin promotes literary coordinators to role="agent_admin" (get_book_source -> submit_book_parse, import_chapter_translations, update_book_record, ch01 seeding, chapter adjudication) and engineering bug-fixers to role="tech_admin" (list_tasks(role="tech_admin"), claim_bug_report, branch TDD fix + PR, triage_bug_report).
 3. Discover & Full-Transparency Work Querying: Call list_tasks(role="translator"|"reviewer"|"agent_admin"|"tech_admin"|"all", book_slug?, section_type?, include_matter=True, limit=200, offset=0, agent_key=...). Call get_book, get_chapter(..., include_neighbors=True), query_submissions(..., include_xml=False), or get_submission_status(submission_id, include_context=True, include_workstream=True, agent_key=...).
@@ -74,15 +81,55 @@ Quick Autonomous Workflow (v4.7.0):
 6. Human Reader & Bug Reports: Public open-license chapters appear in /read/<slug> and /threads; owner-permission manuscripts live under SSO /admin/read/<slug> and /admin/threads."""
 
 
+def _assert_admin_csrf_headers(hdrs: Mapping[str, str], public_base_url: str = "") -> None:
+    """Block cross-site / cross-origin browser mutations on /admin* routes."""
+    sec_fetch_site = str(hdrs.get("sec-fetch-site") or "").strip().lower()
+    if sec_fetch_site == "cross-site":
+        raise AuthError("Cross-site request blocked on admin route", status_code=403)
+    origin = str(hdrs.get("origin") or "").strip()
+    if origin:
+        origin_netloc = urlparse(origin).netloc.lower()
+        allowed_netlocs = {
+            str(hdrs.get("host") or "").strip().lower(),
+            urlparse(public_base_url or "").netloc.lower(),
+        } - {""}
+        if not origin_netloc or (allowed_netlocs and origin_netloc not in allowed_netlocs):
+            raise AuthError("Cross-origin request blocked on admin route", status_code=403)
+
+
+async def _send_json_asgi(send: Any, status_code: int, payload: dict[str, Any]) -> None:
+    body_bytes = json.dumps(payload).encode("utf-8")
+    await send(
+        {
+            "type": "http.response.start",
+            "status": status_code,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body_bytes)).encode("ascii")),
+            ],
+        }
+    )
+    await send({"type": "http.response.body", "body": body_bytes, "more_body": False})
+
+
 class RequestContextMiddleware:
     """ASGI middleware capturing HTTP headers/path/IP and tracking live /sse + /mcp agent presence."""
 
-    def __init__(self, app: Any, *, store: Any = None, presence: Any = None) -> None:
+    def __init__(self, app: Any, *, store: Any = None, presence: Any = None, cfg: Any = None) -> None:
         self.app = app
         self._store = store
         self._presence = presence
+        self._cfg = cfg
 
-    def _resolve_bearer_agent(self, hdrs: dict[str, str]) -> Optional[str]:
+    def _resolve_and_touch_bearer(
+        self,
+        hdrs: dict[str, str],
+        *,
+        transport: str,
+        action: str,
+        client_name: str,
+        touch: bool = True,
+    ) -> Optional[dict[str, Any]]:
         if self._store is None:
             return None
         auth_h = str(hdrs.get("authorization") or "").strip()
@@ -95,7 +142,16 @@ class RequestContextMiddleware:
             agent = self._store.get_agent_by_key(bearer)
         except Exception:
             return None
-        return str(agent["handle"]) if agent else None
+        if agent is None:
+            return None
+        if touch:
+            self._store.touch_agent_last_seen(
+                str(agent["handle"]),
+                transport=transport,
+                action=action,
+                client_name=client_name,
+            )
+        return dict(agent)
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         if scope.get("type") != "http":
@@ -113,16 +169,34 @@ class RequestContextMiddleware:
         client_ip = str(client[0]) if client and len(client) >= 1 else "127.0.0.1"
         ua = str(hdrs.get("user-agent") or "").strip()[:80]
 
+        if path.startswith("/admin") and method in {"POST", "PUT", "DELETE", "PATCH"}:
+            try:
+                _assert_admin_csrf_headers(hdrs, getattr(self._cfg, "public_base_url", ""))
+            except AuthError as exc:
+                await _send_json_asgi(send, exc.status_code, {"error": str(exc)})
+                return
+
         eff_receive = receive
         mcp_action = ""
         mcp_client = ua
+        bearer_agent: Optional[dict[str, Any]] = None
 
         if (path == "/mcp" or path.startswith("/messages")) and method == "POST":
             chunks: list[bytes] = []
+            total_bytes = 0
             while True:
                 msg = await receive()
                 if msg.get("type") == "http.request":
-                    chunks.append(bytes(msg.get("body") or b""))
+                    part = bytes(msg.get("body") or b"")
+                    total_bytes += len(part)
+                    if total_bytes > MAX_HTTP_BODY_BYTES:
+                        await _send_json_asgi(
+                            send,
+                            413,
+                            {"error": "Request body exceeds 10 MiB limit"},
+                        )
+                        return
+                    chunks.append(part)
                     if not msg.get("more_body", False):
                         break
                 else:
@@ -152,34 +226,37 @@ class RequestContextMiddleware:
                 cinfo = params.get("clientInfo") if isinstance(params.get("clientInfo"), dict) else {}
                 if cinfo.get("name"):
                     mcp_client = str(cinfo["name"]).strip()[:80]
-                bearer_handle = self._resolve_bearer_agent(hdrs)
-                if bearer_handle and mcp_action:
-                    self._store.touch_agent_last_seen(
-                        bearer_handle,
-                        transport="mcp-http",
-                        action=mcp_action,
-                        client_name=mcp_client,
-                    )
+                bearer_agent = await _run_sync(
+                    self._resolve_and_touch_bearer,
+                    hdrs,
+                    transport="mcp-http",
+                    action=mcp_action or "mcp-http",
+                    client_name=mcp_client,
+                    touch=True,
+                )
 
         sse_handle: Optional[str] = None
         sse_conn_id = ""
         if path == "/sse" and method == "GET":
-            sse_handle = self._resolve_bearer_agent(hdrs)
+            sse_agent = await _run_sync(
+                self._resolve_and_touch_bearer,
+                hdrs,
+                transport="mcp-sse",
+                action="sse:connect",
+                client_name=ua,
+                touch=self._presence is not None,
+            )
+            sse_handle = str(sse_agent["handle"]) if sse_agent else None
             if sse_handle and self._presence is not None:
                 sse_conn_id = uuid.uuid4().hex[:12]
                 self._presence.open_connection(sse_handle, sse_conn_id, client_name=ua)
-                self._store.touch_agent_last_seen(
-                    sse_handle,
-                    transport="mcp-sse",
-                    action="sse:connect",
-                    client_name=ua,
-                )
 
         t_hdr = _REQ_HEADERS.set(hdrs)
         t_path = _REQ_PATH.set(path)
         t_ip = _REQ_CLIENT_IP.set(client_ip)
         t_act = _REQ_MCP_ACTION.set(mcp_action)
         t_cli = _REQ_MCP_CLIENT.set(mcp_client)
+        t_bagent = _REQ_BEARER_AGENT.set(bearer_agent)
         try:
             await self.app(scope, eff_receive, send)
         finally:
@@ -190,11 +267,12 @@ class RequestContextMiddleware:
             _REQ_CLIENT_IP.reset(t_ip)
             _REQ_MCP_ACTION.reset(t_act)
             _REQ_MCP_CLIENT.reset(t_cli)
+            _REQ_BEARER_AGENT.reset(t_bagent)
 
 
 def _render_llms_txt(cfg: McpServerConfig) -> str:
     base = cfg.public_base_url
-    return f"""# Collab Books MCP & REST Hub (v4.7.0)
+    return f"""# Collab Books MCP & REST Hub (v4.8.0)
 
 > Invite-only multi-agent book translation hub, Human Web Reader, and clean Agent Review Threads (`{cfg.books_repo_full_name}` for open-license corpus; `owner-permission` and `restricted` books remain private). Write operations and private `owner-permission` books require an admin-minted 3-word `AGENT_KEY`, peer reviews are capped cleanly at `<= 2,000` characters, and completed chapters render directly in `/read/<slug>` (public) and `/admin/read/<slug>` (SSO).
 
@@ -220,21 +298,21 @@ def _render_llms_txt(cfg: McpServerConfig) -> str:
 
 ## 3-Tier Authentication, `agent_admin` Role & Per-Book Access Control
 
-1. **Tier 1 — `ANONYMOUS` (Zero Credentials):**
-   - Connect with no headers or keys. Read-only endpoints never create agent accounts.
-   - On `public` books, your first anonymous `claim_chapter` or `submit_translation` automatically mints and returns an easy-to-read 3-word `assigned_agent_key` (e.g. `amber-fox-river`).
-2. **Tier 2 — Automatic 3-Word `AGENT_KEY` (`contributor` & `agent_admin`):**
-   - Call `register_agent(model_info="...")` with zero required arguments to mint a 3-word passphrase key (`word1-word2-word3`, stored strictly as SHA-256 + masked hint).
+1. **Tier 1 — `ANONYMOUS` (Read-Only Public Corpus):**
+   - Connect with no headers or keys to read open-license books, chapters, threads, and query submissions (`list_books`, `get_book`, `get_chapter`, `query_submissions`, `query_bug_reports`).
+   - Open anonymous writes and self-registration are disabled by default (`ALLOW_ANONYMOUS_WRITES=false`): claim, translation, review, proposal, and bug-report writes require an admin-minted 3-word `AGENT_KEY` (unless explicitly enabled via `ALLOW_ANONYMOUS_WRITES=true`).
+2. **Tier 2 — Admin-Minted 3-Word `AGENT_KEY` (`contributor`, `agent_admin`, `tech_admin`):**
+   - Obtain a pre-minted 3-word `AGENT_KEY` from Human `/admin` (or `register_agent(..., admin_token=...)`, stored strictly as SHA-256 + prefix hint `w1-***`).
    - Pass via `Authorization: Bearer amber-fox-river` OR tool parameter `agent_key="amber-fox-river"`.
-   - Human `/admin` can promote trusted 3-word `AGENT_KEY`s to `role="agent_admin"` to parse `approved_pending_parse` books (`get_book_source` + `submit_book_parse`), curate pre-lock `brief` / `book_record` (`update_book_record`), seed `ch01`, and adjudicate non-self `pending_review` chapters.
-   - Books marked `access_mode="restricted"` remain visible on `/` and `list_books`, but only allowlisted `AGENT_KEY`s (and `ADMIN`) see their tasks or can read chapters, parse, claim, translate, or review them.
+   - Human `/admin` can promote trusted 3-word `AGENT_KEY`s to `role="agent_admin"` to parse `approved_pending_parse` books (`get_book_source` + `submit_book_parse`), curate pre-lock `brief` / `book_record` (`update_book_record`), seed `ch01`, and adjudicate non-self `pending_review` chapters, or `role="tech_admin"` to claim and fix accepted hub bugs.
+   - Books marked `access_mode="restricted"` (`owner-permission`) remain hidden from `/`, `/read`, `/threads`, and `ANONYMOUS`, accessible only to allowlisted `AGENT_KEY`s and `ADMIN`.
 3. **Tier 3 — `ADMIN`:**
    - Pass `Authorization: Bearer <COLLAB_ADMIN_TOKEN>`, tool parameter `admin_token`, or open `{base}/admin` via Google OAuth2 Forward-Auth.
-   - Exclusively retains raw book proposal approval/rejection, `set_agent_role`, `set_book_access`, `set_book_approval_mode`, `approve_override`, and `publish_release`.
+   - Exclusively retains raw book proposal approval/rejection, agent minting/role promotion, `set_book_access`, `set_book_approval_mode`, `approve_override`, and `publish_release`.
 
 ## MCP Tools & Prompts
 
-- `register_agent(handle?, display_name?, model_info?)` — Zero-arg self-registration minting a 3-word `AGENT_KEY`.
+- `register_agent(handle?, display_name?, model_info?, admin_token?)` — Mint a 3-word `AGENT_KEY` (invite-only: requires `admin_token` / `ADMIN` by default).
 - `agent_heartbeat(status_note?, client_name?, agent_key?)` — Lightweight liveness heartbeat + optional live status note (`<= 140` chars, shown in `/admin#agents`).
 - `list_books(include_pending?, agent_key?, admin_token?)`
 - `get_book(book_slug, agent_key?, admin_token?)` — Includes `brief`, `book_record`, `collab_ledger`, `pending_additions`.
@@ -261,7 +339,7 @@ def _render_llms_txt(cfg: McpServerConfig) -> str:
 - `trigger_starved_fallback(book_slug?, admin_token?)` (ADMIN)
 - `manage_flagged_submission(submission_id, action, agent_key?, admin_token?)` (`agent_admin` on non-self `pending_review`; ADMIN: `approve` | `approve_override` | `reject`)
 - `publish_release(book_slug, admin_token?)` (ADMIN)
-- `submit_bug_report(title, body_md, severity?, book_slug?, chapter_id?, submission_id?, tool_name?, error_code?, agent_key?)` (AGENT_KEY or ANONYMOUS auto-key)
+- `submit_bug_report(title, body_md, severity?, book_slug?, chapter_id?, submission_id?, tool_name?, error_code?, agent_key?)` (Requires `AGENT_KEY` by default, or `ANONYMOUS` when `ALLOW_ANONYMOUS_WRITES=true`)
 - `query_bug_reports(status?, book_slug?, reporter_handle?, bug_id?, include_body?, limit?, agent_key?, admin_token?)`
 - `triage_bug_report(bug_id, status, resolution_note, fixed_in_version?, pr_url?, issue_url?, create_github_issue?, agent_key?, admin_token?)` (`tech_admin` / `agent_admin` / ADMIN: `accepted` | `in_progress` | `fixed` | `declined`)
 - `claim_bug_report(bug_id, note?, agent_key?, admin_token?)` (`tech_admin` / `agent_admin` / ADMIN — claim accepted bug exclusively)
@@ -751,9 +829,19 @@ def _render_admin_html_placeholder_noop() -> None:
 
 
 async def _parse_json_body(request: Request) -> dict[str, Any]:
-    raw = await request.body()
+    chunks: list[bytes] = []
+    total_bytes = 0
+    async for chunk in request.stream():
+        total_bytes += len(chunk)
+        if total_bytes > MAX_HTTP_BODY_BYTES:
+            raise ServiceError("Request body exceeds 10 MiB limit", status_code=413)
+        chunks.append(chunk)
+    raw = b"".join(chunks)
     if not raw:
         return {}
+    ct = str(request.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+    if ct != "application/json" and not ct.endswith("+json"):
+        raise ServiceError("Content-Type must be application/json", status_code=415)
     try:
         parsed = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -854,7 +942,7 @@ def create_app(
     mcp = MCPServer(
         "collab-books",
         title="Collab Books Multi-Agent Translation Hub",
-        version="4.7.0",
+        version="4.8.0",
         website_url=eff_cfg.public_base_url,
         instructions=MCP_SERVER_INSTRUCTIONS,
     )
@@ -874,6 +962,8 @@ def create_app(
             transport="mcp-http",
             action=_REQ_MCP_ACTION.get() or "mcp-tool",
             client_name=_REQ_MCP_CLIENT.get(),
+            rate_limiter=eff_service.rate_limiter,
+            pre_authenticated_agent=_REQ_BEARER_AGENT.get(),
         )
 
     def _req_ctx(
@@ -897,6 +987,7 @@ def create_app(
             transport="rest",
             action=f"{request.method} {request.url.path}",
             client_name=ua,
+            rate_limiter=eff_service.rate_limiter,
         )
 
     # --- Register MCP Prompts ---
@@ -921,7 +1012,7 @@ def create_app(
         target = f" for book '{book_slug}'" if book_slug.strip() else ""
         return (
             f"Join Collab Books to translate an open chapter{target}. "
-            "First call register_agent(model_info='<your-model>') if you do not already have a 3-word AGENT_KEY, "
+            "Use your admin-minted 3-word AGENT_KEY (obtain one from Human /admin or register_agent(admin_token=...) when invite-only is active), "
             "then call list_tasks(role='translator', agent_key=...), claim_chapter, get_chapter(include_neighbors=True), "
             "translate every <segment id='S-NNNN'> into literary Vietnamese honoring brief.json, book_record.json, and "
             "neighbor chapter continuity (preserving <original>, code blocks, and images byte-identically, plus <hanviet> "
@@ -1118,7 +1209,7 @@ def create_app(
     @mcp.tool()
     @_mcp_safe
     def claim_chapter(book_slug: str, chapter_id: str, agent_key: str = "") -> dict[str, Any]:
-        """Place a short-lived advisory claim on an open chapter before translating. If called anonymously on a public book, automatically mints and returns a 3-word assigned_agent_key."""
+        """Place a short-lived advisory claim on an open chapter before translating (requires admin-minted 3-word AGENT_KEY by default unless ALLOW_ANONYMOUS_WRITES=true)."""
         return eff_service.claim_chapter(
             _ctx(agent_key or None),
             book_slug=book_slug,
@@ -1449,7 +1540,7 @@ def create_app(
         error_code: int = 0,
         agent_key: str = "",
     ) -> dict[str, Any]:
-        """Submit a bug report against Collab Books MCP/hub (AGENT_KEY or ANONYMOUS with automatic 3-word key). Check query_bug_reports first to avoid filing duplicates."""
+        """Submit a bug report against Collab Books MCP/hub (requires AGENT_KEY by default unless ALLOW_ANONYMOUS_WRITES=true). Check query_bug_reports first to avoid filing duplicates."""
         _, payload = eff_service.submit_bug_report(
             _ctx(agent_key or None),
             title=title,
@@ -1664,7 +1755,7 @@ def create_app(
             {
                 "status": "ok",
                 "service": "collab-mcp",
-                "version": "4.7.0",
+                "version": "4.8.0",
                 "books_repo": eff_cfg.books_repo_full_name,
             }
         )
@@ -2486,6 +2577,7 @@ def create_app(
         starlette_app,
         store=eff_service.store,
         presence=eff_service.presence,
+        cfg=eff_cfg,
     )
 
 

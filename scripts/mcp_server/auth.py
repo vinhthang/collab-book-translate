@@ -4,13 +4,21 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
-import hashlib
 import hmac
-import re
 import secrets
 import threading
 import time
-from typing import TYPE_CHECKING, Literal, Mapping, Optional
+from typing import TYPE_CHECKING, Any, Literal, Mapping, Optional
+
+from scripts.mcp_server.keys import (
+    _ADJECTIVES,
+    _NOUNS,
+    _PLACES,
+    generate_default_handle,
+    generate_readable_handle,
+    mint_agent_key,
+    sha256_hex,
+)
 
 if TYPE_CHECKING:
     from scripts.mcp_server.config import McpServerConfig
@@ -18,65 +26,6 @@ if TYPE_CHECKING:
 
 AuthTier = Literal["ANONYMOUS", "AGENT_KEY", "ADMIN"]
 AgentRole = Literal["contributor", "agent_admin", "tech_admin", "admin"]
-
-_ADJECTIVES: tuple[str, ...] = (
-    "amber", "azure", "bold", "brave", "bright", "brisk", "calm", "cedar",
-    "clear", "clever", "cobalt", "cool", "coral", "crisp", "cyan", "daring",
-    "dawn", "deep", "deft", "eager", "early", "emerald", "fair", "fast",
-    "fern", "fine", "firm", "fleet", "floral", "fond", "fresh", "gentle",
-    "gilded", "glad", "gleam", "gold", "golden", "good", "grand", "green",
-    "happy", "hardy", "hazel", "ivory", "jade", "jolly", "keen", "kind",
-    "light", "lilac", "lively", "lucid", "lunar", "maple", "mellow", "merry",
-    "mild", "mint", "misty", "mossy", "neat", "nimble", "noble", "north",
-    "oak", "ochre", "olive", "opal", "pale", "pearl", "pine", "placid",
-    "plain", "plucky", "poised", "polar", "prime", "proud", "pure", "quick",
-    "quiet", "rapid", "ready", "regal", "rich", "rosy", "royal", "ruby",
-    "rustic", "sage", "sandy", "scarlet", "serene", "sharp", "shiny", "silky",
-    "silver", "simple", "sleek", "smart", "smooth", "snowy", "soft", "solar",
-    "solid", "sonic", "sound", "south", "spring", "spry", "stable", "starry",
-    "steady", "still", "stout", "sunny", "sure", "sweet", "swift", "teal",
-    "tender", "tidy", "true", "velvet", "vivid", "warm", "west", "wise",
-)
-
-_NOUNS: tuple[str, ...] = (
-    "albatross", "alpaca", "antelope", "badger", "beagle", "bear", "beaver", "bison",
-    "bobcat", "bunting", "camel", "canary", "caribou", "catbird", "cheetah", "cicada",
-    "cobra", "collie", "condor", "cougar", "coyote", "crane", "cricket", "crow",
-    "cuckoo", "curlew", "deer", "dingo", "dolphin", "donkey", "dove", "dragon",
-    "drake", "duck", "eagle", "egret", "eland", "elk", "ermine", "falcon",
-    "ferret", "finch", "firefly", "flamingo", "fox", "frog", "gazelle", "gecko",
-    "gerbil", "gibbon", "giraffe", "gopher", "goshawk", "grebe", "grouse", "gull",
-    "hamster", "hare", "harrier", "hawk", "heron", "hornet", "hound", "husky",
-    "ibex", "ibis", "iguana", "impala", "jackal", "jaguar", "jay", "kestrel",
-    "kinglet", "kiwi", "koala", "kudu", "lapwing", "lark", "lemur", "leopard",
-    "linnet", "lion", "lizard", "llama", "lobster", "locust", "loon", "lynx",
-    "macaw", "magpie", "mallard", "marmot", "marten", "martin", "merlin", "mink",
-    "minnow", "mocking", "mole", "mongoose", "monkey", "moose", "moth", "mouse",
-    "narwhal", "newt", "ocelot", "oriole", "oryx", "osprey", "otter", "owl",
-    "panda", "panther", "parrot", "peacock", "pelican", "penguin", "petrel", "pheasant",
-    "pigeon", "plover", "pony", "puffin", "puma", "quail", "rabbit", "raven",
-)
-
-_PLACES: tuple[str, ...] = (
-    "abbey", "acorn", "alder", "arch", "arbor", "aspen", "atoll", "autumn",
-    "basin", "bayou", "beach", "beacon", "bench", "birch", "bluff", "bough",
-    "breeze", "bridge", "brook", "cairn", "canopy", "canyon", "cape", "cavern",
-    "channel", "chasm", "cinder", "citadel", "cliff", "cloud", "clover", "coast",
-    "comet", "copse", "cove", "crag", "creek", "crest", "crown", "crystal",
-    "dale", "delta", "desert", "dome", "drift", "dune", "echo", "ember",
-    "estuary", "falls", "field", "fjord", "flame", "flower", "forest", "forge",
-    "fountain", "frost", "garden", "gate", "geyser", "glacier", "glade", "glen",
-    "gorge", "grain", "granite", "grass", "grotto", "grove", "harbor", "haven",
-    "hearth", "heath", "height", "hill", "hollow", "horizon", "island", "islet",
-    "jungle", "knoll", "lagoon", "lake", "lantern", "laurel", "leaf", "ledge",
-    "lichen", "linden", "lotus", "marsh", "meadow", "mesa", "mirror", "moon",
-    "moor", "moss", "mound", "mount", "nectar", "nest", "oasis", "ocean",
-    "orchard", "pass", "path", "peak", "pebble", "petal", "pillar", "plains",
-    "plaza", "pond", "pool", "port", "prairie", "prism", "quarry", "quartz",
-    "rapids", "ravine", "reef", "ridge", "river", "rock", "shore", "valley",
-)
-
-_NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
 
 
 class AuthError(PermissionError):
@@ -105,47 +54,10 @@ class AuthContext:
     agent_role: AgentRole = "contributor"
 
 
-def sha256_hex(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
-
-
 def constant_time_equal(left: str, right: str) -> bool:
     if not left or not right:
         return False
     return hmac.compare_digest(sha256_hex(left), sha256_hex(right))
-
-
-def mint_agent_key() -> tuple[str, str, str]:
-    """Mint a readable 3-word AGENT_KEY returning (raw_key, key_sha256, key_hint)."""
-    w1 = secrets.choice(_ADJECTIVES)
-    w2 = secrets.choice(_NOUNS)
-    w3 = secrets.choice(_PLACES)
-    raw = f"{w1}-{w2}-{w3}"
-    hint = f"{w1}-***-{w3}"
-    return raw, sha256_hex(raw), hint
-
-
-def generate_readable_handle(display_name: str = "", model_info: str = "") -> str:
-    """Derive a clean slug handle without random hex when display_name or model_info is descriptive."""
-    seed_src = (display_name or model_info or "").strip().lower()
-    if not seed_src:
-        return ""
-    tokens = [t for t in _NON_ALNUM_RE.split(seed_src) if t]
-    slug = "-".join(tokens)[:32].strip("-")
-    if len(slug) < 3 or not slug[0].isalnum() or not slug[-1].isalnum():
-        return ""
-    return slug
-
-
-def generate_default_handle(model_info: str = "", display_name: str = "") -> str:
-    """Derive a clean public agent handle (never exposing the secret AGENT_KEY)."""
-    seed_src = (model_info or display_name or "agent").strip().lower()
-    tokens = [t for t in _NON_ALNUM_RE.split(seed_src) if t]
-    prefix = tokens[0][:16] if tokens else "agent"
-    if not prefix or not prefix[0].isalnum():
-        prefix = "agent"
-    suffix = secrets.token_hex(2)
-    return f"{prefix}-{suffix}"
 
 
 def mint_revision_token() -> tuple[str, str]:
@@ -196,7 +108,15 @@ def assert_not_self_review(reviewer_actor_id: str, author_actor_id: str) -> None
         raise AuthError("Self-review is prohibited: reviewer must differ from submission author", status_code=403)
 
 
-def _extract_client_ip(headers: Mapping[str, str], fallback_ip: str = "127.0.0.1") -> str:
+def _extract_client_ip(
+    headers: Mapping[str, str],
+    fallback_ip: str = "127.0.0.1",
+    *,
+    trust_proxy_headers: bool = False,
+    trusted_proxy_ips: frozenset[str] = frozenset({"127.0.0.1", "::1", "testclient"}),
+) -> str:
+    if not (trust_proxy_headers or fallback_ip in trusted_proxy_ips):
+        return fallback_ip
     lower = {k.lower(): v for k, v in headers.items()}
     cf_ip = lower.get("cf-connecting-ip", "").strip()
     if cf_ip:
@@ -205,6 +125,19 @@ def _extract_client_ip(headers: Mapping[str, str], fallback_ip: str = "127.0.0.1
     if xff:
         return xff.split(",")[0].strip()
     return fallback_ip
+
+
+def _record_auth_failure(
+    rate_limiter: Optional["SlidingWindowRateLimiter"],
+    cfg: "McpServerConfig",
+    ip_hash: str,
+) -> None:
+    if rate_limiter is not None:
+        rate_limiter.check(
+            f"auth_fail:{ip_hash}",
+            limit=cfg.auth_fail_rpm,
+            window_seconds=60.0,
+        )
 
 
 def resolve_auth(
@@ -219,10 +152,17 @@ def resolve_auth(
     transport: str = "",
     action: str = "",
     client_name: str = "",
+    rate_limiter: Optional["SlidingWindowRateLimiter"] = None,
+    pre_authenticated_agent: Optional[Mapping[str, Any]] = None,
 ) -> AuthContext:
     """Resolve caller identity across ADMIN, AGENT_KEY, and ANONYMOUS tiers."""
     lower = {k.lower(): v for k, v in headers.items()}
-    effective_ip = _extract_client_ip(lower, fallback_ip=client_ip)
+    effective_ip = _extract_client_ip(
+        lower,
+        fallback_ip=client_ip,
+        trust_proxy_headers=cfg.trust_proxy_headers,
+        trusted_proxy_ips=cfg.trusted_proxy_ips,
+    )
     ip_hash = sha256_hex(f"collab-ip:{effective_ip}")[:16]
 
     # 1. Explicit admin_token tool argument
@@ -236,15 +176,18 @@ def resolve_auth(
                 client_ip_hash=ip_hash,
                 agent_role="admin",
             )
+        _record_auth_failure(rate_limiter, cfg, ip_hash)
         raise AuthError("Invalid admin_token", status_code=401)
 
     # 2. HTTP Authorization: Bearer <token>
     auth_header = lower.get("authorization", "").strip()
     if auth_header:
         if not auth_header.lower().startswith("bearer "):
+            _record_auth_failure(rate_limiter, cfg, ip_hash)
             raise AuthError("Authorization header must use Bearer scheme", status_code=401)
         bearer = auth_header[7:].strip()
         if not bearer:
+            _record_auth_failure(rate_limiter, cfg, ip_hash)
             raise AuthError("Empty Bearer token", status_code=401)
         if cfg.collab_admin_token and constant_time_equal(bearer, cfg.collab_admin_token):
             return AuthContext(
@@ -253,6 +196,16 @@ def resolve_auth(
                 handle="admin",
                 client_ip_hash=ip_hash,
                 agent_role="admin",
+            )
+        if pre_authenticated_agent is not None:
+            handle = str(pre_authenticated_agent["handle"])
+            role = _normalize_agent_role(pre_authenticated_agent.get("role"))
+            return AuthContext(
+                tier="AGENT_KEY",
+                actor_id=f"agent:{handle}",
+                handle=handle,
+                client_ip_hash=ip_hash,
+                agent_role=role,
             )
         agent = store.get_agent_by_key(bearer)
         if agent is not None:
@@ -271,6 +224,7 @@ def resolve_auth(
                 client_ip_hash=ip_hash,
                 agent_role=role,
             )
+        _record_auth_failure(rate_limiter, cfg, ip_hash)
         raise AuthError("Invalid or unknown Bearer token", status_code=401)
 
     # 3. Zero-header MCP tool argument agent_key
@@ -293,12 +247,13 @@ def resolve_auth(
                 client_ip_hash=ip_hash,
                 agent_role=role_arg,
             )
+        _record_auth_failure(rate_limiter, cfg, ip_hash)
         raise AuthError("Invalid or unknown agent_key", status_code=401)
 
-    # 4. Caddy Google OAuth2 Forward-Auth header — ONLY honored on /admin* when enabled!
+    # 4. Caddy Google OAuth2 Forward-Auth header — ONLY honored on /admin* when enabled AND admin_emails configured!
     if cfg.trust_admin_sso_header and request_path.startswith("/admin"):
         sso_email = lower.get("x-auth-request-email", "").strip().lower()
-        if sso_email and (not cfg.admin_emails or sso_email in cfg.admin_emails):
+        if sso_email and bool(cfg.admin_emails) and sso_email in cfg.admin_emails:
             return AuthContext(
                 tier="ADMIN",
                 actor_id=f"admin:{sso_email}",
@@ -323,6 +278,19 @@ class SlidingWindowRateLimiter:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._buckets: dict[str, deque[float]] = {}
+        self._windows: dict[str, float] = {}
+        self._last_gc: float = 0.0
+
+    def _evict_expired_buckets(self, ts: float) -> None:
+        stale = [
+            key
+            for key, bq in self._buckets.items()
+            if not bq or bq[-1] <= ts - self._windows.get(key, 60.0)
+        ]
+        for key in stale:
+            self._buckets.pop(key, None)
+            self._windows.pop(key, None)
+        self._last_gc = ts
 
     def check(
         self,
@@ -335,10 +303,13 @@ class SlidingWindowRateLimiter:
         ts = time.time() if now is None else now
         cutoff = ts - window_seconds
         with self._lock:
+            if (len(self._buckets) > 512 and ts - self._last_gc >= 60.0) or len(self._buckets) > 4096:
+                self._evict_expired_buckets(ts)
             dq = self._buckets.get(bucket_key)
             if dq is None:
                 dq = deque()
                 self._buckets[bucket_key] = dq
+            self._windows[bucket_key] = window_seconds
             while dq and dq[0] <= cutoff:
                 dq.popleft()
             if len(dq) >= limit:

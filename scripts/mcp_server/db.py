@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import datetime
 import json
 from pathlib import Path
@@ -12,7 +13,7 @@ import time
 from typing import Any, Optional
 import uuid
 
-from scripts.mcp_server.auth import generate_default_handle, generate_readable_handle, mint_agent_key, sha256_hex
+from scripts.mcp_server.keys import generate_default_handle, generate_readable_handle, mint_agent_key, sha256_hex
 from scripts.mcp_server.config import McpServerConfig
 from scripts.mcp_server.git_sync import PUBLIC_CORPUS_LICENSES, is_public_corpus_book
 
@@ -153,6 +154,12 @@ SCHEMA_STATEMENTS_COMMON = (
         updated_at TEXT NOT NULL
     )
     """,
+    "CREATE INDEX IF NOT EXISTS idx_submissions_book_chapter ON submissions(book_slug, chapter_id)",
+    "CREATE INDEX IF NOT EXISTS idx_submissions_status ON submissions(status)",
+    "CREATE INDEX IF NOT EXISTS idx_submissions_author ON submissions(author_handle)",
+    "CREATE INDEX IF NOT EXISTS idx_peer_reviews_submission ON peer_reviews(submission_id)",
+    "CREATE INDEX IF NOT EXISTS idx_peer_reviews_reviewer ON peer_reviews(reviewer_handle)",
+    "CREATE INDEX IF NOT EXISTS idx_bug_reports_status ON bug_reports(status)",
 )
 
 
@@ -167,7 +174,9 @@ class CollabStore:
         self._cfg = cfg
         self._use_pg = bool(cfg.database_url)
         self._lock = threading.RLock()
+        self._tx_depth = 0
         self._sqlite_conn: Optional[sqlite3.Connection] = None
+        self._pg_conn: Any = None
         self._pg_mod: Any = None
         if self._use_pg:
             import psycopg
@@ -184,6 +193,51 @@ class CollabStore:
             self._sqlite_conn = conn
         return self._sqlite_conn
 
+    def _get_pg(self) -> Any:
+        conn = self._pg_conn
+        if conn is not None:
+            is_closed = bool(getattr(conn, "closed", False))
+            is_broken = bool(getattr(conn, "broken", False))
+            if not is_closed and not is_broken:
+                return conn
+            try:
+                conn.close()
+            except Exception:
+                pass
+            self._pg_conn = None
+        conn = self._pg_mod.connect(
+            self._cfg.database_url,
+            row_factory=self._pg_dict_row,
+        )
+        with conn.cursor() as cur:
+            cur.execute("SET search_path TO collab_service, public")
+        conn.commit()
+        self._pg_conn = conn
+        return conn
+
+    @contextlib.contextmanager
+    def transaction(self):
+        """Run multiple store operations atomically inside a single SQLite/PostgreSQL transaction."""
+        with self._lock:
+            self._tx_depth += 1
+            is_outer = self._tx_depth == 1
+            try:
+                yield
+                if is_outer:
+                    if self._use_pg and self._pg_conn is not None:
+                        self._pg_conn.commit()
+                    elif not self._use_pg and self._sqlite_conn is not None:
+                        self._sqlite_conn.commit()
+            except BaseException:
+                if is_outer:
+                    if self._use_pg and self._pg_conn is not None:
+                        self._pg_conn.rollback()
+                    elif not self._use_pg and self._sqlite_conn is not None:
+                        self._sqlite_conn.rollback()
+                raise
+            finally:
+                self._tx_depth -= 1
+
     def _exec(
         self,
         sql: str,
@@ -195,35 +249,62 @@ class CollabStore:
         with self._lock:
             if self._use_pg:
                 pg_sql = sql.replace("?", "%s")
-                with self._pg_mod.connect(
-                    self._cfg.database_url,
-                    row_factory=self._pg_dict_row,
-                ) as conn:
-                    with conn.cursor() as cur:
-                        cur.execute("SET search_path TO collab_service, public")
-                        cur.execute(pg_sql, params)
-                        if fetchone:
-                            row = cur.fetchone()
+                retry_errors = tuple(
+                    err
+                    for err in (
+                        getattr(self._pg_mod, "OperationalError", None),
+                        getattr(self._pg_mod, "InterfaceError", None),
+                    )
+                    if isinstance(err, type)
+                )
+                attempts = 2 if self._tx_depth == 0 else 1
+                for attempt in range(attempts):
+                    conn = self._get_pg()
+                    try:
+                        with conn.cursor() as cur:
+                            cur.execute(pg_sql, params)
+                            if fetchone:
+                                row = cur.fetchone()
+                                if self._tx_depth == 0:
+                                    conn.commit()
+                                return dict(row) if row else None
+                            if fetchall:
+                                rows = cur.fetchall()
+                                if self._tx_depth == 0:
+                                    conn.commit()
+                                return [dict(r) for r in rows]
+                        if self._tx_depth == 0:
                             conn.commit()
-                            return dict(row) if row else None
-                        if fetchall:
-                            rows = cur.fetchall()
-                            conn.commit()
-                            return [dict(r) for r in rows]
-                    conn.commit()
-                    return None
+                        return None
+                    except Exception as exc:
+                        if retry_errors and isinstance(exc, retry_errors) and attempt == 0 and self._tx_depth == 0:
+                            try:
+                                conn.close()
+                            except Exception:
+                                pass
+                            self._pg_conn = None
+                            continue
+                        if self._tx_depth == 0:
+                            try:
+                                conn.rollback()
+                            except Exception:
+                                pass
+                        raise
             else:
                 conn = self._get_sqlite()
                 cur = conn.execute(sql, params)
                 if fetchone:
                     row = cur.fetchone()
-                    conn.commit()
+                    if self._tx_depth == 0:
+                        conn.commit()
                     return dict(row) if row else None
                 if fetchall:
                     rows = cur.fetchall()
-                    conn.commit()
+                    if self._tx_depth == 0:
+                        conn.commit()
                     return [dict(r) for r in rows]
-                conn.commit()
+                if self._tx_depth == 0:
+                    conn.commit()
                 return None
 
     def init_db(self) -> None:
@@ -310,6 +391,11 @@ class CollabStore:
             if self._sqlite_conn is not None:
                 self._sqlite_conn.close()
                 self._sqlite_conn = None
+            if self._pg_conn is not None:
+                try:
+                    self._pg_conn.close()
+                finally:
+                    self._pg_conn = None
 
     def register_agent(
         self,
@@ -791,6 +877,78 @@ class CollabStore:
                 fetchall=True,
             )
         return [self._hydrate_book(r) for r in rows]
+
+    def list_books_summary(
+        self,
+        *,
+        include_pending: bool = False,
+        include_admin_fields: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Projected books listing omitting full source_text / manifest blobs."""
+        cols = (
+            "slug, title, author, source_lang, target_lang, genre, license_id, license_url, "
+            "status, access_mode, allowed_agents_json, approval_mode, proposed_chapters_json, "
+            "glossary_sha, release_tag, release_url, proposed_by, source_filename, updated_at"
+        )
+        if include_admin_fields:
+            cols += ", book_record_json, SUBSTR(source_text, 1, 2000) AS source_preview"
+        where = "" if include_pending else "WHERE status != 'rejected' "
+        rows = self._exec(f"SELECT {cols} FROM books {where}ORDER BY slug ASC", fetchall=True)
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["access_mode"] = str(item.get("access_mode") or "public")
+            item["allowed_agents"] = json.loads(item.pop("allowed_agents_json", "[]") or "[]")
+            item["approval_mode"] = str(item.get("approval_mode") or "auto")
+            item["proposed_chapters"] = json.loads(item.pop("proposed_chapters_json", "[]") or "[]")
+            if include_admin_fields:
+                item["book_record"] = json.loads(item.pop("book_record_json", "{}") or "{}")
+                item["source_preview"] = str(item.get("source_preview") or "")
+            item["public_corpus"] = is_public_corpus_book(
+                license_id=str(item.get("license_id") or ""),
+                access_mode=item["access_mode"],
+            )
+            out.append(item)
+        return out
+
+    def get_book_chapter_counts(self) -> dict[str, dict[str, int]]:
+        """Return aggregated total/accepted/open chapter counts keyed by book_slug."""
+        rows = self._exec(
+            "SELECT book_slug, status, COUNT(*) AS cnt FROM chapters GROUP BY book_slug, status",
+            fetchall=True,
+        )
+        counts: dict[str, dict[str, int]] = {}
+        for row in rows:
+            slug = str(row["book_slug"])
+            status = str(row["status"])
+            cnt = int(row["cnt"] or 0)
+            bucket = counts.setdefault(slug, {"total": 0, "accepted": 0, "open": 0})
+            bucket["total"] += cnt
+            if status == "accepted":
+                bucket["accepted"] += cnt
+            elif status == "open":
+                bucket["open"] += cnt
+        return counts
+
+    def get_book_actionable_submission_counts(
+        self,
+        statuses: tuple[str, ...] = (
+            "pending_review",
+            "pending_admin_approval",
+            "flagged_security",
+            "escalated_to_admin",
+        ),
+    ) -> dict[str, int]:
+        """Return aggregated actionable submission counts keyed by book_slug."""
+        if not statuses:
+            return {}
+        placeholders = ", ".join("?" for _ in statuses)
+        rows = self._exec(
+            f"SELECT book_slug, COUNT(*) AS cnt FROM submissions WHERE status IN ({placeholders}) GROUP BY book_slug",
+            statuses,
+            fetchall=True,
+        )
+        return {str(row["book_slug"]): int(row["cnt"] or 0) for row in rows}
 
     def upsert_chapter(
         self,

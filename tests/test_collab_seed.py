@@ -684,7 +684,7 @@ class TestCollabSeed(unittest.TestCase):
     def test_seed_git_repo_commits_and_pushes_to_origin(self):
         remote_bare = Path(tempfile.mkdtemp()) / "remote.git"
         self.addCleanup(lambda: shutil.rmtree(remote_bare.parent, ignore_errors=True))
-        subprocess.run(["git", "init", "--bare", str(remote_bare)], check=True, capture_output=True)
+        subprocess.run(["git", "init", "--bare", "-b", "main", str(remote_bare)], check=True, capture_output=True)
 
         subprocess.run(["git", "init", "-b", "main"], cwd=self.repo_root, check=True, capture_output=True)
         subprocess.run(["git", "remote", "add", "origin", str(remote_bare)], cwd=self.repo_root, check=True, capture_output=True)

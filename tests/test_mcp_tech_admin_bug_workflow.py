@@ -383,10 +383,10 @@ def test_req_078_admin_ui_3role_selector_bug_controls_cli_agent_and_v460(tmp_pat
         app = create_app(cfg=cfg, service=svc)
 
     with TestClient(app) as client:
-        assert client.get("/api/health").json()["version"] == "4.7.0"
-        assert "v4.7.0" in client.get("/llms.txt").text
+        assert client.get("/api/health").json()["version"] == "4.8.0"
+        assert "v4.8.0" in client.get("/llms.txt").text
         repo_root = Path(__file__).resolve().parent.parent
-        assert json.loads((repo_root / "plugin.json").read_text(encoding="utf-8"))["version"] == "4.7.0"
+        assert json.loads((repo_root / "plugin.json").read_text(encoding="utf-8"))["version"] == "4.8.0"
         init_rpc = client.post(
             "/mcp",
             headers={"Accept": "application/json, text/event-stream"},
@@ -397,7 +397,7 @@ def test_req_078_admin_ui_3role_selector_bug_controls_cli_agent_and_v460(tmp_pat
                 "params": {"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}},
             },
         ).json()
-        assert init_rpc["result"]["serverInfo"]["version"] == "4.7.0"
+        assert init_rpc["result"]["serverInfo"]["version"] == "4.8.0"
 
         tech = client.post("/admin/api/agents/mint", headers=sso_hdr, json={"handle": "tech-bot", "model_info": "opus"}).json()
         client.post("/api/v1/admin/agents/role", headers=admin_hdr, json={"identifier": "tech-bot", "role": "tech_admin"})
@@ -427,7 +427,7 @@ def test_req_078_admin_ui_3role_selector_bug_controls_cli_agent_and_v460(tmp_pat
         assert client.post(f"/admin/api/bugs/{b_safe['id']}/claim", json={}).status_code == 403
         html_out = client.get("/admin", headers=sso_hdr).text
         for expected in (
-            "v4.7.0",
+            "v4.8.0",
             '<select id="role-tech-bot"',
             '<option value="tech_admin" selected>',
             "js-toggle-agent-role",

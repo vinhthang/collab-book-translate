@@ -692,7 +692,7 @@ class EPUBCompiler(BaseCompiler):
         utterances: List[Dict[str, Any]],
         return_matched_set: bool = False,
     ) -> Any:
-        """
+        r"""
         Injects <span id="S-XXXX_uNN" class="..."> anchors into html_body for EPUB 3 Media Overlays.
         Tracks a forward search_cursor so repeated phrases are anchored sequentially in document order.
         Converts inline footnote markers (N)/[N] to match either literal or converted <sup ...> tags.

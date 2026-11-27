@@ -27,13 +27,13 @@ def test_ac_044_1_three_word_key_zero_arg_register_and_legacy_compat(tmp_path: P
     assert THREE_WORD_KEY_RE.match(raw_k), f"Expected 3-word key, got {raw_k}"
     assert len(k_sha) == 64 and k_sha == sha256_hex(raw_k)
     parts = raw_k.split("-")
-    assert k_hint == f"{parts[0]}-***-{parts[2]}"
+    assert k_hint == f"{parts[0]}-***"
 
     # 2. Zero-arg register_agent() auto-generates handle and 3-word key; DB stores hash + hint only
     reg = store.register_agent(model_info="claude-sonnet")
     assert THREE_WORD_KEY_RE.match(reg["agent_key"])
     assert reg["handle"].startswith("claude-")
-    assert reg["key_hint"].count("-***-") == 1
+    assert reg["key_hint"].endswith("-***") and reg["key_hint"].count("-") == 1
 
     raw_conn = sqlite3.connect(cfg.sqlite_path)
     row = raw_conn.execute(

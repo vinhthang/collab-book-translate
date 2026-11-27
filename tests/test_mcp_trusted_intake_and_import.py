@@ -618,10 +618,10 @@ def test_req_063_mcp_v420_rest_admin_ui_and_worker_cli(tmp_path: Path, monkeypat
     with TestClient(app) as client:
         # 1. Health, llms.txt, plugin.json, MCP initialize & 29 tools
         h = client.get("/api/health").json()
-        assert h["version"] == "4.7.0"
-        assert "v4.7.0" in client.get("/llms.txt").text
+        assert h["version"] == "4.8.0"
+        assert "v4.8.0" in client.get("/llms.txt").text
         assert "import_chapter_translations" in client.get("/llms.txt").text
-        assert json.loads((repo_root / "plugin.json").read_text(encoding="utf-8"))["version"] == "4.7.0"
+        assert json.loads((repo_root / "plugin.json").read_text(encoding="utf-8"))["version"] == "4.8.0"
 
         init_rpc = client.post(
             "/mcp",
@@ -637,7 +637,7 @@ def test_req_063_mcp_v420_rest_admin_ui_and_worker_cli(tmp_path: Path, monkeypat
                 },
             },
         ).json()
-        assert init_rpc["result"]["serverInfo"]["version"] == "4.7.0"
+        assert init_rpc["result"]["serverInfo"]["version"] == "4.8.0"
         assert "import_chapter_translations" in init_rpc["result"]["instructions"]
 
         tools_rpc = client.post(

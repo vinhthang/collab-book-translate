@@ -3,19 +3,50 @@ name: Build & Publish collab-mcp Container Image
 on:
   push:
     branches: ["main"]
+  pull_request:
+    branches: ["main"]
   workflow_dispatch:
     inputs:
       image_tag:
-        description: "Container image tag to publish (e.g. v0.9.0)"
+        description: "Container image tag to publish (e.g. v0.9.1)"
         required: false
-        default: "v0.9.0"
+        default: "v0.9.1"
         type: string
 
 env:
   REGISTRY: ghcr.io
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install system runtime libraries & Node.js
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libpango-1.0-0 libpangocairo-1.0-0 libpangoft2-1.0-0 libgdk-pixbuf-2.0-0 \
+            shared-mime-info nodejs
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install locked dependencies
+        run: uv sync --frozen
+
+      - name: Run pytest suite
+        run: uv run pytest -q
+
+      - name: Validate Admin UI JavaScript syntax
+        run: |
+          uv run python -c "from scripts.mcp_server.admin_ui import _ADMIN_JS; print(_ADMIN_JS)" > /tmp/admin.js
+          node --check /tmp/admin.js
+
   build-arm64:
+    needs: [test]
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04-arm
     permissions:
       contents: read
@@ -37,7 +68,7 @@ jobs:
 
       - name: Build, push, and verify anonymous GHCR pullability
         run: |
-          TAG="${{ inputs.image_tag || 'v0.9.0' }}"
+          TAG="${{ inputs.image_tag || 'v0.9.1' }}"
           docker buildx build \
             --platform linux/arm64 \
             --provenance=false \
@@ -76,13 +107,16 @@ jobs:
           }
 
           if check_public "vinhthang/collab-mcp"; then
+            VERIFIED_PKG="vinhthang/collab-mcp"
             echo "VERIFIED_PUBLIC_IMAGE=ghcr.io/vinhthang/collab-mcp:${TAG}"
           elif check_public "vinhthang/collab-book-translate"; then
+            VERIFIED_PKG="vinhthang/collab-book-translate"
             echo "VERIFIED_PUBLIC_IMAGE=ghcr.io/vinhthang/collab-book-translate:${TAG}"
           else
             echo "ERROR_PACKAGE_NOT_PUBLIC: Neither vinhthang/collab-mcp:${TAG} nor vinhthang/collab-book-translate:${TAG} is anonymously pullable."
             exit 1
           fi
+          echo "VERIFIED_PKG=${VERIFIED_PKG}" >> "$GITHUB_ENV"
           echo "PUBLISHED_TAG=${TAG}" >> "$GITHUB_ENV"
 
       - name: Trigger OCI Fleet Rollout (collab-mcp)
@@ -91,12 +125,13 @@ jobs:
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
         run: |
           set -euo pipefail
-          TAG="${PUBLISHED_TAG:-${{ inputs.image_tag || 'v0.9.0' }}}"
-          TOK=$(curl -fsS "https://ghcr.io/token?scope=repository:vinhthang/collab-mcp:pull" | python3 -c 'import sys,json; print(json.load(sys.stdin)["token"])')
+          TAG="${PUBLISHED_TAG:-${{ inputs.image_tag || 'v0.9.1' }}}"
+          PKG="${VERIFIED_PKG:-vinhthang/collab-mcp}"
+          TOK=$(curl -fsS "https://ghcr.io/token?scope=repository:${PKG}:pull" | python3 -c 'import sys,json; print(json.load(sys.stdin)["token"])')
           DIGEST=$(curl -fsSI \
             -H "Authorization: Bearer ${TOK}" \
             -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.docker.distribution.manifest.list.v2+json" \
-            "https://ghcr.io/v2/vinhthang/collab-mcp/manifests/${TAG}" \
+            "https://ghcr.io/v2/${PKG}/manifests/${TAG}" \
             | awk 'tolower($1)=="docker-content-digest:" {gsub("\r","",$2); print $2}')
           PAYLOAD=$(python3 -c 'import json,sys; tag,dig=sys.argv[1:3]; d={"service":"collab-mcp","tag":tag}; d.update({"digest":dig} if dig.startswith("sha256:") else {}); print(json.dumps(d))' "$TAG" "$DIGEST")
           echo "Triggering rollout on webhook.vinhthang.dev: ${PAYLOAD}"

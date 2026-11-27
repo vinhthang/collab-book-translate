@@ -39,7 +39,7 @@ Inspected against `collab-book-translate` at commit `0ae2b74`:
 
 ### REQ-044: Easy-to-read 3-word `AGENT_KEY` generation, zero-arg registration, and first-write auto-minting
 
-- Current contract: Changed by [2026-11-23-collab-mcp-reader-threads-and-invite-lockdown/REQ-070](../2026-11-23-collab-mcp-reader-threads-and-invite-lockdown/spec.md#req-070-invite-only-registration--writes-private-owner-permission-manuscript-block-concise-reviews--2000-chars--test-artifact-purge)
+- Current contract: Changed by [2026-11-27-collab-mcp-security-scalability-and-ci-hardening/REQ-083](../2026-11-27-collab-mcp-security-scalability-and-ci-hardening/spec.md#req-083-expanded-3-word-agent_key-entropy-prefix-only-key_hint-bounded-limiter-failed-auth-throttle--heartbeat-rate-limit)
 - Changes: [2026-11-19-collab-mcp-and-books-split/REQ-039](../2026-11-19-collab-mcp-and-books-split/spec.md#req-039-three-tier-authentication-anonymous-agent_key-admin-and-header-spoof-protection)
 - Source intent: Verbatim user prompt (*"I also want to have an automatically AGENT_KEY, this is to identity the agent ... the AGENT_KEY should be automatically generated, simple and easy to read"*) and `/grill-me` Q1/Q2 (`3-word passphrase`, `zero-arg register_agent() + first anonymous claim/submit`).
 - Previous contract: `register_agent` required an explicit `handle` and generated `cbt_ak_<48-hex>` tokens; anonymous `claim_chapter` / `submit_translation` stayed `ANONYMOUS` without assigning a persistent `AGENT_KEY`.
@@ -56,7 +56,7 @@ Inspected against `collab-book-translate` at commit `0ae2b74`:
 
 ### REQ-046: Built-in MCP `instructions`, self-explanatory tool docstrings, `@mcp.prompt()` helpers, and `/` onboarding card
 
-- Current contract: Changed by [2026-11-23-collab-mcp-reader-threads-and-invite-lockdown/REQ-072](../2026-11-23-collab-mcp-reader-threads-and-invite-lockdown/spec.md#req-072-read-only-agent-threads-ui-threads-public--adminthreads-sso-collapsible-long-reviews--v440-surface)
+- Current contract: Changed by [2026-11-23-collab-mcp-reader-threads-and-invite-lockdown/REQ-072](../2026-11-23-collab-mcp-reader-threads-and-invite-lockdown/spec.md#req-072-read-only-agent-threads-ui-threads-public--adminthreads-sso-collapsible-long-reviews--v440-surface); Changed by [2026-11-27-collab-mcp-security-scalability-and-ci-hardening/REQ-086](../2026-11-27-collab-mcp-security-scalability-and-ci-hardening/spec.md#req-086-lazy-extractors-zero-circular-dependencies-raw-docstring--v480-invite-only-surface)
 - Changes: [2026-11-19-collab-mcp-and-books-split/REQ-038](../2026-11-19-collab-mcp-and-books-split/spec.md#req-038-standalone-collab-mcp-transports-discovery-endpoints-and-postgresqlsqlite-persistence)
 - Source intent: Verbatim user prompt (*"why this too detail, I just ask for add this mcp server, https://collab.vinhthang.dev/mcp, and then the agent can do by it self, right?"*) and `/grill-me` Q4.
 - Previous contract: `MCPServer("collab-books")` had no `instructions`, one-line tool docstrings, no MCP prompts, and a minimal JSON snippet on `/`.

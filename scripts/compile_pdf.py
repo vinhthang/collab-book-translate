@@ -71,7 +71,7 @@ from scripts.utils.language import get_pinyin_initial, is_cjk_codepoint
 
 try:
     import weasyprint
-except ImportError:
+except (ImportError, OSError):
     weasyprint = None
 
 try:
@@ -1237,6 +1237,65 @@ def _collect_anchor_pages(weasy_doc: Any, page_offset: int) -> Dict[str, int]:
     return anchor_pages
 
 
+def _sanitize_html_for_mupdf(full_html: str) -> str:
+    """Strips WeasyPrint-specific CSS at-rules/properties unsupported by MuPDF Story."""
+    cleaned = re.sub(r"@page\s*(?::first)?\s*\{(?:[^{}]|\{[^{}]*\})*\}", "", full_html, flags=re.DOTALL)
+    cleaned = re.sub(
+        r"[^;{}\n]*(?:bookmark-level|bookmark-label|string-set|leader\(|target-counter\(|page-break-before|page-break-after|page-break-inside|break-before|break-after|break-inside)[^;{}\n]*;?",
+        "",
+        cleaned,
+    )
+    return cleaned
+
+
+def _render_pdf_with_pymupdf(
+    chapters_html: List[Dict[str, Any]],
+    out_pdf_path: str,
+    run_path: str,
+    *,
+    title: str,
+    toc_html: Optional[str] = None,
+    index_html: Optional[str] = None,
+    author: str = "",
+) -> str:
+    """Fallback PDF renderer using PyMuPDF Story when WeasyPrint / libpango is unavailable."""
+    if fitz is None:
+        raise RuntimeError("weasyprint or pymupdf is required for PDF compilation")
+
+    full_html = build_full_html(
+        chapters_html,
+        title=title,
+        toc_html=toc_html,
+        index_html=index_html,
+        author=author,
+    )
+    story_html = _sanitize_html_for_mupdf(full_html)
+    print(f"Rendering PDF with PyMuPDF fallback -> {out_pdf_path}...")
+    archive = fitz.Archive(run_path)
+    story = fitz.Story(html=story_html, archive=archive)
+    writer = fitz.DocumentWriter(out_pdf_path)
+    mediabox = fitz.paper_rect("a5")
+    where = mediabox + (42, 54, -42, -54)
+    max_pages = max(200, len(chapters_html) * 50)
+    pages_rendered = 0
+    try:
+        more = 1
+        while more:
+            if pages_rendered >= max_pages:
+                raise RuntimeError(f"PyMuPDF fallback exceeded pagination limit ({max_pages} pages)")
+            dev = writer.begin_page(mediabox)
+            more, _ = story.place(where)
+            story.draw(dev)
+            writer.end_page()
+            pages_rendered += 1
+    finally:
+        writer.close()
+
+    pdf_size = os.path.getsize(out_pdf_path)
+    print(f"Successfully compiled PDF (PyMuPDF fallback): {out_pdf_path} ({pdf_size} bytes)")
+    return out_pdf_path
+
+
 def compile_book(
     run_dir: str,
     output_pdf: str,
@@ -1370,7 +1429,15 @@ def compile_book(
     os.makedirs(os.path.dirname(os.path.abspath(out_pdf_path)), exist_ok=True)
 
     if weasyprint is None:
-        raise RuntimeError("weasyprint is required for PDF compilation")
+        return _render_pdf_with_pymupdf(
+            chapters_html,
+            out_pdf_path,
+            run_path,
+            title=book_title,
+            toc_html=toc_html,
+            index_html=index_html,
+            author=book_author,
+        )
 
     fetcher = build_safe_url_fetcher([Path(run_path) / "images", Path(run_path)])
 

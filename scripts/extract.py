@@ -5,6 +5,8 @@ Ingests PDF, EPUB, DOCX, MOBI, and Markdown documents into standardized XML segm
 """
 
 import argparse
+from collections.abc import Mapping
+import importlib
 import os
 import re
 import subprocess
@@ -15,30 +17,50 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from typing import Any, Dict, List, Optional, Type, Union
+from typing import Any, Dict, Iterator, List, Optional, Type, Union
 
 from scripts.extractors.base import BaseExtractor
-from scripts.extractors.pdf_extractor import PDFExtractor
-from scripts.extractors.epub_extractor import EPUBExtractor
-from scripts.extractors.docx_extractor import DOCXExtractor
-from scripts.extractors.mobi_extractor import MOBIExtractor
-from scripts.extractors.markdown_extractor import MarkdownExtractor
-from scripts.extractors.text_extractor import TextExtractor
 from scripts.utils.language import derive_book_slug
 from scripts.utils.paths import get_inputs_dir, get_runs_dir, resolve_run_dir
 
-EXTRACTOR_REGISTRY: Dict[str, Type[BaseExtractor]] = {
-    ".pdf": PDFExtractor,
-    ".epub": EPUBExtractor,
-    ".docx": DOCXExtractor,
-    ".mobi": MOBIExtractor,
-    ".azw": MOBIExtractor,
-    ".azw3": MOBIExtractor,
-    ".md": MarkdownExtractor,
-    ".markdown": MarkdownExtractor,
-    ".txt": TextExtractor,
-    ".text": TextExtractor,
+_EXTRACTOR_SPECS: Dict[str, tuple[str, str]] = {
+    ".pdf": ("scripts.extractors.pdf_extractor", "PDFExtractor"),
+    ".epub": ("scripts.extractors.epub_extractor", "EPUBExtractor"),
+    ".docx": ("scripts.extractors.docx_extractor", "DOCXExtractor"),
+    ".mobi": ("scripts.extractors.mobi_extractor", "MOBIExtractor"),
+    ".azw": ("scripts.extractors.mobi_extractor", "MOBIExtractor"),
+    ".azw3": ("scripts.extractors.mobi_extractor", "MOBIExtractor"),
+    ".md": ("scripts.extractors.markdown_extractor", "MarkdownExtractor"),
+    ".markdown": ("scripts.extractors.markdown_extractor", "MarkdownExtractor"),
+    ".txt": ("scripts.extractors.text_extractor", "TextExtractor"),
+    ".text": ("scripts.extractors.text_extractor", "TextExtractor"),
 }
+
+
+class _LazyExtractorRegistry(Mapping[str, Type[BaseExtractor]]):
+    """Mapping proxy resolving each extension's extractor class only on lookup."""
+
+    def __getitem__(self, key: str) -> Type[BaseExtractor]:
+        spec = _EXTRACTOR_SPECS[key]
+        mod = importlib.import_module(spec[0])
+        return getattr(mod, spec[1])
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(_EXTRACTOR_SPECS)
+
+    def __len__(self) -> int:
+        return len(_EXTRACTOR_SPECS)
+
+
+EXTRACTOR_REGISTRY: Mapping[str, Type[BaseExtractor]] = _LazyExtractorRegistry()
+
+
+def _load_extractor_cls(ext: str) -> Optional[Type[BaseExtractor]]:
+    spec = _EXTRACTOR_SPECS.get(ext)
+    if spec is None:
+        return None
+    mod = importlib.import_module(spec[0])
+    return getattr(mod, spec[1])
 
 
 def resolve_input_source(
@@ -97,11 +119,13 @@ def resolve_input_source(
 def get_extractor_for_file(file_path: Path) -> BaseExtractor:
     """Returns the appropriate extractor instance based on file extension or directory layout."""
     if file_path.is_dir():
-        return EPUBExtractor()
+        epub_cls = _load_extractor_cls(".epub")
+        assert epub_cls is not None
+        return epub_cls()
     ext = file_path.suffix.lower()
-    extractor_cls = EXTRACTOR_REGISTRY.get(ext)
+    extractor_cls = _load_extractor_cls(ext)
     if not extractor_cls:
-        supported = ", ".join(sorted(EXTRACTOR_REGISTRY.keys()))
+        supported = ", ".join(sorted(_EXTRACTOR_SPECS.keys()))
         raise ValueError(f"Unsupported file format '{ext}' for file {file_path}. Supported: {supported}")
     return extractor_cls()
 
@@ -131,9 +155,10 @@ def extract_document(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     extractor = get_extractor_for_file(input_source)
-    if isinstance(extractor, PDFExtractor):
+    cls_name = type(extractor).__name__
+    if cls_name == "PDFExtractor":
         kwargs["toc_level"] = toc_level
-    if isinstance(extractor, TextExtractor) and source_lang in ("en", "zh"):
+    if cls_name == "TextExtractor" and source_lang in ("en", "zh"):
         kwargs["source_lang"] = source_lang
 
     results = extractor.extract(
