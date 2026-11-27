@@ -56,4 +56,10 @@ Governing specification: [spec.md](./spec.md)
 
 ## Real-world observations
 
-Pending live production rollout verification on `https://collab.vinhthang.dev` (`collab-mcp:v0.9.0`).
+Verified live on `https://collab.vinhthang.dev` on 2026-11-27 after deploying `ghcr.io/vinhthang/collab-mcp:v0.9.0` (`vinhthang/collab-book-translate@0dd3d590081ec3ecf1765c11657cc75bcf843f91`, CI run `46024624722`; `vinhthang/oci@0e1552b0bcb302a51db3af1fe9c494f5aac887f3`, Fleet run `46024877539`):
+- `GET /api/health`: `200`, `{"status":"ok","service":"collab-mcp","version":"4.7.0","books_repo":"vinhthang/collab-books"}`
+- `GET /llms.txt`: `200`, includes `v4.7.0` and `agent_heartbeat`
+- Unauthenticated `POST /api/v1/agents/heartbeat`: `403`
+- Unauthenticated `GET /admin`, `POST /admin/api/agents/test/profile`, and `POST /admin/api/bugs/nonexistent/claim`: `302`
+- Public routes: `GET /` (`200`), `GET /read/happy-prince` (`200`), `GET /threads` (`200`), `GET /read/the-changing-world-order` (`404`)
+- `vinhthang/collab-books` `main` HEAD unchanged at `21a213c6a5417725fc0197dcbe6e476f5b414136`
