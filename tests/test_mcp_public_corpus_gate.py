@@ -396,11 +396,11 @@ def test_req_069_public_bookshelf_filter_startup_origin_reconcile_and_v431(tmp_p
         assert not (work_repo / "runs" / "the-changing-world-order").exists()
         assert (cfg.books_repo_dir.parent / "private-books" / "runs" / "the-changing-world-order" / "collab_ledger.json").is_file()
 
-        # 1. Health, /llms.txt, plugin.json, MCP initialize report "4.7.0"
-        assert client.get("/api/health").json()["version"] == "4.7.0"
-        assert "v4.7.0" in client.get("/llms.txt").text
+        # 1. Health, /llms.txt, plugin.json, MCP initialize report "4.8.0"
+        assert client.get("/api/health").json()["version"] == "4.8.0"
+        assert "v4.8.0" in client.get("/llms.txt").text
         repo_root = Path(__file__).resolve().parent.parent
-        assert json.loads((repo_root / "plugin.json").read_text(encoding="utf-8"))["version"] == "4.7.0"
+        assert json.loads((repo_root / "plugin.json").read_text(encoding="utf-8"))["version"] == "4.8.0"
 
         init_rpc = client.post(
             "/mcp",
@@ -416,7 +416,7 @@ def test_req_069_public_bookshelf_filter_startup_origin_reconcile_and_v431(tmp_p
                 },
             },
         ).json()
-        assert init_rpc["result"]["serverInfo"]["version"] == "4.7.0"
+        assert init_rpc["result"]["serverInfo"]["version"] == "4.8.0"
 
         # 2. Public HTML bookshelf '/' hides owner-permission book & unbootstrapped leftover-private, shows gift-of-the-magi
         shelf_html = client.get("/").text

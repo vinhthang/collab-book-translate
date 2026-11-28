@@ -941,7 +941,7 @@ document.querySelectorAll('.js-retry-seed').forEach(btn => {
       return;
     }
     if (out.data.book && out.data.book.seeding_started) {
-      await pollSeedCompletion(slug, hold, msg, btn);
+      await pollSeedCompletion(slug, true, msg, btn);
       return;
     }
     btn.disabled = false;
@@ -1634,7 +1634,7 @@ def _render_admin_html(
       <div>
         <div class="brand-title">
           <span>Collab Admin</span>
-          <span class="badge badge-info">v4.7.0</span>
+          <span class="badge badge-info">v4.8.0</span>
         </div>
         <div class="brand-sub"><code>{_esc(cfg.public_base_url)}</code></div>
         <nav class="nav-group" aria-label="Admin sections">

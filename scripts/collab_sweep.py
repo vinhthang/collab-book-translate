@@ -49,11 +49,11 @@ from scripts.collab_pr_validate import (
     validate_translation_pr,
 )
 from scripts.collab_seed import (
-    build_translation_pr_body,
     ensure_hanviet_segments,
     reconcile_missing_chapter_issues,
     sync_collab_book_record,
 )
+from scripts.utils.pr_body import build_translation_pr_body
 from scripts.collab_select import (
     evaluate_starved_chapter,
     format_non_selected_comment,

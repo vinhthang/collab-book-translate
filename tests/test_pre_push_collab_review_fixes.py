@@ -639,8 +639,12 @@ def test_p1_5_seed_prepare_only_no_cbc_push_origin_and_no_fake_seed_review(
     )
 
     # 1. --prepare-only must succeed on fiction book without cbc
+    orig_isfile = os.path.isfile
     with patch("scripts.orchestrate_run.shutil.which", return_value=None), \
-         patch("scripts.orchestrate_run.os.path.isfile", return_value=False):
+         patch(
+             "scripts.orchestrate_run.os.path.isfile",
+             side_effect=lambda p: False if str(p).endswith("/cbc") else orig_isfile(p),
+         ):
         prep = seed_merged_book(
             repo_root=tmp_path,
             book_slug=slug,

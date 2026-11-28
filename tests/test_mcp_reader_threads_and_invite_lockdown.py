@@ -573,10 +573,10 @@ def test_req_072_agent_threads_ui_collapsible_reviews_and_v440(tmp_path: Path) -
         assert subprocess.run(["node", "--check", str(js_file)], capture_output=True, text=True).returncode == 0
 
         # 5. Version 4.5.0 across /api/health, /llms.txt, plugin.json, MCP initialize
-        assert client.get("/api/health").json()["version"] == "4.7.0"
-        assert "v4.7.0" in client.get("/llms.txt").text
+        assert client.get("/api/health").json()["version"] == "4.8.0"
+        assert "v4.8.0" in client.get("/llms.txt").text
         repo_root = Path(__file__).resolve().parent.parent
-        assert json.loads((repo_root / "plugin.json").read_text(encoding="utf-8"))["version"] == "4.7.0"
+        assert json.loads((repo_root / "plugin.json").read_text(encoding="utf-8"))["version"] == "4.8.0"
         init_rpc = client.post(
             "/mcp",
             headers={"Accept": "application/json, text/event-stream"},
@@ -587,5 +587,5 @@ def test_req_072_agent_threads_ui_collapsible_reviews_and_v440(tmp_path: Path) -
                 "params": {"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}},
             },
         ).json()
-        assert init_rpc["result"]["serverInfo"]["version"] == "4.7.0"
+        assert init_rpc["result"]["serverInfo"]["version"] == "4.8.0"
     store.close()

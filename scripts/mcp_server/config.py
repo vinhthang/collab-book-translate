@@ -25,6 +25,8 @@ class McpServerConfig:
     anon_read_rpm: int = 120
     anon_write_rpm: int = 15
     agent_write_rpm: int = 60
+    agent_heartbeat_rpm: int = 60
+    auth_fail_rpm: int = 20
     claim_ttl_seconds: int = 7200
     fallback_hours: float = 48.0
     max_revise_rounds: int = 3
@@ -34,6 +36,8 @@ class McpServerConfig:
     review_engine: str = "gemini"
     review_agent_slugs: tuple[str, ...] = ("vi-terminology-pronoun-hawk",)
     allow_anonymous_writes: bool = False
+    trust_proxy_headers: bool = False
+    trusted_proxy_ips: frozenset[str] = frozenset({"127.0.0.1", "::1", "testclient"})
     bug_accept_webhook_url: str = ""
     bug_accept_webhook_secret: str = ""
     bug_github_repo: str = "vinhthang/collab-book-translate"
@@ -62,6 +66,15 @@ def load_mcp_server_config() -> McpServerConfig:
         "true",
         "yes",
     }
+    trust_proxy = os.environ.get("TRUST_PROXY_HEADERS", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+    raw_proxies = os.environ.get("TRUSTED_PROXY_IPS", "127.0.0.1,::1,testclient")
+    trusted_proxies = frozenset(
+        item.strip() for item in raw_proxies.split(",") if item.strip()
+    )
     return McpServerConfig(
         database_url=os.environ.get("DATABASE_URL", "").strip(),
         sqlite_path=Path(os.environ.get("COLLAB_SQLITE_PATH", str(default_data_dir / "collab.sqlite3"))),
@@ -78,6 +91,8 @@ def load_mcp_server_config() -> McpServerConfig:
         anon_read_rpm=max(1, int(os.environ.get("ANON_READ_RPM", "120"))),
         anon_write_rpm=max(1, int(os.environ.get("ANON_WRITE_RPM", "15"))),
         agent_write_rpm=max(1, int(os.environ.get("AGENT_WRITE_RPM", "60"))),
+        agent_heartbeat_rpm=max(1, int(os.environ.get("AGENT_HEARTBEAT_RPM", "60"))),
+        auth_fail_rpm=max(1, int(os.environ.get("AUTH_FAIL_RPM", "20"))),
         claim_ttl_seconds=max(60, int(os.environ.get("CLAIM_TTL_SECONDS", "7200"))),
         fallback_hours=max(0.1, float(os.environ.get("FALLBACK_HOURS", "48.0"))),
         max_revise_rounds=max(1, int(os.environ.get("MAX_REVISE_ROUNDS", "3"))),
@@ -91,6 +106,8 @@ def load_mcp_server_config() -> McpServerConfig:
             if s.strip()
         ),
         allow_anonymous_writes=allow_anon,
+        trust_proxy_headers=trust_proxy,
+        trusted_proxy_ips=trusted_proxies,
         bug_accept_webhook_url=os.environ.get("BUG_ACCEPT_WEBHOOK_URL", "").strip(),
         bug_accept_webhook_secret=os.environ.get("BUG_ACCEPT_WEBHOOK_SECRET", "").strip(),
         bug_github_repo=os.environ.get("BUG_GITHUB_REPO", "vinhthang/collab-book-translate").strip(),

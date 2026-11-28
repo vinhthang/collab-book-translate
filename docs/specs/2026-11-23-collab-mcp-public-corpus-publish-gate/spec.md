@@ -35,6 +35,7 @@ Inspected at `/Users/thanghoang/github/collab-book-translate` (`b004ac9`):
 
 ### REQ-068: Public-Corpus Publishing Eligibility, `private-books` Isolation, & Zero Git/Release Sync for Non-Public Books
 
+- Current contract: Changed by [2026-11-27-collab-mcp-security-scalability-and-ci-hardening/REQ-084](../2026-11-27-collab-mcp-security-scalability-and-ci-hardening/spec.md#req-084-persistent-postgresql-persistence-atomic-transactions-secondary-indexes-o1-list_books-offloaded-middleware-presence--git-before-db-acceptance)
 - Changes: [2026-11-19-collab-mcp-and-books-split/REQ-042](../2026-11-19-collab-mcp-and-books-split/spec.md#req-042-ch01-seeding-starved-chapter-fallback-apiv1translate-and-collab-books-gitrelease-sync)
 - Source intent: Verbatim request (*"do not publish the book like ray dalio ones, need to delete from https://github.com/vinhthang/collab-books, these are for public books"*) and `A2`.
 - Previous contract: `CollabBooksGitSync` wrote every book into `cfg.books_repo_dir` and committed/pushed accepted chapters and GitHub Releases to `vinhthang/collab-books` regardless of `license_id` or `access_mode`; completing all chapters always set `status="published"` and published a GitHub Release.

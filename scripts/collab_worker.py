@@ -25,7 +25,6 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.collab_config import CollabConfig, ConfigError, load_collab_config
-from scripts.collab_intake import validate_submission_pr
 from scripts.collab_pr_validate import validate_review, validate_translation_pr
 import httpx
 
@@ -625,7 +624,9 @@ def submit_book(
     branch = f"book/{slug}"
     repo_root = Path(cfg.workspace_dir).resolve() if cfg.workspace_dir else REPO_ROOT
 
-    # Preflight check
+    # Preflight check (imported lazily so remote --mcp-url workflows avoid heavy extractors)
+    from scripts.collab_intake import validate_submission_pr
+
     val_res = validate_submission_pr(
         changed_files=[f"books/{slug}/manifest.json", f"books/{slug}/source/{src_path.name}"],
         manifest_data=manifest_data,
@@ -763,7 +764,7 @@ def submit_translation(
     config_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Validate and submit a chapter translation PR (REQ-035)."""
-    from scripts.collab_seed import build_translation_pr_body
+    from scripts.utils.pr_body import build_translation_pr_body
     from scripts.helper import parse_segments
 
     cfg = load_collab_config(config_path)

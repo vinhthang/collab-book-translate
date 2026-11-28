@@ -91,6 +91,7 @@ class CollabBooksGitSync:
                 check=True,
                 capture_output=True,
                 text=True,
+                timeout=120,
             )
             return res.stdout.strip()
         finally:
@@ -620,7 +621,20 @@ class CollabBooksGitSync:
             upload_url_tmpl = str(rel_data.get("upload_url") or "").split("{")[0]
             html_url = str(rel_data.get("html_url") or "")
 
+            existing_assets = {
+                str(a.get("name") or ""): a.get("id")
+                for a in (rel_data.get("assets") or [])
+                if isinstance(a, dict) and a.get("name") and a.get("id")
+            }
+
             for fp in files:
+                existing_id = existing_assets.get(fp.name)
+                if existing_id:
+                    del_resp = client.delete(
+                        f"{api_base}/releases/assets/{existing_id}",
+                        headers=headers,
+                    )
+                    del_resp.raise_for_status()
                 mime = {
                     ".epub": "application/epub+zip",
                     ".pdf": "application/pdf",
@@ -628,11 +642,12 @@ class CollabBooksGitSync:
                 }.get(fp.suffix.lower(), "application/octet-stream")
                 up_headers = dict(headers)
                 up_headers["Content-Type"] = mime
-                client.post(
+                up_resp = client.post(
                     f"{upload_url_tmpl}?name={fp.name}",
                     headers=up_headers,
                     content=fp.read_bytes(),
                 )
+                up_resp.raise_for_status()
             return html_url
 
     def _has_origin(self) -> bool:
