@@ -27,7 +27,7 @@ _TRANSLATION_REVIEW_AGENTS: tuple[str, ...] = (
 class ReviewServerClient:
     """Client driving TRANSLATION_REVIEW workstreams and fallback chapter translation."""
 
-    def __init__(self, cfg: McpServerConfig, timeout_seconds: float = 420.0) -> None:
+    def __init__(self, cfg: McpServerConfig, timeout_seconds: float = 480.0) -> None:
         self._base_url = cfg.review_server_url.rstrip("/")
         self._token = cfg.review_bearer_token
         self._timeout = timeout_seconds

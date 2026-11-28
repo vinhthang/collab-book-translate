@@ -1458,9 +1458,38 @@ class CollabStore:
                 """
                 SELECT id FROM submissions
                 WHERE book_slug = ? AND chapter_id = ? AND id != ?
-                  AND status IN ('remediation_required', 'evaluating', 'pending_review', 'pending_admin_approval')
+                  AND status IN ('remediation_required', 'evaluating', 'pending_review', 'pending_admin_approval', 'escalated_to_admin')
                 """,
                 (book_slug, chapter_id, accepted_submission_id),
+                fetchall=True,
+            )
+            if not rows:
+                return 0
+            now_iso = _utc_iso()
+            for r in rows:
+                self._exec(
+                    "UPDATE submissions SET status = 'superseded', updated_at = ? WHERE id = ?",
+                    (now_iso, r["id"]),
+                )
+            return len(rows)
+
+    def supersede_author_remediation_drafts(
+        self,
+        *,
+        book_slug: str,
+        chapter_id: str,
+        author_actor_id: str,
+        keep_submission_id: str,
+    ) -> int:
+        """Mark prior stale remediation_required drafts by the same author on a chapter as 'superseded'."""
+        with self._lock:
+            rows = self._exec(
+                """
+                SELECT id FROM submissions
+                WHERE book_slug = ? AND chapter_id = ? AND author_actor_id = ? AND id != ?
+                  AND status = 'remediation_required'
+                """,
+                (book_slug, chapter_id, author_actor_id, keep_submission_id),
                 fetchall=True,
             )
             if not rows:

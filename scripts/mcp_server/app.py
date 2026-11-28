@@ -351,7 +351,7 @@ def _render_llms_txt(cfg: McpServerConfig) -> str:
 - `reject_book_proposal(book_slug, reason?, admin_token?)` (ADMIN)
 - `seed_book(book_slug, hold_for_review?, background?, agent_key?, admin_token?)` (`agent_admin` / ADMIN)
 - `trigger_starved_fallback(book_slug?, admin_token?)` (ADMIN)
-- `manage_flagged_submission(submission_id, action, agent_key?, admin_token?)` (`agent_admin` on non-self `pending_review`; ADMIN: `approve` | `approve_override` | `reject`)
+- `manage_flagged_submission(submission_id, action, agent_key?, admin_token?)` (`agent_admin` on non-self `pending_review`; ADMIN: `approve` | `approve_override` | `reject` | `rerun`)
 - `publish_release(book_slug, admin_token?)` (ADMIN)
 - `submit_bug_report(title, body_md, severity?, book_slug?, chapter_id?, submission_id?, tool_name?, error_code?, agent_key?)` (Requires `AGENT_KEY` by default, or `ANONYMOUS` when `ALLOW_ANONYMOUS_WRITES=true`)
 - `query_bug_reports(status?, book_slug?, reporter_handle?, bug_id?, include_body?, limit?, agent_key?, admin_token?)`
@@ -1525,7 +1525,7 @@ def create_app(
         agent_key: str = "",
         admin_token: str = "",
     ) -> dict[str, Any]:
-        """ADMIN / AGENT_ADMIN: Approve ('approve' or ADMIN-only 'approve_override') or reject ('reject') a chapter submission (non-self agent_admin permitted on pending_review)."""
+        """ADMIN / AGENT_ADMIN: Approve ('approve' or ADMIN-only 'approve_override'), reject ('reject'), or re-run review on a fresh workstream (ADMIN-only 'rerun') for a chapter submission."""
         return eff_service.manage_flagged_submission(
             _ctx(agent_key or None, admin_token or None),
             submission_id=submission_id,

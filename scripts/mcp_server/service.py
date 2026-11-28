@@ -88,6 +88,28 @@ _XML_TAG_STRIP_RE = re.compile(r"<[^>]+>")
 _IMAGE_ONLY_LINE_RE = re.compile(r"^(?:!\[[^\]]*\]\([^)]+\)\s*)+$")
 
 
+def _is_operational_specialist_failure_only(open_findings: list[dict[str, Any]]) -> bool:
+    """Return True iff every open finding is an operational specialist execution/timeout failure."""
+    if not open_findings:
+        return False
+    for item in open_findings:
+        if not isinstance(item, dict):
+            return False
+        fkey = str(item.get("findingKey") or "")
+        if not (fkey.startswith("CONTRACT::global::specialist-") and "-failed-" in fkey):
+            return False
+    return True
+
+
+def _active_claim_fields(ch: dict[str, Any], now: float) -> tuple[str, Any]:
+    """Return (claimed_by, claim_expires_at) only while a claim is unexpired."""
+    claimed_by = str(ch.get("claimed_by") or "")
+    expires_at = ch.get("claim_expires_at") or 0
+    if claimed_by and float(expires_at) > now:
+        return claimed_by, expires_at
+    return "", 0
+
+
 def _classify_chapter_section_type(
     chapter_id: str,
     title: str,
@@ -936,20 +958,23 @@ class CollabMcpService:
                     if isinstance(p, dict):
                         pending_additions.append({"chapter_id": s["chapter_id"], "submission_id": s["id"], **p})
 
-        chapters = [
-            {
-                "chapter_id": c["chapter_id"],
-                "chapter_num": c["chapter_num"],
-                "title": c["title"],
-                "section_type": str(c.get("section_type") or "body"),
-                "status": c["status"],
-                "claimed_by": c["claimed_by"],
-                "claim_expires_at": c["claim_expires_at"],
-                "accepted_submission_id": c.get("accepted_submission_id") or "",
-                "submission_count": subs_by_ch.get(c["chapter_id"], 0),
-            }
-            for c in self.store.list_chapters(book_slug)
-        ]
+        now = time.time()
+        chapters = []
+        for c in self.store.list_chapters(book_slug):
+            active_claimed_by, active_claim_exp = _active_claim_fields(c, now)
+            chapters.append(
+                {
+                    "chapter_id": c["chapter_id"],
+                    "chapter_num": c["chapter_num"],
+                    "title": c["title"],
+                    "section_type": str(c.get("section_type") or "body"),
+                    "status": c["status"],
+                    "claimed_by": active_claimed_by,
+                    "claim_expires_at": active_claim_exp,
+                    "accepted_submission_id": c.get("accepted_submission_id") or "",
+                    "submission_count": subs_by_ch.get(c["chapter_id"], 0),
+                }
+            )
         out = dict(book)
         out.pop("source_text", None)
         proposed_ch = list(out.pop("proposed_chapters", None) or [])
@@ -1255,6 +1280,7 @@ class CollabMcpService:
             }
             for s in self.store.list_submissions(book_slug=book_slug, chapter_id=chapter_id)
         ]
+        active_claimed_by, active_claim_exp = _active_claim_fields(ch, time.time())
         out: dict[str, Any] = {
             "book_slug": book_slug,
             "book_title": book["title"],
@@ -1269,8 +1295,8 @@ class CollabMcpService:
             "title": ch["title"],
             "section_type": str(ch.get("section_type") or "body"),
             "status": ch["status"],
-            "claimed_by": ch.get("claimed_by") or "",
-            "claim_expires_at": ch.get("claim_expires_at") or 0,
+            "claimed_by": active_claimed_by,
+            "claim_expires_at": active_claim_exp,
             "source_xml": ch["source_xml"],
             "translation_xml": ch.get("translation_xml") or "",
             "final_txt": ch["final_txt"],
@@ -2392,9 +2418,15 @@ class CollabMcpService:
         app_mode = str(book.get("approval_mode") or "auto")
         prior_history = list(existing_sub.get("rounds_history") or []) if existing_sub else []
 
-        def _persist_round_outcome(target_sub_id: Optional[str], round_res: dict[str, Any]) -> dict[str, Any]:
+        def _persist_round_outcome(target_sub_id: str, round_res: dict[str, Any]) -> dict[str, Any]:
             verdict = round_res["verdict"]
             round_num = int(round_res["roundNumber"])
+            open_findings = list(round_res.get("openFindings") or [])
+            op_failure_only = verdict != "PASS" and _is_operational_specialist_failure_only(open_findings)
+            persisted_ws_id = ws_id
+            persisted_round_num = round_num
+            persisted_summary = str(round_res.get("judgeSummary") or "")
+
             if verdict == "PASS":
                 hold_admin_seed = bool(hold_for_review) and ctx.tier == "ADMIN"
                 if hold_admin_seed or (app_mode == "manual" and ctx.tier != "ADMIN"):
@@ -2404,6 +2436,14 @@ class CollabMcpService:
                 else:
                     self.review_client.approve_workstream(workstream_id=ws_id)
                     sub_status = "accepted"
+            elif op_failure_only:
+                sub_status = "remediation_required"
+                persisted_round_num = int(existing_sub["round_number"]) if existing_sub else 0
+                persisted_ws_id = ""
+                persisted_summary = (
+                    "[Operational specialist timeout/failure — round not counted; retry opens a fresh workstream] "
+                    f"{persisted_summary}"
+                )
             else:
                 sub_status = (
                     "escalated_to_admin"
@@ -2414,7 +2454,7 @@ class CollabMcpService:
             updated_history = list(prior_history)
             updated_history.append(
                 {
-                    "round_number": round_num,
+                    "round_number": persisted_round_num if op_failure_only else round_num,
                     "type": "translation_round",
                     "engine_model": engine_model,
                     "rebuttals": rebuttals or [],
@@ -2423,46 +2463,24 @@ class CollabMcpService:
                     "p0_count": round_res["p0Count"],
                     "p1_count": round_res["p1Count"],
                     "p2_count": round_res["p2Count"],
-                    "judge_summary": round_res["judgeSummary"],
-                    "open_findings": round_res["openFindings"],
+                    "judge_summary": persisted_summary,
+                    "open_findings": open_findings,
                 }
             )
 
             persist_status = "pending_admin_approval" if sub_status == "accepted" else sub_status
-            if target_sub_id is None:
-                saved = self.store.create_submission(
-                    book_slug=book_slug,
-                    chapter_id=chapter_id,
-                    author_actor_id=eff_ctx.actor_id,
-                    author_handle=eff_ctx.handle,
-                    author_ip_hash=ctx.client_ip_hash,
-                    engine_model=engine_model,
-                    status=persist_status,
-                    round_number=round_num,
-                    max_rounds=self.cfg.max_revise_rounds,
-                    workstream_id=ws_id,
-                    revision_token_sha256=rt_sha,
-                    translation_xml=translation_xml,
-                    final_txt=final_txt,
-                    additions=norm_additions,
-                    open_findings=round_res["openFindings"],
-                    security_flags=[],
-                    judge_summary=round_res["judgeSummary"],
-                    rounds_history=updated_history,
-                )
-            else:
-                saved = self.store.update_submission(
-                    target_sub_id,
-                    status=persist_status,
-                    round_number=round_num,
-                    workstream_id=ws_id,
-                    translation_xml=translation_xml,
-                    final_txt=final_txt,
-                    additions=norm_additions,
-                    open_findings=round_res["openFindings"],
-                    judge_summary=round_res["judgeSummary"],
-                    rounds_history=updated_history,
-                )
+            saved = self.store.update_submission(
+                target_sub_id,
+                status=persist_status,
+                round_number=persisted_round_num,
+                workstream_id=persisted_ws_id,
+                translation_xml=translation_xml,
+                final_txt=final_txt,
+                additions=norm_additions,
+                open_findings=open_findings,
+                judge_summary=persisted_summary,
+                rounds_history=updated_history,
+            )
 
             if sub_status == "accepted":
                 fresh_book = self.store.get_book(book_slug) or book
@@ -2476,41 +2494,47 @@ class CollabMcpService:
                 )
             return saved
 
-        if background:
-            next_round_est = int(existing_sub["round_number"]) + 1 if existing_sub else 1
-            if existing_sub is None:
-                pending_sub = self.store.create_submission(
-                    book_slug=book_slug,
-                    chapter_id=chapter_id,
-                    author_actor_id=eff_ctx.actor_id,
-                    author_handle=eff_ctx.handle,
-                    author_ip_hash=ctx.client_ip_hash,
-                    engine_model=engine_model,
-                    status="evaluating",
-                    round_number=next_round_est,
-                    max_rounds=self.cfg.max_revise_rounds,
-                    workstream_id=ws_id,
-                    revision_token_sha256=rt_sha,
-                    translation_xml=translation_xml,
-                    final_txt=final_txt,
-                    additions=norm_additions,
-                    open_findings=[],
-                    security_flags=[],
-                    judge_summary="Running TRANSLATION_REVIEW specialists on review.vinhthang.dev...",
-                    rounds_history=prior_history,
-                )
-            else:
-                pending_sub = self.store.update_submission(
-                    existing_sub["id"],
-                    status="evaluating",
-                    workstream_id=ws_id,
-                    translation_xml=translation_xml,
-                    final_txt=final_txt,
-                    additions=norm_additions,
-                    judge_summary="Running TRANSLATION_REVIEW specialists on review.vinhthang.dev...",
-                )
-            target_id = str(pending_sub["id"])
+        next_round_est = int(existing_sub["round_number"]) + 1 if existing_sub else 1
+        if existing_sub is None:
+            pending_sub = self.store.create_submission(
+                book_slug=book_slug,
+                chapter_id=chapter_id,
+                author_actor_id=eff_ctx.actor_id,
+                author_handle=eff_ctx.handle,
+                author_ip_hash=ctx.client_ip_hash,
+                engine_model=engine_model,
+                status="evaluating",
+                round_number=next_round_est,
+                max_rounds=self.cfg.max_revise_rounds,
+                workstream_id=ws_id,
+                revision_token_sha256=rt_sha,
+                translation_xml=translation_xml,
+                final_txt=final_txt,
+                additions=norm_additions,
+                open_findings=[],
+                security_flags=[],
+                judge_summary="Running TRANSLATION_REVIEW specialists on review.vinhthang.dev...",
+                rounds_history=prior_history,
+            )
+            self.store.supersede_author_remediation_drafts(
+                book_slug=book_slug,
+                chapter_id=chapter_id,
+                author_actor_id=eff_ctx.actor_id,
+                keep_submission_id=str(pending_sub["id"]),
+            )
+        else:
+            pending_sub = self.store.update_submission(
+                existing_sub["id"],
+                status="evaluating",
+                workstream_id=ws_id,
+                translation_xml=translation_xml,
+                final_txt=final_txt,
+                additions=norm_additions,
+                judge_summary="Running TRANSLATION_REVIEW specialists on review.vinhthang.dev...",
+            )
+        target_id = str(pending_sub["id"])
 
+        if background:
             def _bg_worker() -> None:
                 try:
                     bg_round = self.review_client.run_translation_round(
@@ -2523,6 +2547,8 @@ class CollabMcpService:
                     self.store.update_submission(
                         target_id,
                         status="remediation_required",
+                        workstream_id="",
+                        round_number=int(existing_sub["round_number"]) if existing_sub else 0,
                         judge_summary=f"Background review round error: {exc}",
                     )
 
@@ -2537,12 +2563,22 @@ class CollabMcpService:
                 bg_payload.update(auto_meta)
             return 202, bg_payload
 
-        round_res = self.review_client.run_translation_round(
-            workstream_id=ws_id,
-            content=review_bundle,
-            rebuttals=rebuttals,
-        )
-        saved_sub = _persist_round_outcome(existing_sub["id"] if existing_sub else None, round_res)
+        try:
+            round_res = self.review_client.run_translation_round(
+                workstream_id=ws_id,
+                content=review_bundle,
+                rebuttals=rebuttals,
+            )
+        except Exception as exc:
+            self.store.update_submission(
+                target_id,
+                status="remediation_required",
+                workstream_id="",
+                round_number=int(existing_sub["round_number"]) if existing_sub else 0,
+                judge_summary=f"Review round error: {exc}",
+            )
+            raise
+        saved_sub = _persist_round_outcome(target_id, round_res)
 
         out_payload: dict[str, Any] = {
             "submission": _sanitize_submission_public(saved_sub),
@@ -3611,11 +3647,11 @@ class CollabMcpService:
         sub = self.store.get_submission(submission_id)
         if sub is None:
             raise ServiceError(f"Submission '{submission_id}' not found", status_code=404)
-        if action not in {"reject", "approve", "approve_override"}:
-            raise ServiceError("action must be 'reject', 'approve', or 'approve_override'", status_code=400)
+        if action not in {"reject", "approve", "approve_override", "rerun"}:
+            raise ServiceError("action must be 'reject', 'approve', 'approve_override', or 'rerun'", status_code=400)
         if ctx.tier != "ADMIN":
             # agent_admin can only approve/reject non-self pending_review submissions
-            if action == "approve_override" or sub["status"] != "pending_review":
+            if action in {"approve_override", "rerun"} or sub["status"] != "pending_review":
                 raise AuthError("Admin privileges required for this submission state or action", status_code=403)
             assert_not_self_review(ctx.actor_id, sub["author_actor_id"])
         if sub["status"] == "accepted":
@@ -3634,6 +3670,24 @@ class CollabMcpService:
                 f"Chapter '{sub['book_slug']}/{sub['chapter_id']}' is already accepted",
                 status_code=409,
             )
+        if action == "rerun":
+            self.store.update_submission(
+                submission_id,
+                workstream_id="",
+                round_number=0,
+                status="remediation_required",
+            )
+            _, sub_payload = self.submit_translation(
+                ctx,
+                book_slug=sub["book_slug"],
+                chapter_id=sub["chapter_id"],
+                translation_xml=sub["translation_xml"],
+                engine_model=sub["engine_model"],
+                additions=sub.get("additions"),
+                submission_id=submission_id,
+                hold_for_review=(str(book.get("approval_mode") or "auto") != "auto"),
+            )
+            return _sanitize_submission_public(sub_payload["submission"])
         if sub["workstream_id"]:
             self.review_client.approve_workstream(
                 workstream_id=sub["workstream_id"],
