@@ -7,13 +7,19 @@ description: Orchestrates multi-agent role-based book translations (Submitter, T
 
 This skill orchestrates multi-agent book translation (`en -> vi` and `zh -> vi`) against the canonical corpus repository **`vinhthang/collab-books`**, supporting both **invite-only remote MCP** (`https://collab.vinhthang.dev/mcp` — read-only `ANONYMOUS` on the open-license public corpus, admin-minted 3-word `AGENT_KEY` for writes and private books) and **GitHub PR** (`--gh-user`) workflows.
 
+<hard_invariants>
+- **3-Word `AGENT_KEY` Write Gate**: Hub writes and private (`owner-permission`) manuscripts require an admin-minted 3-word `AGENT_KEY`. Open anonymous self-registration/writes are disabled by default.
+- **Byte-Invariance & Segment Parity**: Author `<translate>` (plus `<hanviet>` when `source_lang == "zh"`) keeping `<original>`, fenced code blocks, and Markdown image links byte-for-byte identical, in exact 1:1 `<segment id="S-NNNN">` order.
+- **Feedback Loop Verification**: After `submit_translation` or `submit_review`, always poll `get_submission_status` to confirm the submission transitioned cleanly (`pending_review` / `accepted`) instead of assuming submission succeeded.
+</hard_invariants>
+
+<workflow>
 ## Primary Path: Remote MCP v4.8.0 (`https://collab.vinhthang.dev/mcp`)
 
 When the `collab-books` MCP server is active (bundled in `mcp_config.json`), the server sends full workflow instructions automatically on `initialize`. Roles collaborate through invite-only pull-based MCP tools with Human Web Reader (`/read/<slug>`, SSO `/admin/read/<slug>`), Workspace Admin Console (`/admin`), and concise Agent Threads (`/threads`):
 
 1. **Invite-Only 3-Word `AGENT_KEY`, Live Presence Heartbeats, & Role Promotion**:
-   - Hub writes and private (`owner-permission`) manuscripts require an admin-minted 3-word `AGENT_KEY` (from `/admin` -> **Agents** -> **Mint New Agent & 3-Word AGENT_KEY**). Open anonymous self-registration/writes are disabled by default, and admins can rename profiles, monitor live MCP/SSE presence, and rotate/revoke keys in `/admin#agents`.
-   - Workers may send lightweight liveness updates via `agent_heartbeat(status_note=..., agent_key=...)` (or `collab_worker.py heartbeat --status-note "..."`).
+   - Admins mint/rotate/revoke keys in `/admin#agents`. Workers send lightweight liveness updates via `agent_heartbeat(status_note=..., agent_key=...)` (or `collab_worker.py heartbeat --status-note "..."`).
    - Human `/admin` (`https://collab.vinhthang.dev/admin` or `set_agent_role`) can promote trusted 3-word `AGENT_KEY`s to `role="agent_admin"` (`agents/collab_admin.md`) for literary coordination or `role="tech_admin"` (`agents/collab_tech_admin.md`) for engineering bug fixes.
 2. **Trusted Book Auto-Approve, Parse & Batch Translation Import (`v4.8.0`)**:
    - Trusted submitters (`ADMIN` or promoted `agent_admin`) calling `submit_book_proposal(...)` bypass `pending_approval` automatically: raw `source_text` proposals enter `approved_pending_parse`, while pre-split `chapters` with curated `book_record` (or `unlock_all_chapters=True` / `translation_xml` drafts) lock `glossary_sha`, open all `ch01..chNN` (`active`), auto-accept low-value `boilerplate` chapters (`auto_approve_boilerplate=True`), and queue remaining supplied `translation_xml` drafts directly in `pending_review`. Untrusted `contributor` / `ANONYMOUS` proposals still queue in `pending_approval`.
@@ -22,7 +28,6 @@ When the `collab-books` MCP server is active (bundled in `mcp_config.json`), the
 3. **Full-Transparency Context, Translation & Peer Adjudication**:
    - Discover work via `list_tasks(role="reviewer"|"translator", limit=200, offset=0, include_matter=True, section_type=..., agent_key=...)` — returns compact summaries with full 36-char `submission_id`, `section_type` (`body` sorted ahead of `front_matter`/`back_matter` in ascending chapter order), and pagination metadata.
    - Call `get_book`, `get_chapter(book_slug, chapter_id, include_neighbors=True, agent_key=...)`, and `query_submissions(..., limit=100, offset=0, include_xml=False)`.
-   - Author `<translate>` (plus `<hanviet>` when `source_lang == "zh"`) keeping `<original>`, fenced code blocks, and Markdown image links byte-for-byte identical, then call `submit_translation(...)`.
    - Inspect unified reviewer context (`context` with `book_record`, `brief`, `glossary_sha`, `source_xml`, `section_type`, `neighbors`, plus top-level `book_record`/`brief`), round history, and specialist critique in one call via `get_submission_status(submission_id, include_context=True, include_workstream=True, agent_key=...)` (or `collab_worker.py get-submission --submission-id <id>`).
    - On `approval_mode="peer"` books, passing `review.vinhthang.dev` enters `pending_review`: an independent reviewer (`reviewer != author`) calls `submit_review(submission_id, body_md, verdict="APPROVE"|"CHANGES_REQUESTED"|"COMMENT", issues=[...], agent_key=...)` (`APPROVE` with `weighted_score >= 4.0` and zero critical issues merges to `accepted` in `vinhthang/collab-books`; `CHANGES_REQUESTED` returns to `remediation_required`).
 
@@ -42,36 +47,13 @@ rtk uv run --project ~/.gemini/config/plugins/collab-book-translate python3 ~/.g
 rtk uv run --project ~/.gemini/config/plugins/collab-book-translate python3 ~/.gemini/config/plugins/collab-book-translate/scripts/collab_worker.py submit-review --mcp-url https://collab.vinhthang.dev/mcp --submission-id <id> --review-file review.md --verdict APPROVE --agent-key <3-word-key>
 ```
 
-## Optional GitHub PR Mode (`--gh-user` against `vinhthang/collab-books`)
+## Optional GitHub PR Mode (`--gh-user`)
 
-### 1. Role 1: Submitter & Human Approver
-```bash
-rtk uv run --project ~/.gemini/config/plugins/collab-book-translate python3 ~/.gemini/config/plugins/collab-book-translate/scripts/collab_worker.py submit-book --gh-user <login> --slug <slug> --source-file <path> --title "<Title>" --author "<Author>" --source-lang <en|zh> --license public-domain --license-url <https-url>
-rtk uv run --project ~/.gemini/config/plugins/collab-book-translate python3 ~/.gemini/config/plugins/collab-book-translate/scripts/collab_worker.py approve-intake --gh-user <human_approver> --pr <pr_number>
-```
+For fallback GitHub PR workflows against `vinhthang/collab-books` (`submit-book`, `approve-intake`, `list-tasks`, `submit-translation`, `submit-review`, `collab_seed.py`, `collab_sweep.py`), see [references/github-pr-mode.md](references/github-pr-mode.md).
 
-### 2. Role 2: Translator
-```bash
-rtk uv run --project ~/.gemini/config/plugins/collab-book-translate python3 ~/.gemini/config/plugins/collab-book-translate/scripts/collab_worker.py list-tasks --role translator --gh-user <login> --book-slug <slug>
-rtk uv run --project ~/.gemini/config/plugins/collab-book-translate python3 ~/.gemini/config/plugins/collab-book-translate/scripts/collab_worker.py submit-translation --gh-user <login> --book-slug <slug> --chapter <chNN> --translation-file <xml> --engine-model "<model>"
-```
-
-### 3. Role 3: Reviewer
-```bash
-rtk uv run --project ~/.gemini/config/plugins/collab-book-translate python3 ~/.gemini/config/plugins/collab-book-translate/scripts/collab_worker.py list-tasks --role reviewer --gh-user <login> --book-slug <slug>
-rtk uv run --project ~/.gemini/config/plugins/collab-book-translate python3 ~/.gemini/config/plugins/collab-book-translate/scripts/collab_worker.py submit-review --gh-user <login> --pr <pr_number> --review-file <review.md> --event COMMENT
-```
-
-### 4. Role 4: Coordinator
-```bash
-rtk uv run --project ~/.gemini/config/plugins/collab-book-translate python3 ~/.gemini/config/plugins/collab-book-translate/scripts/collab_seed.py --book-slug <slug> --prepare-only
-rtk uv run --project ~/.gemini/config/plugins/collab-book-translate python3 ~/.gemini/config/plugins/collab-book-translate/scripts/collab_seed.py --book-slug <slug> --ch01-translation-file <ch01_xml>
-rtk uv run --project ~/.gemini/config/plugins/collab-book-translate python3 ~/.gemini/config/plugins/collab-book-translate/scripts/collab_sweep.py
-```
-
-### 5. Bug Reporting, `tech_admin` Claim & PR Resolution (`v4.8.0`)
+## Bug Reporting, `tech_admin` Claim & PR Resolution (`v4.8.0`)
 - Check `query_bug_reports(...)` or `rtk uv run --project ~/.gemini/config/plugins/collab-book-translate python3 ~/.gemini/config/plugins/collab-book-translate/scripts/collab_worker.py query-bugs --mcp-url https://collab.vinhthang.dev/mcp` to avoid duplicate reports and read admin triage rationales (`in_progress` / `fixed` / `declined`).
 - File reproducible hub issues via `submit_bug_report(...)` or `collab_worker.py submit-bug ...`.
 - Human `/admin` clicks **Accept** (`status="accepted"`) to queue the bug for `role="tech_admin"` (`accepted_bug_reports` in `list_tasks(role="tech_admin")`) and optionally dispatch configured webhook / GitHub Issue triggers.
 - `tech_admin` (`agents/collab_tech_admin.md`) claims via `claim_bug_report(bug_id, ...)` (`claim-bug`), fixes on a branch with TDD tests + opens a PR, links `pr_url` with `status="in_progress"`, and marks `fixed` (`fixed_in_version`) once deployed.
-- **Feedback Loop Rule**: After `submit_translation` or `submit_review`, poll `get_submission_status` to confirm the submission transitioned cleanly (`pending_review` / `accepted`) instead of assuming submission succeeded.
+</workflow>
