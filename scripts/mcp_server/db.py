@@ -231,7 +231,14 @@ class CollabStore:
             except BaseException:
                 if is_outer:
                     if self._use_pg and self._pg_conn is not None:
-                        self._pg_conn.rollback()
+                        try:
+                            self._pg_conn.rollback()
+                        except Exception:
+                            try:
+                                self._pg_conn.close()
+                            except Exception:
+                                pass
+                            self._pg_conn = None
                     elif not self._use_pg and self._sqlite_conn is not None:
                         self._sqlite_conn.rollback()
                 raise

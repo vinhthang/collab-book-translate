@@ -407,6 +407,19 @@ def test_req_082_admin_csrf_blocks_text_plain_and_cross_origin_browser_posts(tmp
                 headers=sso_hdr,
             )
             assert res_empty_cli.status_code == 200
+
+            # 4. Referer fallback on empty-body /admin* POST when Origin is omitted
+            res_cross_referer = client.post(
+                "/admin/api/purge-test-artifacts",
+                headers={**sso_hdr, "Referer": "https://evil.example/attack"},
+            )
+            assert res_cross_referer.status_code == 403
+
+            res_same_referer = client.post(
+                "/admin/api/purge-test-artifacts",
+                headers={**sso_hdr, "Referer": "https://collab.vinhthang.dev/admin"},
+            )
+            assert res_same_referer.status_code == 200
     finally:
         store.close()
 
@@ -453,51 +466,63 @@ def test_req_084_middleware_offloads_db_presence_to_worker_thread_and_deduplicat
             }
         ).encode("utf-8")
 
-        async def _call_mcp() -> tuple[int, int]:
+        async def _call_both() -> tuple[int, int, int, int, int]:
             loop_tid = threading.get_ident()
-            sent_body = False
-            status_code = 0
 
-            async def _receive() -> dict[str, Any]:
-                nonlocal sent_body
-                if not sent_body:
-                    sent_body = True
-                    return {"type": "http.request", "body": body, "more_body": False}
-                return {"type": "http.disconnect"}
+            async def _invoke(auth_header: str, port: int) -> int:
+                sent_body = False
+                status_code = 0
 
-            async def _send(msg: dict[str, Any]) -> None:
-                nonlocal status_code
-                if msg["type"] == "http.response.start":
-                    status_code = int(msg["status"])
+                async def _receive() -> dict[str, Any]:
+                    nonlocal sent_body
+                    if not sent_body:
+                        sent_body = True
+                        return {"type": "http.request", "body": body, "more_body": False}
+                    return {"type": "http.disconnect"}
 
-            scope = {
-                "type": "http",
-                "asgi": {"version": "3.0"},
-                "http_version": "1.1",
-                "method": "POST",
-                "scheme": "http",
-                "path": "/mcp",
-                "raw_path": b"/mcp",
-                "query_string": b"",
-                "headers": [
-                    (b"host", b"testserver"),
-                    (b"content-type", b"application/json"),
-                    (b"accept", b"application/json, text/event-stream"),
-                    (b"authorization", f"Bearer {raw_key}".encode("ascii")),
-                ],
-                "client": ("127.0.0.1", 50001),
-                "server": ("testserver", 80),
-            }
-            async with app.app.router.lifespan_context(app.app):
+                async def _send(msg: dict[str, Any]) -> None:
+                    nonlocal status_code
+                    if msg["type"] == "http.response.start":
+                        status_code = int(msg["status"])
+
+                scope = {
+                    "type": "http",
+                    "asgi": {"version": "3.0"},
+                    "http_version": "1.1",
+                    "method": "POST",
+                    "scheme": "http",
+                    "path": "/mcp",
+                    "raw_path": b"/mcp",
+                    "query_string": b"",
+                    "headers": [
+                        (b"host", b"testserver"),
+                        (b"content-type", b"application/json"),
+                        (b"accept", b"application/json, text/event-stream"),
+                        (b"authorization", auth_header.encode("ascii")),
+                    ],
+                    "client": ("127.0.0.1", port),
+                    "server": ("testserver", 80),
+                }
                 await app(scope, _receive, _send)
-            return status_code, loop_tid
+                return status_code
 
-        status, loop_tid = asyncio.run(_call_mcp())
+            async with app.app.router.lifespan_context(app.app):
+                status = await _invoke(f"Bearer {raw_key}", 50001)
+                good_gets = len(get_threads)
+                good_touches = len(touch_threads)
+                assert good_gets == 1, f"Expected single DB get_agent_by_key call, saw {good_gets}"
+                assert good_touches == 1, f"Expected single DB touch_agent_last_seen call, saw {good_touches}"
+                assert get_threads[0] != loop_tid, "get_agent_by_key ran directly on asyncio event loop thread"
+                assert touch_threads[0] != loop_tid, "touch_agent_last_seen ran directly on asyncio event loop thread"
+                get_threads.clear()
+                bad_status = await _invoke("Bearer bad-unknown-token", 50002)
+                bad_gets = len(get_threads)
+                return status, good_gets, good_touches, bad_status, bad_gets
+
+        status, _, _, bad_status, bad_gets = asyncio.run(_call_both())
         assert status == 200
-        assert len(get_threads) == 1, f"Expected single DB get_agent_by_key call, saw {len(get_threads)}"
-        assert len(touch_threads) == 1, f"Expected single DB touch_agent_last_seen call, saw {len(touch_threads)}"
-        assert get_threads[0] != loop_tid, "get_agent_by_key ran directly on asyncio event loop thread"
-        assert touch_threads[0] != loop_tid, "touch_agent_last_seen ran directly on asyncio event loop thread"
+        assert bad_status == 200
+        assert bad_gets == 1, f"Expected single DB get_agent_by_key on invalid Bearer, saw {bad_gets}"
     finally:
         store.close()
 
@@ -1029,6 +1054,10 @@ def test_req_085_admin_retry_seed_passes_boolean_true_and_ci_dockerfile_contract
     assert "if: github.event_name != 'pull_request'" in ci_text
     assert "v0.9.1" in ci_text
     assert "VERIFIED_PKG" in ci_text
+    assert 'python-version: "3.12"' in ci_text
+    assert "libharfbuzz-subset0" in ci_text
+    assert "timeout-minutes:" in ci_text
+    assert "contents: read" in ci_text
 
     df_text = (repo_root / "Dockerfile").read_text(encoding="utf-8")
     assert "uv.lock" in df_text
@@ -1135,5 +1164,286 @@ def test_req_086_lazy_extractors_pymupdf_free_worker_zero_cycles_and_v480_invite
     assert "v4.8.0" in readme_text
     assert "Invite-Only" in readme_text or "admin-minted" in readme_text
     assert "Zero-Account Agent Onboarding" not in readme_text
+
+    skill_text = (repo_root / "skills" / "collab-translate-book" / "SKILL.md").read_text(encoding="utf-8")
+    assert "zero-credential remote MCP" not in skill_text
+    assert "collab_worker.py submit-translation" in skill_text
+    sub_line = [ln for ln in skill_text.splitlines() if "collab_worker.py submit-translation" in ln][0]
+    assert "--agent-key" in sub_line
+
+
+def test_p1_sanitize_html_for_mupdf_preserves_body_prose_and_code_blocks() -> None:
+    """PR #30 P1 #4: _sanitize_html_for_mupdf strips CSS only inside <style> blocks, preserving body/code text."""
+    from scripts.compile_pdf import _sanitize_html_for_mupdf
+
+    html_in = (
+        "<!DOCTYPE html><html><head><style>\n"
+        "@page :right { margin: 1cm; @top-right { content: string(chapter-title); } }\n"
+        "h1 { bookmark-level: 1; page-break-before: always; break-inside: avoid; color: #111; }\n"
+        ".toc a::after { content: leader('.') ' ' target-counter(attr(href), page); }\n"
+        "</style></head><body>\n"
+        "<p>Use page-break-before: always; and leader('.') in CSS tutorials.</p>\n"
+        "<pre><code>break-inside: avoid; string-set: title; bookmark-level: 1;</code></pre>\n"
+        "</body></html>"
+    )
+    cleaned = _sanitize_html_for_mupdf(html_in)
+    style_part = cleaned.split("<style>", 1)[1].split("</style>", 1)[0]
+    body_part = cleaned.split("<body>", 1)[1].split("</body>", 1)[0]
+
+    assert "@page" not in style_part
+    assert "page-break-before" not in style_part
+    assert "color: #111;" in style_part
+    assert "Use page-break-before: always; and leader('.') in CSS tutorials." in body_part
+    assert "break-inside: avoid; string-set: title; bookmark-level: 1;" in body_part
+
+
+def test_p1_pg_transaction_rollback_failure_preserves_original_error_and_resets_conn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR #30 P1 #3: Dead PG rollback inside transaction() resets _pg_conn and propagates original error."""
+    import sys
+    import types
+    from scripts.mcp_server.config import McpServerConfig
+    from scripts.mcp_server.db import CollabStore
+
+    conns: list[Any] = []
+
+    class FakePsycopg:
+        class OperationalError(Exception):
+            pass
+
+        class InterfaceError(Exception):
+            pass
+
+        @staticmethod
+        def connect(dsn: str, row_factory=None):
+            idx = len(conns)
+
+            class DeadRollbackConn:
+                closed = False
+                broken = False
+
+                def cursor(self):
+                    return type(
+                        "Cur",
+                        (),
+                        {
+                            "__enter__": lambda s: s,
+                            "__exit__": lambda s, *a: False,
+                            "execute": lambda s, sql, p=(): None,
+                            "fetchone": lambda s: {"ok": idx + 1},
+                            "fetchall": lambda s: [],
+                        },
+                    )()
+
+                def commit(self):
+                    pass
+
+                def rollback(self):
+                    if idx == 0:
+                        raise FakePsycopg.OperationalError("socket closed during rollback")
+
+                def close(self):
+                    self.closed = True
+
+            c = DeadRollbackConn()
+            conns.append(c)
+            return c
+
+    fake_psycopg = types.ModuleType("psycopg")
+    fake_psycopg.OperationalError = FakePsycopg.OperationalError  # type: ignore[attr-defined]
+    fake_psycopg.InterfaceError = FakePsycopg.InterfaceError  # type: ignore[attr-defined]
+    fake_psycopg.connect = FakePsycopg.connect  # type: ignore[attr-defined]
+    fake_rows = types.ModuleType("psycopg.rows")
+    fake_rows.dict_row = lambda x: x  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "psycopg", fake_psycopg)
+    monkeypatch.setitem(sys.modules, "psycopg.rows", fake_rows)
+
+    pg_cfg = McpServerConfig(
+        database_url="postgresql://user:pass@localhost:5432/collab",
+        sqlite_path=tmp_path / "unused.sqlite3",
+        books_repo_dir=tmp_path / "books_pg_rb",
+        books_repo_full_name="vinhthang/collab-books",
+        review_server_url="",
+        review_bearer_token="",
+        collab_admin_token="adm",
+        admin_emails=frozenset({"admin@example.com"}),
+        trust_admin_sso_header=True,
+        github_token="",
+        bot_git_name="bot",
+        bot_git_email="bot@example.invalid",
+    )
+    pg_store = CollabStore(pg_cfg)
+    try:
+        with pytest.raises(ValueError, match="original constraint failure"):
+            with pg_store.transaction():
+                pg_store._exec("UPDATE books SET status = ? WHERE slug = ?", ("active", "b1"))
+                raise ValueError("original constraint failure")
+        assert conns[0].closed is True
+        assert pg_store._pg_conn is None
+
+        # Next call recovers cleanly on a fresh PG connection
+        row = pg_store._exec("SELECT 1", (), fetchone=True)
+        assert row == {"ok": 2}
+        assert len(conns) == 2
+    finally:
+        pg_store.close()
+
+
+def test_p1_acceptance_releases_db_lock_during_git_and_survives_release_upload_error_and_git_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR #30 P1 #2 & P2 #3: No transaction/lock held across git_sync or release compile; git timeout=120; auto-accept preserves submission."""
+    import httpx
+    import subprocess as _sp
+    from scripts.mcp_server.auth import AuthContext
+    from scripts.mcp_server.config import McpServerConfig
+    from scripts.mcp_server.db import CollabStore
+    from scripts.mcp_server.git_sync import CollabBooksGitSync
+    from scripts.mcp_server.service import CollabMcpService
+    from tests.test_mcp_service_and_app import FakeReviewServerClient, _init_git_books_repo
+
+    work_repo, _ = _init_git_books_repo(tmp_path)
+    cfg = McpServerConfig(
+        database_url="",
+        sqlite_path=tmp_path / "collab.sqlite3",
+        books_repo_dir=work_repo,
+        books_repo_full_name="owner/collab-books",
+        review_server_url="https://review.example.invalid",
+        review_bearer_token="",
+        collab_admin_token="adm",
+        admin_emails=frozenset({"admin@example.com"}),
+        trust_admin_sso_header=True,
+        github_token="ghp_test",
+        bot_git_name="collab-bot",
+        bot_git_email="bot@example.invalid",
+    )
+    store = CollabStore(cfg)
+    store.init_db()
+    git_sync = CollabBooksGitSync(cfg)
+    service = CollabMcpService(cfg=cfg, store=store, review_client=FakeReviewServerClient(), git_sync=git_sync)
+
+    try:
+        # 1. Verify _run_git passes timeout=120
+        seen_timeouts: list[Any] = []
+        orig_sp_run = _sp.run
+
+        def _spy_run(cmd, *args, **kwargs):
+            seen_timeouts.append(kwargs.get("timeout"))
+            return type("R", (), {"stdout": "ok\n", "returncode": 0})()
+
+        monkeypatch.setattr("scripts.mcp_server.git_sync.subprocess.run", _spy_run)
+        git_sync._run_git(["status"])
+        assert seen_timeouts == [120]
+        monkeypatch.setattr("scripts.mcp_server.git_sync.subprocess.run", orig_sp_run)
+
+        # 2. Final chapter acceptance releases DB lock during git_sync and keeps DB accepted if release upload fails
+        store.upsert_book(
+            slug="pub-release-split",
+            title="Pub Release Split",
+            author="Author",
+            source_lang="en",
+            target_lang="vi",
+            genre="fiction",
+            license_id="CC-BY-4.0",
+            license_url="https://creativecommons.org/licenses/by/4.0/",
+            status="active",
+            glossary_sha="abc",
+            book_record={"characters": {}, "terms": {}, "pronoun_pairs": []},
+            manifest={"chapters": [{"chapter_id": "ch01", "title": "Ch 1"}]},
+            proposed_by="admin",
+            approval_mode="peer",
+        )
+        store.upsert_chapter(
+            book_slug="pub-release-split",
+            chapter_id="ch01",
+            chapter_num=1,
+            title="Ch 1",
+            source_xml='<segment id="S-0001" type="p"><original>Hello</original></segment>',
+            status="open",
+        )
+        store.register_agent(handle="w-rel", display_name="W Rel", model_info="gpt")
+        store.register_agent(handle="r-rel", display_name="R Rel", model_info="gpt")
+        w_ctx = AuthContext(tier="AGENT_KEY", actor_id="agent:w-rel", handle="w-rel", client_ip_hash="w", agent_role="contributor")
+        r_ctx = AuthContext(tier="AGENT_KEY", actor_id="agent:r-rel", handle="r-rel", client_ip_hash="r", agent_role="contributor")
+
+        _, sub_payload = service.submit_translation(
+            w_ctx,
+            book_slug="pub-release-split",
+            chapter_id="ch01",
+            translation_xml='<segment id="S-0001" type="p"><original>Hello</original><translate>Xin chào</translate></segment>',
+        )
+        sub_id = sub_payload["submission"]["id"]
+
+        tx_depths_during_sync: list[int] = []
+        tx_depths_during_release: list[int] = []
+
+        def _fake_sync(**kwargs):
+            tx_depths_during_sync.append(store._tx_depth)
+
+        def _failing_release(**kwargs):
+            tx_depths_during_release.append(store._tx_depth)
+            req = httpx.Request("POST", "https://uploads.github.com/test")
+            raise httpx.HTTPStatusError("502 Bad Gateway", request=req, response=httpx.Response(502, request=req))
+
+        monkeypatch.setattr(git_sync, "sync_accepted_chapter", _fake_sync)
+        monkeypatch.setattr(git_sync, "compile_and_publish_release", _failing_release)
+
+        with pytest.raises(httpx.HTTPStatusError):
+            service.submit_review(
+                r_ctx,
+                submission_id=sub_id,
+                verdict="APPROVE",
+                body_md="S-0001 accurate.\n- Fidelity: 4.9\n- Fluency: 4.8\n- Terminology: 4.9\n- Register: 4.8\n- Structure: 5.0\n- Completeness: 5.0\n",
+            )
+        assert tx_depths_during_sync == [0], f"Expected tx_depth=0 during git push, saw {tx_depths_during_sync}"
+        assert tx_depths_during_release == [0], f"Expected tx_depth=0 during release upload, saw {tx_depths_during_release}"
+        # Git push already succeeded -> DB chapter and submission MUST stay accepted
+        assert store.get_chapter("pub-release-split", "ch01")["status"] == "accepted"  # type: ignore[index]
+        assert store.get_submission(sub_id)["status"] == "accepted"  # type: ignore[index]
+
+        # 3. Auto-accept git push failure preserves submission draft instead of losing translated round
+        store.upsert_book(
+            slug="auto-preserve",
+            title="Auto Preserve",
+            author="Author",
+            source_lang="en",
+            target_lang="vi",
+            genre="fiction",
+            license_id="CC-BY-4.0",
+            license_url="https://creativecommons.org/licenses/by/4.0/",
+            status="active",
+            glossary_sha="abc",
+            book_record={"characters": {}, "terms": {}, "pronoun_pairs": []},
+            manifest={"chapters": [{"chapter_id": "ch01", "title": "Ch 1"}]},
+            proposed_by="admin",
+            approval_mode="auto",
+        )
+        store.upsert_chapter(
+            book_slug="auto-preserve",
+            chapter_id="ch01",
+            chapter_num=1,
+            title="Ch 1",
+            source_xml='<segment id="S-0001" type="p"><original>Hello</original></segment>',
+            status="open",
+        )
+
+        def _failing_git(**kwargs):
+            raise RuntimeError("git remote timeout")
+
+        monkeypatch.setattr(git_sync, "sync_accepted_chapter", _failing_git)
+        with pytest.raises(RuntimeError, match="git remote timeout"):
+            service.submit_translation(
+                w_ctx,
+                book_slug="auto-preserve",
+                chapter_id="ch01",
+                translation_xml='<segment id="S-0001" type="p"><original>Hello</original><translate>Xin chào</translate></segment>',
+            )
+        assert store.get_chapter("auto-preserve", "ch01")["status"] == "open"  # type: ignore[index]
+        saved_subs = store.list_submissions(book_slug="auto-preserve", chapter_id="ch01")
+        assert len(saved_subs) == 1
+        assert saved_subs[0]["status"] == "pending_admin_approval"
+    finally:
+        store.close()
 
 

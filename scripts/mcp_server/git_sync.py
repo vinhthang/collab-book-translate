@@ -91,6 +91,7 @@ class CollabBooksGitSync:
                 check=True,
                 capture_output=True,
                 text=True,
+                timeout=120,
             )
             return res.stdout.strip()
         finally:

@@ -82,6 +82,22 @@ Governing specification: [spec.md](./spec.md)
     - `scripts/mcp_server/git_sync.py`: `80.0%` (`8/10` killed)
     - `scripts/mcp_server/app.py`: `80.0%` (`12/15` killed)
 
+### Run 2 — 2026-11-28
+
+- **Trigger / Context**: Verification after addressing PR #30 review comments (4 P1 + 4 P2 findings) on `feat/v4.8.0-security-scalability-hardening` before push.
+- **Checks Executed**:
+  - Targeted hardening, pre-push, and hygiene suites: `.venv/bin/pytest tests/test_mcp_v480_hardening.py tests/test_pre_push_collab_review_fixes.py tests/test_option_a_hygiene.py` -> **PASS (`24 passed in 3.99s`)**
+  - Full test suite: `.venv/bin/pytest -q` -> **PASS (`379 passed in 26.99s`)**
+  - Architectural boundaries: `arch-guard/scripts/check_boundaries.py` -> **PASS (`Scanned 94 Python file(s)`, zero boundary/layer/cycle violations)**
+  - Spec conformance: `spec-driven/scripts/validate_specs.py --all docs/specs` -> **PASS (`OK (17 package(s) validated, stage=full)`)**
+  - Whitespace / conflict check: `git diff --check` -> **PASS (`exit code 0`)**
+  - Mutation testing (`mutation-guard/scripts/mutation_runner.py --test-cmd ".venv/bin/pytest -q tests/test_mcp_v480_hardening.py" --max-mutants 15`):
+    - `scripts/mcp_server/db.py`: **86.7% (`13/15` killed)**
+    - `scripts/mcp_server/auth.py`: **86.7% (`13/15` killed)**
+    - `scripts/mcp_server/git_sync.py`: **90.0% (`9/10` killed)**
+    - `scripts/mcp_server/app.py`: `40.0%` (`6/15` killed; capped at first 15 candidate sites at L93-277)
+    - `scripts/compile_pdf.py` (`0/15` on L27-422) & `scripts/mcp_server/service.py` (`0/15` on L122-337): `mutation_runner.py` `--max-mutants 15` sampled header helpers rather than the edited `_sanitize_html_for_mupdf` / `_finalize_accepted_chapter` regions covered directly by `tests/test_mcp_v480_hardening.py`.
+
 ## Real-world observations
 
 Implemented and committed on feature branch `feat/v4.8.0-security-scalability-hardening` (`A3`: merge to `main` and live OCI `arm10` `v0.9.1` deployment deferred for human review).

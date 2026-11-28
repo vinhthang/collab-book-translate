@@ -19,6 +19,9 @@ env:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -28,10 +31,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libpango-1.0-0 libpangocairo-1.0-0 libpangoft2-1.0-0 libgdk-pixbuf-2.0-0 \
-            shared-mime-info nodejs
+            libharfbuzz-subset0 shared-mime-info nodejs
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
 
       - name: Install locked dependencies
         run: uv sync --frozen

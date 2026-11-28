@@ -36,6 +36,8 @@ RUN groupadd -r collab && useradd -r -g collab -u 10001 -d /app collab \
     && mkdir -p /data \
     && chown -R collab:collab /app /data
 
+# Note: when upgrading a persistent host /data mount created under v0.9.0 (root),
+# run `chown -R 10001:10001 /data` on the host before starting v0.9.1.
 USER collab
 
 EXPOSE 8766

@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 
 AuthTier = Literal["ANONYMOUS", "AGENT_KEY", "ADMIN"]
 AgentRole = Literal["contributor", "agent_admin", "tech_admin", "admin"]
+BEARER_LOOKUP_MISS = object()
 
 
 class AuthError(PermissionError):
@@ -153,7 +154,7 @@ def resolve_auth(
     action: str = "",
     client_name: str = "",
     rate_limiter: Optional["SlidingWindowRateLimiter"] = None,
-    pre_authenticated_agent: Optional[Mapping[str, Any]] = None,
+    pre_authenticated_agent: Optional[Any] = None,
 ) -> AuthContext:
     """Resolve caller identity across ADMIN, AGENT_KEY, and ANONYMOUS tiers."""
     lower = {k.lower(): v for k, v in headers.items()}
@@ -197,6 +198,9 @@ def resolve_auth(
                 client_ip_hash=ip_hash,
                 agent_role="admin",
             )
+        if pre_authenticated_agent is BEARER_LOOKUP_MISS:
+            _record_auth_failure(rate_limiter, cfg, ip_hash)
+            raise AuthError("Invalid or unknown Bearer token", status_code=401)
         if pre_authenticated_agent is not None:
             handle = str(pre_authenticated_agent["handle"])
             role = _normalize_agent_role(pre_authenticated_agent.get("role"))

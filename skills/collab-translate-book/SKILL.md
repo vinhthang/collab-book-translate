@@ -5,7 +5,7 @@ description: Orchestrates multi-agent role-based book translations (Submitter, T
 
 # Collab Translate Book Skill
 
-This skill orchestrates multi-agent book translation (`en -> vi` and `zh -> vi`) against the canonical corpus repository **`vinhthang/collab-books`**, supporting both **zero-credential remote MCP** (`https://collab.vinhthang.dev/mcp`) and **GitHub PR** (`--gh-user`) workflows.
+This skill orchestrates multi-agent book translation (`en -> vi` and `zh -> vi`) against the canonical corpus repository **`vinhthang/collab-books`**, supporting both **invite-only remote MCP** (`https://collab.vinhthang.dev/mcp` — read-only `ANONYMOUS` on the open-license public corpus, admin-minted 3-word `AGENT_KEY` for writes and private books) and **GitHub PR** (`--gh-user`) workflows.
 
 ## Primary Path: Remote MCP v4.8.0 (`https://collab.vinhthang.dev/mcp`)
 
@@ -36,7 +36,7 @@ rtk uv run --project ~/.gemini/config/plugins/collab-book-translate python3 ~/.g
 rtk uv run --project ~/.gemini/config/plugins/collab-book-translate python3 ~/.gemini/config/plugins/collab-book-translate/scripts/collab_worker.py submit-book-parse --mcp-url https://collab.vinhthang.dev/mcp --book-slug <slug> --parse-file parse_pkg.json --agent-key <3-word-key>
 rtk uv run --project ~/.gemini/config/plugins/collab-book-translate python3 ~/.gemini/config/plugins/collab-book-translate/scripts/collab_worker.py import-translations --mcp-url https://collab.vinhthang.dev/mcp --book-slug <slug> --import-file import_pkg.json --agent-key <3-word-key>
 rtk uv run --project ~/.gemini/config/plugins/collab-book-translate python3 ~/.gemini/config/plugins/collab-book-translate/scripts/collab_worker.py get-chapter --mcp-url https://collab.vinhthang.dev/mcp --book-slug <slug> --chapter ch02 --output-file ch02_source.xml
-rtk uv run --project ~/.gemini/config/plugins/collab-book-translate python3 ~/.gemini/config/plugins/collab-book-translate/scripts/collab_worker.py submit-translation --mcp-url https://collab.vinhthang.dev/mcp --book-slug <slug> --chapter ch02 --translation-file ch02_vi.xml --engine-model "<model>"
+rtk uv run --project ~/.gemini/config/plugins/collab-book-translate python3 ~/.gemini/config/plugins/collab-book-translate/scripts/collab_worker.py submit-translation --mcp-url https://collab.vinhthang.dev/mcp --book-slug <slug> --chapter ch02 --translation-file ch02_vi.xml --engine-model "<model>" --agent-key <3-word-key>
 rtk uv run --project ~/.gemini/config/plugins/collab-book-translate python3 ~/.gemini/config/plugins/collab-book-translate/scripts/collab_worker.py query-submissions --mcp-url https://collab.vinhthang.dev/mcp --book-slug <slug> --limit 100
 rtk uv run --project ~/.gemini/config/plugins/collab-book-translate python3 ~/.gemini/config/plugins/collab-book-translate/scripts/collab_worker.py get-submission --mcp-url https://collab.vinhthang.dev/mcp --submission-id <id> --agent-key <3-word-key>
 rtk uv run --project ~/.gemini/config/plugins/collab-book-translate python3 ~/.gemini/config/plugins/collab-book-translate/scripts/collab_worker.py submit-review --mcp-url https://collab.vinhthang.dev/mcp --submission-id <id> --review-file review.md --verdict APPROVE --agent-key <3-word-key>

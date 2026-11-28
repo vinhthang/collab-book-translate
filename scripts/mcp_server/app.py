@@ -31,7 +31,13 @@ from scripts.mcp_server.admin_ui import (
     _render_admin_proposal_card,
     _render_admin_submission_card,
 )
-from scripts.mcp_server.auth import AuthContext, AuthError, RateLimitError, resolve_auth
+from scripts.mcp_server.auth import (
+    BEARER_LOOKUP_MISS,
+    AuthContext,
+    AuthError,
+    RateLimitError,
+    resolve_auth,
+)
 from scripts.mcp_server.config import McpServerConfig, load_mcp_server_config
 from scripts.mcp_server.db import CollabStore
 from scripts.mcp_server.git_sync import PUBLIC_CORPUS_LICENSES, CollabBooksGitSync, is_public_corpus_book
@@ -58,7 +64,7 @@ _REQ_MCP_CLIENT: contextvars.ContextVar[str] = contextvars.ContextVar(
     "collab_req_mcp_client",
     default="",
 )
-_REQ_BEARER_AGENT: contextvars.ContextVar[Optional[dict[str, Any]]] = contextvars.ContextVar(
+_REQ_BEARER_AGENT: contextvars.ContextVar[Any] = contextvars.ContextVar(
     "collab_req_bearer_agent",
     default=None,
 )
@@ -86,15 +92,21 @@ def _assert_admin_csrf_headers(hdrs: Mapping[str, str], public_base_url: str = "
     sec_fetch_site = str(hdrs.get("sec-fetch-site") or "").strip().lower()
     if sec_fetch_site == "cross-site":
         raise AuthError("Cross-site request blocked on admin route", status_code=403)
+    allowed_netlocs = {
+        str(hdrs.get("host") or "").strip().lower(),
+        urlparse(public_base_url or "").netloc.lower(),
+    } - {""}
     origin = str(hdrs.get("origin") or "").strip()
     if origin:
         origin_netloc = urlparse(origin).netloc.lower()
-        allowed_netlocs = {
-            str(hdrs.get("host") or "").strip().lower(),
-            urlparse(public_base_url or "").netloc.lower(),
-        } - {""}
         if not origin_netloc or (allowed_netlocs and origin_netloc not in allowed_netlocs):
             raise AuthError("Cross-origin request blocked on admin route", status_code=403)
+        return
+    referer = str(hdrs.get("referer") or "").strip()
+    if referer:
+        ref_netloc = urlparse(referer).netloc.lower()
+        if not ref_netloc or (allowed_netlocs and ref_netloc not in allowed_netlocs):
+            raise AuthError("Cross-origin Referer blocked on admin route", status_code=403)
 
 
 async def _send_json_asgi(send: Any, status_code: int, payload: dict[str, Any]) -> None:
@@ -129,7 +141,8 @@ class RequestContextMiddleware:
         action: str,
         client_name: str,
         touch: bool = True,
-    ) -> Optional[dict[str, Any]]:
+        cache_miss: bool = False,
+    ) -> Optional[Any]:
         if self._store is None:
             return None
         auth_h = str(hdrs.get("authorization") or "").strip()
@@ -143,7 +156,7 @@ class RequestContextMiddleware:
         except Exception:
             return None
         if agent is None:
-            return None
+            return BEARER_LOOKUP_MISS if cache_miss else None
         if touch:
             self._store.touch_agent_last_seen(
                 str(agent["handle"]),
@@ -179,7 +192,7 @@ class RequestContextMiddleware:
         eff_receive = receive
         mcp_action = ""
         mcp_client = ua
-        bearer_agent: Optional[dict[str, Any]] = None
+        bearer_agent: Any = None
 
         if (path == "/mcp" or path.startswith("/messages")) and method == "POST":
             chunks: list[bytes] = []
@@ -233,6 +246,7 @@ class RequestContextMiddleware:
                     action=mcp_action or "mcp-http",
                     client_name=mcp_client,
                     touch=True,
+                    cache_miss=True,
                 )
 
         sse_handle: Optional[str] = None
@@ -246,7 +260,7 @@ class RequestContextMiddleware:
                 client_name=ua,
                 touch=self._presence is not None,
             )
-            sse_handle = str(sse_agent["handle"]) if sse_agent else None
+            sse_handle = str(sse_agent["handle"]) if isinstance(sse_agent, Mapping) else None
             if sse_handle and self._presence is not None:
                 sse_conn_id = uuid.uuid4().hex[:12]
                 self._presence.open_connection(sse_handle, sse_conn_id, client_name=ua)

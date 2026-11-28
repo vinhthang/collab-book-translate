@@ -1238,14 +1238,23 @@ def _collect_anchor_pages(weasy_doc: Any, page_offset: int) -> Dict[str, int]:
 
 
 def _sanitize_html_for_mupdf(full_html: str) -> str:
-    """Strips WeasyPrint-specific CSS at-rules/properties unsupported by MuPDF Story."""
-    cleaned = re.sub(r"@page\s*(?::first)?\s*\{(?:[^{}]|\{[^{}]*\})*\}", "", full_html, flags=re.DOTALL)
-    cleaned = re.sub(
-        r"[^;{}\n]*(?:bookmark-level|bookmark-label|string-set|leader\(|target-counter\(|page-break-before|page-break-after|page-break-inside|break-before|break-after|break-inside)[^;{}\n]*;?",
-        "",
-        cleaned,
+    """Strips WeasyPrint-specific CSS at-rules/properties inside <style> blocks for MuPDF Story."""
+
+    def _clean_style(match: re.Match[str]) -> str:
+        css = re.sub(r"@page\s*(?::[a-z-]+)?\s*\{(?:[^{}]|\{[^{}]*\})*\}", "", match.group(2), flags=re.DOTALL)
+        css = re.sub(
+            r"[^;{}\n]*(?:bookmark-level|bookmark-label|string-set|leader\(|target-counter\(|page-break-before|page-break-after|page-break-inside|break-before|break-after|break-inside)[^;{}\n]*;?",
+            "",
+            css,
+        )
+        return f"{match.group(1)}{css}{match.group(3)}"
+
+    return re.sub(
+        r"(<style\b[^>]*>)(.*?)(</style>)",
+        _clean_style,
+        full_html,
+        flags=re.DOTALL | re.IGNORECASE,
     )
-    return cleaned
 
 
 def _render_pdf_with_pymupdf(

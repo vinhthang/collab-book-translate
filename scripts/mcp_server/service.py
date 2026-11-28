@@ -1497,27 +1497,28 @@ class CollabMcpService:
             and approval_mode != "manual"
             and str(ch_row.get("section_type") or "body") == "boilerplate"
         )
-        with self.store.transaction():
-            saved = self._persist_imported_submission(
-                ctx,
-                book_slug=book_slug,
-                chapter_id=str(ch_row["chapter_id"]),
-                translation_xml=translation_xml,
-                final_txt=final_txt,
-                engine_model=engine_model,
-                approval_mode=approval_mode,
-                existing_sub=existing_sub,
-                auto_accept=should_auto,
-            )
-            if should_auto:
-                fresh_book = self.store.get_book(book_slug)
-                if fresh_book is not None:
-                    self._finalize_accepted_chapter(
-                        book=fresh_book,
-                        ch=ch_row,
-                        submission=saved,
-                        default_reviewer="auto-boilerplate",
-                    )
+        saved = self._persist_imported_submission(
+            ctx,
+            book_slug=book_slug,
+            chapter_id=str(ch_row["chapter_id"]),
+            translation_xml=translation_xml,
+            final_txt=final_txt,
+            engine_model=engine_model,
+            approval_mode=approval_mode,
+            existing_sub=existing_sub,
+            auto_accept=False,
+        )
+        if should_auto:
+            fresh_book = self.store.get_book(book_slug)
+            if fresh_book is not None:
+                saved = self._finalize_accepted_chapter(
+                    book=fresh_book,
+                    ch=ch_row,
+                    submission=saved,
+                    default_reviewer="auto-boilerplate",
+                    mark_submission_accepted=True,
+                    final_txt=final_txt,
+                )
         return saved, should_auto
 
     def submit_book_proposal(
@@ -2427,50 +2428,52 @@ class CollabMcpService:
                 }
             )
 
-            with self.store.transaction():
-                if target_sub_id is None:
-                    saved = self.store.create_submission(
-                        book_slug=book_slug,
-                        chapter_id=chapter_id,
-                        author_actor_id=eff_ctx.actor_id,
-                        author_handle=eff_ctx.handle,
-                        author_ip_hash=ctx.client_ip_hash,
-                        engine_model=engine_model,
-                        status=sub_status,
-                        round_number=round_num,
-                        max_rounds=self.cfg.max_revise_rounds,
-                        workstream_id=ws_id,
-                        revision_token_sha256=rt_sha,
-                        translation_xml=translation_xml,
-                        final_txt=final_txt,
-                        additions=norm_additions,
-                        open_findings=round_res["openFindings"],
-                        security_flags=[],
-                        judge_summary=round_res["judgeSummary"],
-                        rounds_history=updated_history,
-                    )
-                else:
-                    saved = self.store.update_submission(
-                        target_sub_id,
-                        status=sub_status,
-                        round_number=round_num,
-                        workstream_id=ws_id,
-                        translation_xml=translation_xml,
-                        final_txt=final_txt,
-                        additions=norm_additions,
-                        open_findings=round_res["openFindings"],
-                        judge_summary=round_res["judgeSummary"],
-                        rounds_history=updated_history,
-                    )
+            persist_status = "pending_admin_approval" if sub_status == "accepted" else sub_status
+            if target_sub_id is None:
+                saved = self.store.create_submission(
+                    book_slug=book_slug,
+                    chapter_id=chapter_id,
+                    author_actor_id=eff_ctx.actor_id,
+                    author_handle=eff_ctx.handle,
+                    author_ip_hash=ctx.client_ip_hash,
+                    engine_model=engine_model,
+                    status=persist_status,
+                    round_number=round_num,
+                    max_rounds=self.cfg.max_revise_rounds,
+                    workstream_id=ws_id,
+                    revision_token_sha256=rt_sha,
+                    translation_xml=translation_xml,
+                    final_txt=final_txt,
+                    additions=norm_additions,
+                    open_findings=round_res["openFindings"],
+                    security_flags=[],
+                    judge_summary=round_res["judgeSummary"],
+                    rounds_history=updated_history,
+                )
+            else:
+                saved = self.store.update_submission(
+                    target_sub_id,
+                    status=persist_status,
+                    round_number=round_num,
+                    workstream_id=ws_id,
+                    translation_xml=translation_xml,
+                    final_txt=final_txt,
+                    additions=norm_additions,
+                    open_findings=round_res["openFindings"],
+                    judge_summary=round_res["judgeSummary"],
+                    rounds_history=updated_history,
+                )
 
-                if sub_status == "accepted":
-                    fresh_book = self.store.get_book(book_slug) or book
-                    fresh_ch = self.store.get_chapter(book_slug, chapter_id) or ch
-                    self._finalize_accepted_chapter(
-                        book=fresh_book,
-                        ch=fresh_ch,
-                        submission=saved,
-                    )
+            if sub_status == "accepted":
+                fresh_book = self.store.get_book(book_slug) or book
+                fresh_ch = self.store.get_chapter(book_slug, chapter_id) or ch
+                saved = self._finalize_accepted_chapter(
+                    book=fresh_book,
+                    ch=fresh_ch,
+                    submission=saved,
+                    mark_submission_accepted=True,
+                    final_txt=final_txt,
+                )
             return saved
 
         if background:
@@ -2558,9 +2561,12 @@ class CollabMcpService:
         ch: dict[str, Any],
         submission: dict[str, Any],
         default_reviewer: str = "admin-override",
-    ) -> None:
+        mark_submission_accepted: bool = False,
+        final_txt: Optional[str] = None,
+    ) -> dict[str, Any]:
         slug = book["slug"]
         chapter_id = ch["chapter_id"]
+        eff_final_txt = final_txt if final_txt is not None else str(submission.get("final_txt") or "")
         proposals = (submission.get("additions") or {}).get("proposals") or []
         updated_record = _merge_proposals_into_record(book["book_record"], proposals)
         glossary_sha = book["glossary_sha"]
@@ -2592,14 +2598,14 @@ class CollabMcpService:
             else 4.5
         )
 
-        # Sync Git BEFORE committing accepted DB rows so push failures roll back atomically cleanly.
+        # Sync Git BEFORE opening DB transaction so network Git I/O never holds store._lock.
         self.git_sync.sync_accepted_chapter(
             slug=slug,
             chapter_id=chapter_id,
             chapter_num=int(ch["chapter_num"]),
             source_xml=ch["source_xml"],
             translation_xml=submission["translation_xml"],
-            final_txt=submission["final_txt"],
+            final_txt=eff_final_txt,
             book_record=updated_record,
             brief=book.get("brief") or None,
             glossary_sha=glossary_sha,
@@ -2610,18 +2616,25 @@ class CollabMcpService:
             public_corpus=pub_corpus,
         )
 
+        result_sub = submission
         with self.store.transaction():
+            if mark_submission_accepted:
+                result_sub = self.store.update_submission(
+                    str(submission["id"]),
+                    status="accepted",
+                    final_txt=eff_final_txt,
+                )
             self.store.mark_chapter_accepted(
                 book_slug=slug,
                 chapter_id=chapter_id,
-                submission_id=submission["id"],
-                translation_xml=submission["translation_xml"],
-                final_txt=submission["final_txt"],
+                submission_id=str(result_sub["id"]),
+                translation_xml=result_sub["translation_xml"],
+                final_txt=eff_final_txt,
             )
             self.store.supersede_other_chapter_submissions(
                 book_slug=slug,
                 chapter_id=chapter_id,
-                accepted_submission_id=str(submission["id"]),
+                accepted_submission_id=str(result_sub["id"]),
             )
 
             # Unlock ch02..chNN if ch01 just finished seeding
@@ -2682,6 +2695,7 @@ class CollabMcpService:
                     release_tag=rel_info["release_tag"],
                     release_url=rel_info["release_url"],
                 )
+        return result_sub
 
     def query_submissions_page(
         self,
@@ -2979,13 +2993,13 @@ class CollabMcpService:
                             override_escalated=False,
                         )
                     final_txt = sub["final_txt"] or _render_final_txt(sub["translation_xml"])
-                    with self.store.transaction():
-                        latest_sub = self.store.update_submission(
-                            submission_id,
-                            status="accepted",
-                            final_txt=final_txt,
-                        )
-                        self._finalize_accepted_chapter(book=book, ch=ch, submission=latest_sub)
+                    latest_sub = self._finalize_accepted_chapter(
+                        book=book,
+                        ch=ch,
+                        submission=sub,
+                        mark_submission_accepted=True,
+                        final_txt=final_txt,
+                    )
         elif raw_v == "CHANGES_REQUESTED":
             can_return = sub["status"] in {"pending_review", "remediation_required"} or (
                 sub["status"] == "pending_admin_approval" and (app_mode == "peer" or ctx.tier == "ADMIN")
@@ -3626,13 +3640,13 @@ class CollabMcpService:
                 override_escalated=(sub["status"] not in {"pending_review", "pending_admin_approval"}),
             )
         final_txt = sub["final_txt"] or _render_final_txt(sub["translation_xml"])
-        with self.store.transaction():
-            updated = self.store.update_submission(
-                submission_id,
-                status="accepted",
-                final_txt=final_txt,
-            )
-            self._finalize_accepted_chapter(book=book, ch=ch, submission=updated)
+        updated = self._finalize_accepted_chapter(
+            book=book,
+            ch=ch,
+            submission=sub,
+            mark_submission_accepted=True,
+            final_txt=final_txt,
+        )
         return _sanitize_submission_public(updated)
 
     def publish_release(self, ctx: AuthContext, *, book_slug: str) -> dict[str, Any]:
