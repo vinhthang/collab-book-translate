@@ -452,9 +452,11 @@ document.querySelectorAll('.js-inspect-sub').forEach(btn => {
       const findings = (s.open_findings || []).map(f => (
         '<li><code>' + escHtml(f.severity || 'P1') + '</code> ' + escHtml(f.symptom || '') + '</li>'
       )).join('');
+      const rerunBtn = (s.status === 'escalated_to_admin' || s.status === 'remediation_required') ? '<button class="btn btn-sec js-drawer-manage" data-action="rerun">Re-run Review</button>' : '';
       const actBtns = (s.status !== 'accepted' && s.status !== 'rejected') ? (
         '<div class="btn-row">' +
         '<a class="btn btn-sec" href="/admin/read/' + escHtml(s.book_slug) + '/' + escHtml(s.chapter_id) + '">Open in Reader &rarr;</a>' +
+        rerunBtn +
         '<button class="btn js-drawer-manage" data-action="' + (s.status === 'pending_review' || s.status === 'pending_admin_approval' ? 'approve' : 'approve_override') + '">Approve &amp; Merge</button>' +
         '<button class="btn btn-danger js-drawer-manage" data-action="reject">Reject</button>' +
         '</div>'
@@ -1210,7 +1212,13 @@ def _render_admin_submission_card(s: dict[str, Any]) -> str:
     actions_html = ""
     if status_str not in {"accepted", "rejected"}:
         approve_action = "approve" if status_str in {"pending_review", "pending_admin_approval"} else "approve_override"
+        rerun_html = (
+            f'<button class="btn btn-sec btn-sm js-manage-sub" data-sub-id="{esc_id}" data-action="rerun" type="button">Re-run Review</button>'
+            if status_str in {"escalated_to_admin", "remediation_required"}
+            else ""
+        )
         actions_html = (
+            f'{rerun_html}'
             f'<button class="btn btn-sm js-manage-sub" data-sub-id="{esc_id}" data-action="{approve_action}">Approve &amp; Merge</button>'
             f'<button class="btn btn-danger btn-sm js-manage-sub" data-sub-id="{esc_id}" data-action="reject">Reject</button>'
         )
